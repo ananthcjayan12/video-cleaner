@@ -273,14 +273,22 @@ async function probe(sourcePath: string): Promise<MediaProfile> {
   const data = JSON.parse(stdout);
   const video = data.streams?.find((stream: any) => stream.codec_type === 'video') ?? {};
   const audio = data.streams?.find((stream: any) => stream.codec_type === 'audio') ?? {};
+  const rotation = Number(
+    video.side_data_list?.find((item: any) => item.side_data_type === 'Display Matrix')?.rotation
+      ?? video.tags?.rotate
+      ?? 0,
+  );
+  const swapsDisplayDimensions = Math.abs(rotation) % 180 === 90;
+  const codedWidth = Number(video.width) || undefined;
+  const codedHeight = Number(video.height) || undefined;
   const transfer = String(video.color_transfer ?? '').toLowerCase();
   const primaries = String(video.color_primaries ?? '').toLowerCase();
   const hdr = ['smpte2084', 'arib-std-b67'].includes(transfer) || primaries === 'bt2020';
   return {
     duration: Number(data.format?.duration ?? video.duration ?? 0),
     size: Number(data.format?.size ?? 0),
-    width: video.width,
-    height: video.height,
+    width: swapsDisplayDimensions ? codedHeight : codedWidth,
+    height: swapsDisplayDimensions ? codedWidth : codedHeight,
     frameRate: parseRate(video.avg_frame_rate || video.r_frame_rate),
     bitRate: Number(video.bit_rate ?? 0) || undefined,
     videoCodec: video.codec_name,
