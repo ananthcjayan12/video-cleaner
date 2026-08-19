@@ -17,6 +17,8 @@ type MediaProfile = {
   size: number;
   width?: number;
   height?: number;
+  frameRate?: number;
+  bitRate?: number;
   videoCodec?: string;
   audioCodec?: string;
   pixelFormat?: string;
@@ -43,11 +45,29 @@ type LocalSettings = {
   ffprobeBin?: string;
   projectsDir?: string;
 };
+type FfmpegCapabilities = {
+  videoToolboxDecode: boolean;
+  h264VideoToolbox: boolean;
+  hevcVideoToolbox: boolean;
+};
+type ExportJob = {
+  state: 'idle' | 'running' | 'completed' | 'failed';
+  progress: number;
+  outTime: string;
+  speed: string;
+  frame: number;
+  outputPath?: string;
+  encoder?: string;
+  error?: string;
+  startedAt?: number;
+};
 
 const CONFIG_DIR = path.join(os.homedir(), '.video-cleaner');
 const CONFIG_PATH = path.join(CONFIG_DIR, 'config.json');
 const app = express();
 const projects = new Map<string, Project>();
+const exportJobs = new Map<string, ExportJob>();
+const capabilityCache = new Map<string, FfmpegCapabilities>();
 let localSettings: LocalSettings = {};
 
 app.use(express.json({ limit: '1mb' }));
@@ -147,6 +167,27 @@ async function canRun(binary: string, args: string[]) {
   }
 }
 
+async function ffmpegCapabilities(ffmpegBin: string): Promise<FfmpegCapabilities> {
+  if (!ffmpegBin) return { videoToolboxDecode: false, h264VideoToolbox: false, hevcVideoToolbox: false };
+  const cached = capabilityCache.get(ffmpegBin);
+  if (cached) return cached;
+  try {
+    const [encoders, hwaccels] = await Promise.all([
+      run(ffmpegBin, ['-hide_banner', '-encoders'], undefined, 10000),
+      run(ffmpegBin, ['-hide_banner', '-hwaccels'], undefined, 10000),
+    ]);
+    const result = {
+      videoToolboxDecode: process.platform === 'darwin' && hwaccels.stdout.includes('videotoolbox'),
+      h264VideoToolbox: process.platform === 'darwin' && encoders.stdout.includes('h264_videotoolbox'),
+      hevcVideoToolbox: process.platform === 'darwin' && encoders.stdout.includes('hevc_videotoolbox'),
+    };
+    capabilityCache.set(ffmpegBin, result);
+    return result;
+  } catch {
+    return { videoToolboxDecode: false, h264VideoToolbox: false, hevcVideoToolbox: false };
+  }
+}
+
 async function systemStatus() {
   const settings = await resolvedSettings();
   const [codexInstalled, ffmpegInstalled, ffprobeInstalled] = await Promise.all([
@@ -154,12 +195,17 @@ async function systemStatus() {
     canRun(settings.ffmpegBin, ['-version']),
     canRun(settings.ffprobeBin, ['-version']),
   ]);
-  const codexAuthenticated = codexInstalled
-    ? await canRun(settings.codexBin, ['login', 'status'])
-    : false;
+  const [codexAuthenticated, capabilities] = await Promise.all([
+    codexInstalled ? canRun(settings.codexBin, ['login', 'status']) : Promise.resolve(false),
+    ffmpegInstalled ? ffmpegCapabilities(settings.ffmpegBin) : Promise.resolve({
+      videoToolboxDecode: false,
+      h264VideoToolbox: false,
+      hevcVideoToolbox: false,
+    }),
+  ]);
   return {
     codex: { installed: codexInstalled, authenticated: codexAuthenticated, path: settings.codexBin || null },
-    ffmpeg: { installed: ffmpegInstalled, path: settings.ffmpegBin || null },
+    ffmpeg: { installed: ffmpegInstalled, path: settings.ffmpegBin || null, capabilities },
     ffprobe: { installed: ffprobeInstalled, path: settings.ffprobeBin || null },
     elevenLabs: { configured: Boolean(settings.elevenLabsApiKey) },
     projectsDir: settings.projectsDir,
@@ -213,6 +259,13 @@ async function pickExportPath() {
   }
 }
 
+function parseRate(value: unknown) {
+  if (typeof value !== 'string' || !value) return 0;
+  if (!value.includes('/')) return Number(value) || 0;
+  const [numerator, denominator] = value.split('/').map(Number);
+  return denominator ? numerator / denominator : 0;
+}
+
 async function probe(sourcePath: string): Promise<MediaProfile> {
   const settings = await resolvedSettings();
   if (!settings.ffprobeBin) throw new Error('ffprobe was not found. Configure FFPROBE_BIN or install FFmpeg.');
@@ -220,12 +273,16 @@ async function probe(sourcePath: string): Promise<MediaProfile> {
   const data = JSON.parse(stdout);
   const video = data.streams?.find((stream: any) => stream.codec_type === 'video') ?? {};
   const audio = data.streams?.find((stream: any) => stream.codec_type === 'audio') ?? {};
-  const hdr = ['smpte2084', 'arib-std-b67'].includes(video.color_transfer);
+  const transfer = String(video.color_transfer ?? '').toLowerCase();
+  const primaries = String(video.color_primaries ?? '').toLowerCase();
+  const hdr = ['smpte2084', 'arib-std-b67'].includes(transfer) || primaries === 'bt2020';
   return {
     duration: Number(data.format?.duration ?? video.duration ?? 0),
     size: Number(data.format?.size ?? 0),
     width: video.width,
     height: video.height,
+    frameRate: parseRate(video.avg_frame_rate || video.r_frame_rate),
+    bitRate: Number(video.bit_rate ?? 0) || undefined,
     videoCodec: video.codec_name,
     audioCodec: audio.codec_name,
     pixelFormat: video.pix_fmt,
@@ -290,6 +347,116 @@ function rangesToSeconds(project: Project) {
   return merged;
 }
 
+function proxySize(media: MediaProfile, maxEdge = 720) {
+  const width = media.width || 1280;
+  const height = media.height || 720;
+  const even = (value: number) => Math.max(2, Math.round(value / 2) * 2);
+  if (width >= height) {
+    const targetWidth = Math.min(maxEdge, width);
+    return { width: even(targetWidth), height: even(height * targetWidth / width) };
+  }
+  const targetHeight = Math.min(maxEdge, height);
+  return { width: even(width * targetHeight / height), height: even(targetHeight) };
+}
+
+function defaultBitRate(media: MediaProfile, hevc: boolean) {
+  const pixels = (media.width || 1920) * (media.height || 1080);
+  const highFps = (media.frameRate || 30) > 35;
+  if (pixels >= 3840 * 2000) return hevc ? (highFps ? 70_000_000 : 45_000_000) : (highFps ? 95_000_000 : 65_000_000);
+  if (pixels >= 1920 * 1000) return hevc ? (highFps ? 25_000_000 : 16_000_000) : (highFps ? 35_000_000 : 22_000_000);
+  return hevc ? 10_000_000 : 14_000_000;
+}
+
+function exportBitRate(media: MediaProfile, hevc: boolean, mode: 'fast' | 'quality') {
+  const baseline = media.bitRate || defaultBitRate(media, hevc);
+  const floor = defaultBitRate(media, hevc);
+  const desired = mode === 'quality' ? Math.max(floor, baseline * 1.05) : Math.max(floor * 0.75, baseline * 0.78);
+  return Math.min(140_000_000, Math.round(desired));
+}
+
+function formatBitRate(value: number) {
+  return `${Math.max(1, Math.round(value / 1000))}k`;
+}
+
+function buildTimelineFilter(segments: Array<{ start: number; end: number }>, fps: number) {
+  const expression = segments
+    .map((segment) => `between(t\\,${segment.start.toFixed(6)}\\,${segment.end.toFixed(6)})`)
+    .join('+');
+  return [
+    `[0:v]select='${expression}',setpts=N/${fps.toFixed(6)}/TB[vout]`,
+    `[0:a]aselect='${expression}',asetpts=N/SR/TB[aout]`,
+  ].join(';');
+}
+
+function parseFfmpegTime(value: string) {
+  const parts = value.split(':').map(Number);
+  if (parts.length !== 3 || parts.some((part) => !Number.isFinite(part))) return 0;
+  return parts[0] * 3600 + parts[1] * 60 + parts[2];
+}
+
+function launchExport(projectId: string, command: string, args: string[], outputDuration: number, outputPath: string, encoder: string) {
+  const job: ExportJob = {
+    state: 'running',
+    progress: 0,
+    outTime: '00:00:00.000000',
+    speed: '',
+    frame: 0,
+    outputPath,
+    encoder,
+    startedAt: Date.now(),
+  };
+  exportJobs.set(projectId, job);
+
+  const child = spawn(command, ['-hide_banner', '-y', '-nostats', '-progress', 'pipe:1', ...args], {
+    shell: false,
+    windowsHide: true,
+  });
+  let stdoutBuffer = '';
+  let stderr = '';
+
+  const handleLine = (line: string) => {
+    const equals = line.indexOf('=');
+    if (equals < 0) return;
+    const key = line.slice(0, equals);
+    const value = line.slice(equals + 1);
+    if (key === 'out_time') {
+      job.outTime = value;
+      const seconds = parseFfmpegTime(value);
+      job.progress = outputDuration > 0 ? Math.min(99.5, Math.max(0, seconds / outputDuration * 100)) : 0;
+    } else if (key === 'speed') {
+      job.speed = value;
+    } else if (key === 'frame') {
+      job.frame = Number(value) || job.frame;
+    }
+  };
+
+  child.stdout.on('data', (chunk) => {
+    stdoutBuffer += chunk.toString();
+    let newline = stdoutBuffer.indexOf('\n');
+    while (newline >= 0) {
+      handleLine(stdoutBuffer.slice(0, newline).trim());
+      stdoutBuffer = stdoutBuffer.slice(newline + 1);
+      newline = stdoutBuffer.indexOf('\n');
+    }
+  });
+  child.stderr.on('data', (chunk) => {
+    stderr = `${stderr}${chunk.toString()}`.slice(-12000);
+  });
+  child.on('error', (error) => {
+    job.state = 'failed';
+    job.error = error.message;
+  });
+  child.on('close', (code) => {
+    if (code === 0) {
+      job.state = 'completed';
+      job.progress = 100;
+    } else if (job.state !== 'failed') {
+      job.state = 'failed';
+      job.error = stderr || `FFmpeg exited with code ${code}`;
+    }
+  });
+}
+
 function route(handler: (req: express.Request, res: express.Response) => Promise<void>) {
   return (req: express.Request, res: express.Response) => {
     handler(req, res).catch((error) => res.status(500).json({ error: error instanceof Error ? error.message : String(error) }));
@@ -321,6 +488,7 @@ app.put('/api/settings', route(async (req, res) => {
   for (const key of ['codexBin', 'ffmpegBin', 'ffprobeBin', 'projectsDir'] as const) {
     if (typeof body[key] === 'string') localSettings[key] = body[key].trim() || undefined;
   }
+  capabilityCache.clear();
   await saveSettings();
   res.json(await systemStatus());
 }));
@@ -348,21 +516,46 @@ app.post('/api/projects/:id/prepare', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id));
   const settings = await resolvedSettings();
   if (!settings.ffmpegBin) throw new Error('FFmpeg was not found. Configure FFMPEG_BIN or install FFmpeg.');
+
+  const capabilities = await ffmpegCapabilities(settings.ffmpegBin);
   const audioPath = path.join(project.workDir, 'analysis.m4a');
   const proxyPath = path.join(project.workDir, 'proxy.mp4');
-  const proxyEncoder = process.platform === 'darwin'
-    ? ['-c:v', 'h264_videotoolbox', '-b:v', '2500k']
-    : ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '27'];
+  const dimensions = proxySize(project.media);
+  const inputAcceleration = capabilities.videoToolboxDecode ? ['-hwaccel', 'videotoolbox'] : [];
+  const proxyEncoder = capabilities.h264VideoToolbox
+    ? [
+        '-c:v', 'h264_videotoolbox',
+        '-realtime', '1',
+        '-prio_speed', '1',
+        '-allow_sw', '1',
+        '-b:v', '1500k',
+        '-maxrate', '2500k',
+        '-bufsize', '4M',
+      ]
+    : ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '28'];
 
-  await Promise.all([
-    run(settings.ffmpegBin, ['-y', '-i', project.sourcePath, '-map', '0:a:0', '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'aac', '-b:a', '48k', audioPath]),
-    run(settings.ffmpegBin, ['-y', '-i', project.sourcePath, '-vf', 'scale=-2:720', ...proxyEncoder, '-c:a', 'aac', '-b:a', '96k', '-movflags', '+faststart', proxyPath]),
+  await run(settings.ffmpegBin, [
+    '-hide_banner', '-y', ...inputAcceleration,
+    '-i', project.sourcePath,
+    '-map', '0:v:0', '-map', '0:a:0',
+    '-vf', `scale=${dimensions.width}:${dimensions.height}:flags=fast_bilinear,fps=30,format=yuv420p`,
+    ...proxyEncoder,
+    '-c:a', 'aac', '-b:a', '96k',
+    '-movflags', '+faststart',
+    proxyPath,
+    '-map', '0:a:0',
+    '-vn', '-ac', '1', '-ar', '16000',
+    '-c:a', 'aac', '-b:a', '48k',
+    audioPath,
   ]);
 
   project.audioPath = audioPath;
   project.proxyPath = proxyPath;
   await saveProject(project);
-  res.json({ proxyUrl: `/api/projects/${project.id}/proxy` });
+  res.json({
+    proxyUrl: `/api/projects/${project.id}/proxy`,
+    proxy: { width: dimensions.width, height: dimensions.height, fps: 30, hardware: capabilities.h264VideoToolbox },
+  });
 }));
 
 app.get('/api/projects/:id/proxy', route(async (req, res) => {
@@ -376,6 +569,7 @@ app.post('/api/projects/:id/transcribe', route(async (req, res) => {
   const settings = await resolvedSettings();
   if (!project.audioPath) throw new Error('Prepare the project first');
   if (!settings.elevenLabsApiKey) throw new Error('ElevenLabs API key is not configured');
+
   const bytes = await fs.readFile(project.audioPath);
   const form = new FormData();
   form.append('model_id', 'scribe_v2');
@@ -387,6 +581,7 @@ app.post('/api/projects/:id/transcribe', route(async (req, res) => {
     body: form,
   });
   if (!response.ok) throw new Error(`ElevenLabs failed: ${response.status} ${await response.text()}`);
+
   const raw: any = await response.json();
   const words: Word[] = (raw.words ?? [])
     .filter((word: any) => word.type === 'word' && Number.isFinite(word.start) && Number.isFinite(word.end))
@@ -397,6 +592,7 @@ app.post('/api/projects/:id/transcribe', route(async (req, res) => {
       end: word.end,
     }));
   if (!words.length) throw new Error('No timestamped words returned by ElevenLabs');
+
   project.transcript = { text: raw.text ?? words.map((word) => word.text).join(' '), words };
   project.edl = { keepRanges: [{ startWordId: words[0].id, endWordId: words.at(-1)!.id, reason: 'Original recording' }], notes: [] };
   await Promise.all([
@@ -441,48 +637,93 @@ app.put('/api/projects/:id/edl', route(async (req, res) => {
 }));
 
 app.post('/api/projects/:id/export', route(async (req, res) => {
-  const project = getProject(routeParam(req.params.id));
+  const projectId = routeParam(req.params.id);
+  const project = getProject(projectId);
   const settings = await resolvedSettings();
   if (!project.transcript || !project.edl) throw new Error('Missing transcript or edit decision list');
   if (!settings.ffmpegBin) throw new Error('FFmpeg was not found');
+
+  const active = exportJobs.get(projectId);
+  if (active?.state === 'running') return void res.status(409).json({ error: 'An export is already running for this project' });
+
   const outputPath = await pickExportPath();
   if (!outputPath) return void res.status(400).json({ error: 'Export cancelled' });
-  const mode = req.body?.mode === 'quality' ? 'quality' : 'fast';
+
+  const mode: 'fast' | 'quality' = req.body?.mode === 'fast' ? 'fast' : 'quality';
   const segments = rangesToSeconds(project);
-  const chains: string[] = [];
-  const refs: string[] = [];
-  segments.forEach((segment, index) => {
-    chains.push(`[0:v]trim=start=${segment.start}:end=${segment.end},setpts=PTS-STARTPTS[v${index}]`);
-    chains.push(`[0:a]atrim=start=${segment.start}:end=${segment.end},asetpts=PTS-STARTPTS[a${index}]`);
-    refs.push(`[v${index}][a${index}]`);
-  });
-  chains.push(`${refs.join('')}concat=n=${segments.length}:v=1:a=1[vout][aout]`);
+  const outputDuration = segments.reduce((sum, segment) => sum + Math.max(0, segment.end - segment.start), 0);
+  const fps = project.media.frameRate && project.media.frameRate > 0 ? project.media.frameRate : 30;
+  const filter = buildTimelineFilter(segments, fps);
+  const capabilities = await ffmpegCapabilities(settings.ffmpegBin);
+  const sourceCodec = String(project.media.videoCodec || '').toLowerCase();
+  const useHevc = project.media.hdr || sourceCodec === 'hevc' || sourceCodec === 'h265';
+  const canHardwareEncode = useHevc ? capabilities.hevcVideoToolbox : capabilities.h264VideoToolbox;
+  const targetBitRate = exportBitRate(project.media, useHevc, mode);
 
   let videoArgs: string[];
-  if (project.media.hdr) {
-    videoArgs = mode === 'fast' && process.platform === 'darwin'
-      ? ['-c:v', 'hevc_videotoolbox', '-b:v', '45M', '-tag:v', 'hvc1']
-      : ['-c:v', 'libx265', '-preset', 'slow', '-crf', '14', '-pix_fmt', 'yuv420p10le', '-tag:v', 'hvc1'];
+  let encoder: string;
+  if (canHardwareEncode) {
+    encoder = useHevc ? 'hevc_videotoolbox' : 'h264_videotoolbox';
+    videoArgs = [
+      '-c:v', encoder,
+      '-realtime', '1',
+      '-allow_sw', '1',
+      ...(mode === 'fast' ? ['-prio_speed', '1'] : []),
+      '-b:v', formatBitRate(targetBitRate),
+      '-maxrate', formatBitRate(Math.round(targetBitRate * 1.2)),
+      '-bufsize', formatBitRate(Math.round(targetBitRate * 2)),
+      ...(useHevc ? ['-tag:v', 'hvc1'] : []),
+      ...(project.media.hdr && useHevc ? ['-profile:v', 'main10'] : []),
+    ];
+  } else if (useHevc) {
+    encoder = 'libx265';
+    videoArgs = [
+      '-c:v', 'libx265',
+      '-preset', mode === 'fast' ? 'veryfast' : 'fast',
+      '-crf', mode === 'fast' ? '19' : '16',
+      ...(project.media.hdr ? ['-pix_fmt', 'yuv420p10le', '-tag:v', 'hvc1'] : ['-tag:v', 'hvc1']),
+    ];
   } else {
-    videoArgs = mode === 'fast' && process.platform === 'darwin'
-      ? ['-c:v', 'h264_videotoolbox', '-b:v', '35M']
-      : mode === 'fast'
-        ? ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18']
-        : ['-c:v', 'libx264', '-preset', 'slow', '-crf', '16'];
+    encoder = 'libx264';
+    videoArgs = [
+      '-c:v', 'libx264',
+      '-preset', mode === 'fast' ? 'superfast' : 'veryfast',
+      '-crf', mode === 'fast' ? '19' : '17',
+    ];
   }
+
   const colorArgs: string[] = [];
   if (project.media.colorPrimaries) colorArgs.push('-color_primaries', project.media.colorPrimaries);
   if (project.media.colorTransfer) colorArgs.push('-color_trc', project.media.colorTransfer);
   if (project.media.colorSpace) colorArgs.push('-colorspace', project.media.colorSpace);
 
-  await run(settings.ffmpegBin, [
-    '-y', '-i', project.sourcePath,
-    '-filter_complex', chains.join(';'),
+  const inputAcceleration = capabilities.videoToolboxDecode ? ['-hwaccel', 'videotoolbox'] : [];
+  const args = [
+    ...inputAcceleration,
+    '-i', project.sourcePath,
+    '-filter_complex', filter,
     '-map', '[vout]', '-map', '[aout]',
-    ...videoArgs, ...colorArgs,
-    '-c:a', 'aac', '-b:a', '256k', '-movflags', '+faststart', outputPath,
-  ]);
-  res.json({ outputPath });
+    '-fps_mode', 'passthrough',
+    ...videoArgs,
+    ...colorArgs,
+    '-c:a', 'aac', '-b:a', '256k',
+    '-movflags', '+faststart',
+    outputPath,
+  ];
+
+  launchExport(projectId, settings.ffmpegBin, args, outputDuration, outputPath, encoder);
+  res.status(202).json({ started: true, outputPath, encoder, hardware: canHardwareEncode, targetBitRate });
+}));
+
+app.get('/api/projects/:id/export-status', route(async (req, res) => {
+  const projectId = routeParam(req.params.id);
+  res.json(exportJobs.get(projectId) ?? {
+    state: 'idle',
+    progress: 0,
+    outTime: '00:00:00.000000',
+    speed: '',
+    frame: 0,
+  });
 }));
 
 const PORT = Number(process.env.PORT || 3001);
