@@ -1,0 +1,29 @@
+{
+  "name": "video-cleaner",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "concurrently -k \"vite\" \"npm:dev:electron\"",
+    "dev:electron": "tsc -p tsconfig.electron.json --watch --preserveWatchOutput & wait-on tcp:5173 && electron .",
+    "build": "vite build && tsc -p tsconfig.electron.json",
+    "start": "electron .",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.electron.json --noEmit"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "latest",
+    "concurrently": "latest",
+    "electron": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "vite": "latest",
+    "wait-on": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "typescript": "latest"
+  }
+}
