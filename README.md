@@ -1,6 +1,6 @@
 # Video Cleaner
 
-Local-first talking-head video cleaner with semantic B-roll image generation, built with React + Vite and a lightweight Node.js service.
+Local-first talking-head video cleaner with semantic B-roll image/video generation, built with React + Vite and a lightweight Node.js service.
 
 ## Core architecture
 
@@ -8,42 +8,47 @@ The browser is only the editor UI. The local Node service owns filesystem access
 
 Dialogue cleaning remains non-destructive: FFmpeg creates a tiny analysis-audio file and optional 30 fps proxy, ElevenLabs provides word timestamps, Codex returns a delete-only EDL, and final export reads the untouched master once.
 
-## B-roll can run in three modes
+## B-roll workflows
 
 ### 1. Cleaned video -> B-roll -> final video
 
-Use the normal flow:
+`raw video -> proxy/audio -> transcript -> Codex cleanup -> B-roll -> final video`
 
-`raw video -> proxy/audio -> transcript -> Codex cleanup -> B-roll plan/images -> final video`
-
-B-roll scene timing is anchored to source timestamps. During final rendering the images are overlaid on the original timeline before the cleaned EDL is compacted, so timing stays aligned with the cleaned narration.
+B-roll timing is anchored to source timestamps. During final rendering the B-roll media is overlaid on the original timeline before the cleaned EDL is compacted.
 
 ### 2. Raw video -> B-roll -> final video
 
-Choose **Raw video -> B-roll -> final video**. A proxy is not required. If no transcript exists, the server extracts only lightweight analysis audio, sends that to ElevenLabs, lets Codex plan B-roll against the raw narration, generates images, and renders them over the original video.
+A proxy is optional. If no transcript exists, the server extracts only lightweight analysis audio, transcribes the raw narration, lets Codex plan B-roll, and renders the selected B-roll media over the original video.
 
 ### 3. Raw video -> B-roll assets only
 
-Choose **Raw video -> B-roll image files + timing JSON**. The app generates individual image files and exports an editable `broll-timing.json` package. You can change timings/prompts in the UI before export or edit the JSON/files in another editor afterward.
+Generates individual B-roll assets and exports editable `broll-timing.json`. The package can include PNG stills and MP4 clips, so the timing/prompt data can be reused in another editor.
 
 ## B-roll planning
 
-Codex CLI is the scene planner. It groups narration into semantic visual ideas and writes structured scene data containing:
+Codex CLI groups narration into semantic scenes and writes structured data containing:
 
-- source word IDs and source start/end timestamps
-- narration covered by the scene
-- visual intent and shot type
-- an editable hyper-real image prompt
+- source word IDs and editable source start/end timestamps
+- narration, visual intent and shot type
+- editable hyper-real image prompt
+- optional editable image-to-video motion prompt
 - enabled/disabled state
-- generated provider/model metadata
+- image/video provider metadata
 
-Image count is configurable:
+Image count can be **Auto**, **Exact count**, or **Images per minute**. Min/max target scene duration and output aspect ratio (`auto`, `9:16`, `16:9`) are configurable.
 
-- **Auto** — Codex chooses the number of strong semantic scenes
-- **Exact count** — the JSON schema requires exactly the requested number
-- **Images per minute** — the app calculates an exact scene count from narration duration
+## Per-scene asset controls
 
-Min/max target scene duration and output aspect ratio (`auto`, `9:16`, `16:9`) are also configurable.
+Every B-roll card supports:
+
+- **Generate image** with the selected provider
+- **Add/replace image manually** using a native local file picker; the selected source image is never modified or deleted
+- **Delete B-roll** to remove the entire scene plus its generated project copies
+- **Create video prompt** / **Rewrite video prompt** using Codex CLI
+- **Create video** / **Regenerate video** using Grok Build CLI
+- editable title, image prompt, video prompt, source start/end timing and enabled state
+
+If an MP4 clip exists for a scene, final rendering automatically prefers it over the still image. Replacing/regenerating the source image invalidates the old generated clip so a new motion result can be created from the new still.
 
 ## Hyper-real visual preset
 
@@ -55,7 +60,7 @@ Choose the provider per B-roll plan in the UI.
 
 ### Gemini API
 
-Stable provider. Defaults to `gemini-3.1-flash-image`, requests the selected aspect ratio and 2K image output, then normalizes the still for the video workflow.
+Stable provider. Defaults to `gemini-3.1-flash-image`, requests the selected aspect ratio and 2K output, then normalizes the still for the project.
 
 ```env
 GEMINI_API_KEY=
@@ -64,65 +69,58 @@ GEMINI_IMAGE_MODEL=gemini-3.1-flash-image
 
 ### Grok Build CLI
 
-Experimental local provider. The app auto-detects `grok` (or uses `GROK_BIN`) and invokes documented headless mode with `-p`, `--cwd`, `--always-approve`, and `--no-auto-update`. The prompt requires the CLI to create the actual image at an exact local path; the app verifies that a usable image file was written.
-
-This depends on an image-generation capability/tool being available in your Grok Build environment. If the CLI completes without writing an image, the app returns a clear provider error instead of pretending generation succeeded.
-
-```env
-GROK_BIN=
-GROK_IMAGE_MODEL=
-```
+Experimental local image provider. The app auto-detects `grok` (or uses `GROK_BIN`) and invokes headless mode. The task succeeds only when the CLI writes a real usable image file.
 
 ### Codex CLI
 
-Experimental local image provider. Codex remains the required planner/cleaner and uses the existing `codex login`. When selected for pixels, the app asks the local Codex environment to use any configured image-generation tool/skill and verifies the output file. This is intentionally marked experimental because Codex CLI does not expose a dedicated documented image-generation command.
+Experimental local image provider. Codex remains the required planner/cleaner and uses the existing `codex login`. Pixel generation requires an image-generation tool/skill to be available inside that local Codex environment.
 
 ### OpenAI Images API
 
-Optional API provider retained from the first B-roll implementation.
+Optional API image provider.
 
 ```env
 OPENAI_API_KEY=
 OPENAI_IMAGE_MODEL=gpt-image-2
 ```
 
-## Provider selection
+## Image-to-video with Codex + Grok CLI
+
+The video action is intentionally separated into two responsibilities:
+
+1. **Codex CLI** writes a scene-specific motion prompt designed to preserve the still's identity, anatomy, wardrobe, environment, clinical details and composition while adding subtle realistic movement.
+2. **Grok Build CLI** runs headlessly in the local project directory and is instructed to use an available xAI/Grok Imagine image-to-video capability, preferring `grok-imagine-video-1.5`, and save a real MP4 at the exact project path.
+
+The app validates that the MP4 exists, has a useful file size, and can be decoded by FFmpeg before accepting it. There is no silent API/provider fallback. Because Grok Build's documented headless CLI is an agent interface rather than a dedicated `grok video` subcommand, this bridge is marked **experimental** and requires the local Grok environment to have suitable image-to-video capability/authentication.
 
 ```env
-IMAGE_PROVIDER=gemini
+GROK_BIN=
+GROK_IMAGE_MODEL=
+GROK_VIDEO_MODEL=grok-imagine-video-1.5
 ```
-
-Supported values:
-
-```text
-gemini
-grok-cli
-codex-cli
-openai
-```
-
-The same provider, model, API key, and binary overrides are configurable from Settings. API secrets stay in the local Node service and are never exposed as `VITE_` variables.
 
 ## Editable scene timings
 
-Each B-roll card exposes start/end seconds, enabled state, title and generation prompt. Save changes before generation/rendering. The final video renderer uses those edited source timings.
+Each B-roll card exposes start/end seconds. The final compositor uses those source timings. Assets-only export writes the same values to JSON.
 
-Assets-only export creates a folder such as:
+Example package:
 
 ```text
 video-cleaner-broll-abc12345/
 ├── scene-001.png
+├── scene-001.mp4
 ├── scene-002.png
-├── scene-003.png
 ├── broll-timing.json
 └── README.txt
 ```
 
+`broll-timing.json` includes image prompt, video prompt, source timing, narration, provider/model data and generated filenames.
+
 ## Final B-roll render
 
-Generated stills can now be composited into the final video. FFmpeg scales/crops each image to the master frame and displays it only for its configured source-time range. Cleaned mode applies B-roll before the delete-only EDL is compacted; raw mode keeps the original video/audio timeline.
+FFmpeg scales/crops each enabled B-roll asset to the master frame. For a scene with a generated video clip, the clip is looped/trimmed to the configured scene window; otherwise the still is used. Cleaned mode applies B-roll before compacting the delete-only EDL; raw mode keeps the original timeline.
 
-The same source-aware hardware-first H.264/HEVC export path is reused, including VideoToolbox where available and live FFmpeg progress/speed reporting.
+The existing source-aware hardware-first H.264/HEVC export path is reused, including VideoToolbox where available and live FFmpeg progress/speed reporting.
 
 ## Requirements
 
@@ -131,7 +129,7 @@ The same source-aware hardware-first H.264/HEVC export path is reused, including
 - Codex CLI installed and authenticated (`codex login`)
 - ElevenLabs API key
 - at least one configured/available B-roll image provider
-- optional Grok Build CLI for the `grok-cli` provider
+- Grok Build CLI for B-roll video generation
 
 ## Configuration
 
@@ -139,12 +137,13 @@ The same source-aware hardware-first H.264/HEVC export path is reused, including
 cp .env.example .env.local
 ```
 
-Minimum for the recommended Gemini path:
+Recommended Gemini image path:
 
 ```env
 ELEVENLABS_API_KEY=your_elevenlabs_key
 IMAGE_PROVIDER=gemini
 GEMINI_API_KEY=your_gemini_key
+GROK_VIDEO_MODEL=grok-imagine-video-1.5
 ```
 
 `CODEX_BIN`, `GROK_BIN`, `FFMPEG_BIN`, and `FFPROBE_BIN` may be left blank for PATH auto-detection.
@@ -169,22 +168,21 @@ Then open `http://127.0.0.1:3001`.
 
 ## Working files
 
-By default:
-
 ```text
 ~/VideoCleaner/projects/<project-id>/
 ├── analysis.m4a
-├── proxy.mp4                 # only when requested
+├── proxy.mp4
 ├── transcript.json
 ├── edl.json
 ├── broll-plan.json
 ├── broll/
 │   ├── scene-001.png
+│   ├── scene-001.mp4
 │   └── scene-002.png
 └── project.json
 ```
 
-The master source is not copied into this directory.
+The master source and manually selected source images are never moved/deleted by the app.
 
 ## HDR note
 
