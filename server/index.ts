@@ -6,6 +6,14 @@ import path from 'node:path';
 import process from 'node:process';
 import express from 'express';
 import dotenv from 'dotenv';
+import {
+  createBrollPlan,
+  generateBrollImage,
+  loadBrollPlan,
+  saveBrollPlan,
+  updateBrollScene,
+  type BrollPlan,
+} from './broll.js';
 
 dotenv.config({ path: path.resolve('.env.local') });
 dotenv.config({ path: path.resolve('.env') });
@@ -40,6 +48,7 @@ type Project = {
 };
 type LocalSettings = {
   elevenLabsApiKey?: string;
+  openAiApiKey?: string;
   codexBin?: string;
   ffmpegBin?: string;
   ffprobeBin?: string;
@@ -66,6 +75,7 @@ const CONFIG_DIR = path.join(os.homedir(), '.video-cleaner');
 const CONFIG_PATH = path.join(CONFIG_DIR, 'config.json');
 const app = express();
 const projects = new Map<string, Project>();
+const brollPlans = new Map<string, BrollPlan>();
 const exportJobs = new Map<string, ExportJob>();
 const capabilityCache = new Map<string, FfmpegCapabilities>();
 let localSettings: LocalSettings = {};
@@ -150,6 +160,8 @@ async function resolvedSettings() {
   const ffprobeOverride = localSettings.ffprobeBin || process.env.FFPROBE_BIN || '';
   return {
     elevenLabsApiKey: localSettings.elevenLabsApiKey || process.env.ELEVENLABS_API_KEY || '',
+    openAiApiKey: localSettings.openAiApiKey || process.env.OPENAI_API_KEY || '',
+    imageModel: process.env.OPENAI_IMAGE_MODEL || 'gpt-image-2',
     codexBin: codexOverride || await detectBinary('codex'),
     ffmpegBin: ffmpegOverride || await detectBinary('ffmpeg'),
     ffprobeBin: ffprobeOverride || await detectBinary('ffprobe'),
@@ -208,6 +220,7 @@ async function systemStatus() {
     ffmpeg: { installed: ffmpegInstalled, path: settings.ffmpegBin || null, capabilities },
     ffprobe: { installed: ffprobeInstalled, path: settings.ffprobeBin || null },
     elevenLabs: { configured: Boolean(settings.elevenLabsApiKey) },
+    openaiImages: { configured: Boolean(settings.openAiApiKey), model: settings.imageModel },
     projectsDir: settings.projectsDir,
   };
 }
@@ -493,6 +506,9 @@ app.put('/api/settings', route(async (req, res) => {
   if (typeof body.elevenLabsApiKey === 'string' && body.elevenLabsApiKey.trim()) {
     localSettings.elevenLabsApiKey = body.elevenLabsApiKey.trim();
   }
+  if (typeof body.openAiApiKey === 'string' && body.openAiApiKey.trim()) {
+    localSettings.openAiApiKey = body.openAiApiKey.trim();
+  }
   for (const key of ['codexBin', 'ffmpegBin', 'ffprobeBin', 'projectsDir'] as const) {
     if (typeof body[key] === 'string') localSettings[key] = body[key].trim() || undefined;
   }
@@ -603,6 +619,8 @@ app.post('/api/projects/:id/transcribe', route(async (req, res) => {
 
   project.transcript = { text: raw.text ?? words.map((word) => word.text).join(' '), words };
   project.edl = { keepRanges: [{ startWordId: words[0].id, endWordId: words.at(-1)!.id, reason: 'Original recording' }], notes: [] };
+  brollPlans.delete(project.id);
+  await fs.rm(path.join(project.workDir, 'broll-plan.json'), { force: true });
   await Promise.all([
     fs.writeFile(path.join(project.workDir, 'transcript.json'), JSON.stringify(project.transcript, null, 2)),
     saveProject(project),
@@ -626,6 +644,8 @@ app.post('/api/projects/:id/clean', route(async (req, res) => {
   await run(settings.codexBin, ['exec', '--ephemeral', '--output-schema', schemaPath, '--output-last-message', outputPath, '-'], prompt);
   const raw = JSON.parse(await fs.readFile(outputPath, 'utf8'));
   project.edl = validateEdl(project.transcript.words, raw);
+  brollPlans.delete(project.id);
+  await fs.rm(path.join(project.workDir, 'broll-plan.json'), { force: true });
   await Promise.all([
     fs.writeFile(path.join(project.workDir, 'edl.json'), JSON.stringify(project.edl, null, 2)),
     saveProject(project),
@@ -637,11 +657,86 @@ app.put('/api/projects/:id/edl', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id));
   if (!project.transcript) throw new Error('Missing transcript');
   project.edl = validateEdl(project.transcript.words, { keepRanges: req.body?.keepRanges, notes: ['Manually adjusted'] });
+  brollPlans.delete(project.id);
+  await fs.rm(path.join(project.workDir, 'broll-plan.json'), { force: true });
   await Promise.all([
     fs.writeFile(path.join(project.workDir, 'edl.json'), JSON.stringify(project.edl, null, 2)),
     saveProject(project),
   ]);
   res.json(project.edl);
+}));
+
+app.post('/api/projects/:id/broll/plan', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id));
+  const settings = await resolvedSettings();
+  if (!project.transcript || !project.edl) throw new Error('Create the cleaned transcript first');
+  if (!settings.codexBin) throw new Error('Codex CLI was not found');
+  const orientation = (project.media.height || 0) > (project.media.width || 0) ? 'portrait' : 'landscape';
+  const plan = await createBrollPlan({
+    codexBin: settings.codexBin,
+    workDir: project.workDir,
+    words: project.transcript.words,
+    keepRanges: project.edl.keepRanges,
+    orientation,
+  });
+  brollPlans.set(project.id, plan);
+  res.json(plan);
+}));
+
+app.get('/api/projects/:id/broll', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id));
+  const cached = brollPlans.get(project.id);
+  if (cached) return void res.json(cached);
+  const plan = await loadBrollPlan(project.workDir);
+  if (!plan) return void res.status(404).json({ error: 'B-roll plan has not been created yet' });
+  brollPlans.set(project.id, plan);
+  res.json(plan);
+}));
+
+app.put('/api/projects/:id/broll/scenes/:sceneId', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id));
+  const sceneId = routeParam(req.params.sceneId);
+  const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir);
+  if (!plan) throw new Error('B-roll plan has not been created yet');
+  const scene = await updateBrollScene(project.workDir, plan, sceneId, {
+    title: typeof req.body?.title === 'string' ? req.body.title : undefined,
+    imagePrompt: typeof req.body?.imagePrompt === 'string' ? req.body.imagePrompt : undefined,
+  });
+  brollPlans.set(project.id, plan);
+  res.json(scene);
+}));
+
+app.post('/api/projects/:id/broll/scenes/:sceneId/generate', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id));
+  const sceneId = routeParam(req.params.sceneId);
+  const settings = await resolvedSettings();
+  if (!settings.openAiApiKey) throw new Error('OPENAI_API_KEY is not configured for B-roll image generation');
+  const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir);
+  if (!plan) throw new Error('B-roll plan has not been created yet');
+  const scene = await generateBrollImage({
+    openAiApiKey: settings.openAiApiKey,
+    imageModel: settings.imageModel,
+    ffmpegBin: settings.ffmpegBin,
+    workDir: project.workDir,
+    plan,
+    sceneId,
+  });
+  brollPlans.set(project.id, plan);
+  res.json({
+    scene,
+    imageUrl: `/api/projects/${project.id}/broll/scenes/${scene.id}/image?v=${encodeURIComponent(scene.generatedAt ?? '')}`,
+  });
+}));
+
+app.get('/api/projects/:id/broll/scenes/:sceneId/image', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id));
+  const sceneId = routeParam(req.params.sceneId);
+  const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir);
+  if (!plan) throw new Error('B-roll plan has not been created yet');
+  const scene = plan.scenes.find((candidate) => candidate.id === sceneId);
+  if (!scene?.imageFile) return void res.status(404).json({ error: 'B-roll image has not been generated yet' });
+  res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
+  res.sendFile(scene.imageFile);
 }));
 
 app.post('/api/projects/:id/export', route(async (req, res) => {
