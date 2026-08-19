@@ -29,6 +29,7 @@ export type SystemStatus = {
   };
   ffprobe: { installed: boolean; path: string | null };
   elevenLabs: { configured: boolean };
+  openaiImages?: { configured: boolean; model: string };
   projectsDir: string;
   overrides?: { codexBin: string; ffmpegBin: string; ffprobeBin: string; projectsDir: string };
 };
@@ -41,6 +42,27 @@ export type ExportStatus = {
   outputPath?: string;
   encoder?: string;
   error?: string;
+};
+export type BrollScene = {
+  id: string;
+  title: string;
+  startWordId: string;
+  endWordId: string;
+  sourceStart: number;
+  sourceEnd: number;
+  narration: string;
+  visualIntent: string;
+  shotType: string;
+  imagePrompt: string;
+  imageFile?: string;
+  generatedAt?: string;
+};
+export type BrollPlan = {
+  version: 1;
+  orientation: 'portrait' | 'landscape';
+  stylePreset: string;
+  scenes: BrollScene[];
+  notes: string[];
 };
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -62,6 +84,11 @@ export const api = {
   transcribe: (id: string) => request<{ transcript: { words: Word[] }; edl: Edl }>(`/api/projects/${id}/transcribe`, { method: 'POST' }),
   clean: (id: string, intensity: string) => request<Edl>(`/api/projects/${id}/clean`, { method: 'POST', body: JSON.stringify({ intensity }) }),
   setEdl: (id: string, keepRanges: KeepRange[]) => request<Edl>(`/api/projects/${id}/edl`, { method: 'PUT', body: JSON.stringify({ keepRanges }) }),
+  planBroll: (id: string) => request<BrollPlan>(`/api/projects/${id}/broll/plan`, { method: 'POST' }),
+  getBroll: (id: string) => request<BrollPlan>(`/api/projects/${id}/broll`),
+  updateBrollScene: (id: string, sceneId: string, patch: { title?: string; imagePrompt?: string }) => request<BrollScene>(`/api/projects/${id}/broll/scenes/${sceneId}`, { method: 'PUT', body: JSON.stringify(patch) }),
+  generateBrollScene: (id: string, sceneId: string) => request<{ scene: BrollScene; imageUrl: string }>(`/api/projects/${id}/broll/scenes/${sceneId}/generate`, { method: 'POST' }),
+  brollImageUrl: (id: string, sceneId: string, version?: string) => `/api/projects/${id}/broll/scenes/${sceneId}/image${version ? `?v=${encodeURIComponent(version)}` : ''}`,
   exportVideo: (id: string, mode: 'fast' | 'quality') => request<{ started: boolean; outputPath: string; encoder: string; hardware: boolean; targetBitRate: number }>(`/api/projects/${id}/export`, { method: 'POST', body: JSON.stringify({ mode }) }),
   exportStatus: (id: string) => request<ExportStatus>(`/api/projects/${id}/export-status`),
 };
