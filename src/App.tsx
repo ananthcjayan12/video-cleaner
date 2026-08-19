@@ -1,20 +1,22 @@
-import { useMemo, useRef, useState } from 'react';
-
-type Word = { id: string; text: string; start: number; end: number };
-type KeepRange = { startWordId: string; endWordId: string; reason?: string };
-type Project = { id: string; sourcePath: string; sourceUrl: string; media: any };
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { api, type Edl, type KeepRange, type Project, type SystemStatus, type Word } from './api';
+import './settings.css';
 
 function App() {
   const [project, setProject] = useState<Project | null>(null);
   const [proxyUrl, setProxyUrl] = useState('');
-  const [apiKey, setApiKey] = useState('');
   const [words, setWords] = useState<Word[]>([]);
-  const [edl, setEdl] = useState<{ keepRanges: KeepRange[]; notes?: string[] } | null>(null);
+  const [edl, setEdl] = useState<Edl | null>(null);
   const [intensity, setIntensity] = useState<'light' | 'balanced' | 'aggressive'>('balanced');
+  const [system, setSystem] = useState<SystemStatus | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsForm, setSettingsForm] = useState({ elevenLabsApiKey: '', codexBin: '', ffmpegBin: '', ffprobeBin: '', projectsDir: '' });
   const [status, setStatus] = useState('Choose an iPhone video to begin.');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const videoRef = useRef<HTMLVideoElement>(null);
+
+  useEffect(() => { refreshSystem(); }, []);
 
   const index = useMemo(() => new Map(words.map((word, i) => [word.id, i])), [words]);
   const keepMask = useMemo(() => {
@@ -34,6 +36,22 @@ function App() {
     return start && end ? { start: Math.max(0, start.start - 0.08), end: end.end + 0.12 } : null;
   }).filter(Boolean) as Array<{ start: number; end: number }>, [edl, words, index]);
 
+  async function refreshSystem() {
+    try {
+      const result = await api.settings();
+      setSystem(result);
+      setSettingsForm((current) => ({
+        ...current,
+        codexBin: result.overrides?.codexBin ?? '',
+        ffmpegBin: result.overrides?.ffmpegBin ?? '',
+        ffprobeBin: result.overrides?.ffprobeBin ?? '',
+        projectsDir: result.overrides?.projectsDir ?? '',
+      }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
   async function action(label: string, fn: () => Promise<void>) {
     try {
       setBusy(true);
@@ -47,23 +65,31 @@ function App() {
     }
   }
 
+  async function saveSettings() {
+    await action('Saving local settings…', async () => {
+      const result = await api.saveSettings(settingsForm);
+      setSystem(result);
+      setSettingsForm((current) => ({ ...current, elevenLabsApiKey: '' }));
+      setStatus('Settings saved. Dependencies re-checked.');
+    });
+  }
+
   async function pick() {
-    await action('Reading source media…', async () => {
-      const selected = await window.videoCleaner.pickProject();
-      if (!selected) return;
+    await action('Opening native file picker…', async () => {
+      const selected = await api.selectProject();
       setProject(selected);
       setProxyUrl('');
       setWords([]);
       setEdl(null);
-      setStatus('Source ready. Create the lightweight working media.');
+      setStatus('Source ready. Create lightweight working media.');
     });
   }
 
   async function prepare() {
     if (!project) return;
     await action('Creating analysis audio and 720p proxy in parallel…', async () => {
-      const result = await window.videoCleaner.prepareProject(project.id);
-      setProxyUrl(result.proxyUrl);
+      const result = await api.prepare(project.id);
+      setProxyUrl(`${result.proxyUrl}?v=${Date.now()}`);
       setStatus('Proxy ready. Transcribe the small analysis audio.');
     });
   }
@@ -71,7 +97,7 @@ function App() {
   async function transcribe() {
     if (!project) return;
     await action('Transcribing with ElevenLabs Scribe…', async () => {
-      const result = await window.videoCleaner.transcribe(project.id, apiKey);
+      const result = await api.transcribe(project.id);
       setWords(result.transcript.words);
       setEdl(result.edl);
       setStatus('Transcript ready. Run Codex cleanup or manually edit words.');
@@ -81,10 +107,9 @@ function App() {
   async function clean() {
     if (!project) return;
     await action(`Running ${intensity} delete-only Codex cleanup…`, async () => {
-      const result = await window.videoCleaner.clean(project.id, intensity);
+      const result = await api.clean(project.id, intensity);
       setEdl(result);
       setStatus('AI edit ready. Preview instantly from the proxy; no render was created.');
-      if (videoRef.current && previewSegments[0]) videoRef.current.currentTime = previewSegments[0].start;
     });
   }
 
@@ -93,8 +118,7 @@ function App() {
     let start = -1;
     for (let i = 0; i <= mask.length; i += 1) {
       if (i < mask.length && mask[i] && start < 0) start = i;
-      const closes = start >= 0 && (i === mask.length || !mask[i]);
-      if (closes) {
+      if (start >= 0 && (i === mask.length || !mask[i])) {
         ranges.push({ startWordId: words[start].id, endWordId: words[i - 1].id, reason: 'Manual edit' });
         start = -1;
       }
@@ -107,10 +131,8 @@ function App() {
     const nextMask = [...keepMask];
     nextMask[wordIndex] = !nextMask[wordIndex];
     if (!nextMask.some(Boolean)) return;
-    const nextRanges = maskToRanges(nextMask);
     try {
-      const result = await window.videoCleaner.setEdl(project.id, nextRanges);
-      setEdl(result);
+      setEdl(await api.setEdl(project.id, maskToRanges(nextMask)));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -120,8 +142,7 @@ function App() {
     const video = videoRef.current;
     if (!video || !previewSegments.length) return;
     const time = video.currentTime;
-    const current = previewSegments.find((segment) => time >= segment.start && time <= segment.end);
-    if (current) return;
+    if (previewSegments.some((segment) => time >= segment.start && time <= segment.end)) return;
     const next = previewSegments.find((segment) => segment.start > time);
     if (next) video.currentTime = next.start;
     else video.pause();
@@ -130,36 +151,56 @@ function App() {
   async function exportVideo(mode: 'fast' | 'quality') {
     if (!project) return;
     await action('Rendering once from the untouched master…', async () => {
-      const output = await window.videoCleaner.exportVideo(project.id, mode);
-      setStatus(output ? `Export complete: ${output}` : 'Export cancelled.');
+      const { outputPath } = await api.exportVideo(project.id, mode);
+      setStatus(`Export complete: ${outputPath}`);
     });
   }
+
+  const ready = Boolean(system?.ffmpeg.installed && system?.ffprobe.installed && system?.codex.installed && system?.codex.authenticated && system?.elevenLabs.configured);
 
   return (
     <main className="shell">
       <header className="topbar">
-        <div>
-          <span className="eyebrow">LOCAL-FIRST / NON-DESTRUCTIVE</span>
-          <h1>Video Cleaner</h1>
+        <div><span className="eyebrow">REACT + VITE / LOCAL NODE SERVICE</span><h1>Video Cleaner</h1></div>
+        <div className="headerActions">
+          <span className={`readyBadge ${ready ? 'ready' : ''}`}>{ready ? 'System ready' : 'Setup required'}</span>
+          <button className="ghost" onClick={() => setSettingsOpen((value) => !value)}>Settings</button>
+          <button className="ghost" onClick={pick} disabled={busy || !system?.ffprobe.installed}>{project ? 'Change source' : 'Choose video'}</button>
         </div>
-        <button className="ghost" onClick={pick} disabled={busy}>{project ? 'Change source' : 'Choose video'}</button>
       </header>
+
+      {settingsOpen && (
+        <section className="panel settingsPanel">
+          <div className="sectionTitle"><div><span className="label">LOCAL DEPENDENCIES</span><h3>Settings</h3></div><button onClick={refreshSystem} disabled={busy}>Re-check</button></div>
+          <div className="systemGrid">
+            <SystemItem label="Codex CLI" ok={Boolean(system?.codex.installed && system?.codex.authenticated)} detail={system?.codex.path ?? 'Not detected'} />
+            <SystemItem label="FFmpeg" ok={Boolean(system?.ffmpeg.installed)} detail={system?.ffmpeg.path ?? 'Not detected'} />
+            <SystemItem label="FFprobe" ok={Boolean(system?.ffprobe.installed)} detail={system?.ffprobe.path ?? 'Not detected'} />
+            <SystemItem label="ElevenLabs" ok={Boolean(system?.elevenLabs.configured)} detail={system?.elevenLabs.configured ? 'API key configured' : 'API key missing'} />
+          </div>
+          <div className="settingsGrid">
+            <label>ElevenLabs API key<input type="password" value={settingsForm.elevenLabsApiKey} onChange={(e) => setSettingsForm({ ...settingsForm, elevenLabsApiKey: e.target.value })} placeholder={system?.elevenLabs.configured ? 'Configured — enter only to replace' : 'xi-…'} /></label>
+            <label>Codex binary override<input value={settingsForm.codexBin} onChange={(e) => setSettingsForm({ ...settingsForm, codexBin: e.target.value })} placeholder="Auto detect from PATH" /></label>
+            <label>FFmpeg binary override<input value={settingsForm.ffmpegBin} onChange={(e) => setSettingsForm({ ...settingsForm, ffmpegBin: e.target.value })} placeholder="Auto detect from PATH" /></label>
+            <label>FFprobe binary override<input value={settingsForm.ffprobeBin} onChange={(e) => setSettingsForm({ ...settingsForm, ffprobeBin: e.target.value })} placeholder="Auto detect from PATH" /></label>
+            <label className="wide">Projects directory<input value={settingsForm.projectsDir} onChange={(e) => setSettingsForm({ ...settingsForm, projectsDir: e.target.value })} placeholder={system?.projectsDir || '~/VideoCleaner/projects'} /></label>
+          </div>
+          <p className="muted settingsNote">Codex uses the existing local CLI login; no OpenAI API key is stored by this app. ElevenLabs stays in the local Node service and is never exposed as a Vite environment variable.</p>
+          <button className="primary" onClick={saveSettings} disabled={busy}>Save settings</button>
+        </section>
+      )}
 
       {!project ? (
         <section className="hero panel">
           <div className="heroMark">VC</div>
           <h2>Clean raw talking-head footage without touching the master.</h2>
-          <p>The app creates a tiny speech file and 720p proxy. Codex edits timestamps; FFmpeg only touches the full-resolution source once, during export.</p>
-          <button className="primary" onClick={pick} disabled={busy}>Choose iPhone video</button>
+          <p>The browser UI controls a small local Node service. The service references the original iPhone file by path, creates tiny working media, runs the installed Codex CLI, and encodes the full-resolution source only once on export.</p>
+          <button className="primary" onClick={pick} disabled={busy || !system?.ffprobe.installed}>Choose iPhone video</button>
         </section>
       ) : (
         <>
           <section className="source panel">
-            <div>
-              <span className="label">MASTER SOURCE</span>
-              <strong>{project.sourcePath.split('/').at(-1)}</strong>
-              <small>{project.sourcePath}</small>
-            </div>
+            <div><span className="label">MASTER SOURCE</span><strong>{project.sourceName}</strong><small>Original file is referenced in place and never copied into the project workspace.</small></div>
             <div className="chips">
               <span>{project.media.width}×{project.media.height}</span>
               <span>{String(project.media.videoCodec).toUpperCase()}</span>
@@ -167,65 +208,35 @@ function App() {
               {project.media.hdr && <span className="warn">HDR detected</span>}
             </div>
           </section>
-
           <section className="workflow">
             <aside className="panel controls">
               <h3>Pipeline</h3>
-              <button onClick={prepare} disabled={busy || !!proxyUrl}>1. Create working media</button>
-              <label>
-                ElevenLabs API key
-                <input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="xi-…" />
-              </label>
-              <button onClick={transcribe} disabled={busy || !proxyUrl || !apiKey || !!words.length}>2. Transcribe audio</button>
-              <label>
-                Cleanup intensity
-                <select value={intensity} onChange={(e) => setIntensity(e.target.value as typeof intensity)}>
-                  <option value="light">Light</option>
-                  <option value="balanced">Balanced</option>
-                  <option value="aggressive">Aggressive</option>
-                </select>
-              </label>
-              <button onClick={clean} disabled={busy || !words.length}>3. Run Codex cleanup</button>
+              <button onClick={prepare} disabled={busy || !!proxyUrl || !system?.ffmpeg.installed}>1. Create working media</button>
+              <button onClick={transcribe} disabled={busy || !proxyUrl || !system?.elevenLabs.configured || !!words.length}>2. Transcribe audio</button>
+              <label>Cleanup intensity<select value={intensity} onChange={(e) => setIntensity(e.target.value as typeof intensity)}><option value="light">Light</option><option value="balanced">Balanced</option><option value="aggressive">Aggressive</option></select></label>
+              <button onClick={clean} disabled={busy || !words.length || !system?.codex.authenticated}>3. Run Codex cleanup</button>
               <div className="divider" />
               <button className="primary" onClick={() => exportVideo('fast')} disabled={busy || !edl}>Fast export</button>
               <button onClick={() => exportVideo('quality')} disabled={busy || !edl}>Quality export</button>
-              {project.media.hdr && <p className="warningText">HDR/Dolby Vision is detected. V1 preserves source pixels through the trim graph, but Dolby Vision metadata preservation is not guaranteed; validate HDR exports before production use.</p>}
+              {project.media.hdr && <p className="warningText">HDR is detected. V1 keeps 10-bit HEVC for HDR exports where possible, but Dolby Vision dynamic metadata is not guaranteed to survive the edit.</p>}
             </aside>
-
             <section className="workspace">
-              <div className="panel playerCard">
-                {proxyUrl ? <video ref={videoRef} src={proxyUrl} controls onTimeUpdate={syncPreview} onSeeked={syncPreview} /> : <div className="emptyPlayer">Working proxy not created yet.</div>}
-              </div>
-
+              <div className="panel playerCard">{proxyUrl ? <video ref={videoRef} src={proxyUrl} controls onTimeUpdate={syncPreview} onSeeked={syncPreview} /> : <div className="emptyPlayer">Working proxy not created yet.</div>}</div>
               <div className="panel transcriptCard">
-                <div className="sectionTitle">
-                  <div><span className="label">EDIT DECISION LIST</span><h3>Transcript</h3></div>
-                  <span className="legend"><i /> kept <i className="removedDot" /> removed</span>
-                </div>
-                {words.length ? (
-                  <div className="transcript">
-                    {words.map((word, i) => (
-                      <button
-                        key={word.id}
-                        className={`word ${keepMask[i] ? 'kept' : 'removed'}`}
-                        title={`${word.start.toFixed(2)}s – ${word.end.toFixed(2)}s · click to toggle`}
-                        onClick={() => toggleWord(i)}
-                      >{word.text}</button>
-                    ))}
-                  </div>
-                ) : <p className="muted">Word-level timestamps will appear here after transcription.</p>}
+                <div className="sectionTitle"><div><span className="label">EDIT DECISION LIST</span><h3>Transcript</h3></div><span className="legend"><i /> kept <i className="removedDot" /> removed</span></div>
+                {words.length ? <div className="transcript">{words.map((word, i) => <button key={word.id} className={`word ${keepMask[i] ? 'kept' : 'removed'}`} title={`${word.start.toFixed(2)}s – ${word.end.toFixed(2)}s · click to toggle`} onClick={() => toggleWord(i)}>{word.text}</button>)}</div> : <p className="muted">Word-level timestamps will appear here after transcription.</p>}
               </div>
             </section>
           </section>
         </>
       )}
-
-      <footer className="statusbar">
-        <span className={busy ? 'pulse' : ''}>{busy ? '●' : '○'}</span> {status}
-        {error && <strong className="error">{error}</strong>}
-      </footer>
+      <footer className="statusbar"><span className={busy ? 'pulse' : ''}>{busy ? '●' : '○'}</span> {status}{error && <strong className="error">{error}</strong>}</footer>
     </main>
   );
+}
+
+function SystemItem({ label, ok, detail }: { label: string; ok: boolean; detail: string }) {
+  return <div className="systemItem"><span className={ok ? 'ok' : 'bad'}>{ok ? '✓' : '×'}</span><div><strong>{label}</strong><small>{detail}</small></div></div>;
 }
 
 export default App;

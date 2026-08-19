@@ -1,109 +1,82 @@
 # Video Cleaner
 
-Local-first, non-destructive talking-head video cleaner for large iPhone recordings.
+Local-first, non-destructive talking-head dialogue cleaner built with React + Vite and a lightweight Node.js service.
 
-## What this MVP does
+## Why this architecture
 
-- Opens the original video by local file path; the master is never copied or modified.
-- Uses `ffprobe` to inspect codec, resolution, size, and HDR metadata.
-- Creates two lightweight working files in parallel:
-  - 16 kHz mono AAC analysis audio for transcription.
-  - 720p H.264 proxy for interactive preview.
-- Sends only the small analysis audio to ElevenLabs Scribe v2 for word-level timestamps.
-- Runs the locally installed Codex CLI as a delete-only dialogue cleaning agent.
-- Stores the result as an Edit Decision List (EDL) referencing original word IDs.
-- Lets you restore/remove individual words in the transcript UI.
-- Previews edits by seeking over removed ranges in the proxy, with no intermediate render.
-- Reads the untouched master only at final export and performs one FFmpeg encode.
+The browser handles only the editor UI. A local Node service owns filesystem access and runs the tools already installed on the machine: `ffprobe`, `ffmpeg`, and `codex`. There is no Electron runtime and no upload/copy of the original iPhone master into the app.
 
-This app intentionally does **not** implement B-roll, captions, reframing, music, transitions, voice cloning, multi-speaker editing, auto zoom, or stock-video search. Those are intended to remain separate micro-apps.
+Pipeline:
 
-## Architecture
-
-```text
-Original iPhone master (immutable)
-        |
-        +--> ffprobe --> Media profile / HDR warning
-        |
-        +--> tiny analysis.m4a --> ElevenLabs --> timestamped words --> Codex --> EDL.json
-        |
-        +--> 720p proxy.mp4 -----------------------------------------------> virtual preview
-        |
-        `--> Final Export + EDL --> FFmpeg --> one encoded output
-```
+1. Native OS file picker returns the source path to the local Node service.
+2. `ffprobe` classifies codec, resolution, size, and HDR metadata.
+3. FFmpeg creates a small 16 kHz mono AAC analysis file and 720p proxy in parallel.
+4. Only the analysis audio is sent to ElevenLabs Scribe v2 for word timestamps.
+5. The local Codex CLI receives timestamped source words and returns a schema-constrained delete-only EDL.
+6. React previews the EDL by seeking over removed regions in the proxy — no intermediate render.
+7. Final export reads the untouched master and performs one FFmpeg encode.
 
 ## Requirements
 
 - Node.js 20+
-- npm
-- `ffmpeg` and `ffprobe` available on `PATH`
-- Codex CLI installed, authenticated, and available as `codex`
+- FFmpeg / ffprobe installed locally
+- Codex CLI installed and authenticated (`codex login`)
 - ElevenLabs API key
-- macOS is the primary MVP target. Apple VideoToolbox is used for fast proxy/final H.264 encoding when available; other platforms fall back to libx264.
 
-### macOS prerequisites
+Codex does **not** require an OpenAI API key in this app. The server invokes the local `codex` binary and uses its existing CLI login.
+
+## Configuration
+
+Copy the sample environment file:
 
 ```bash
-brew install ffmpeg
-npm install
+cp .env.example .env.local
 ```
 
-Install/authenticate Codex using the current OpenAI Codex CLI instructions before running the app.
+Then set at least:
 
-## Run locally
+```bash
+ELEVENLABS_API_KEY=your_key_here
+```
+
+`CODEX_BIN`, `FFMPEG_BIN`, and `FFPROBE_BIN` are optional. If blank, the server auto-detects them from `PATH`. The same overrides can be entered from the Settings panel in the UI.
+
+Secrets are server-side only. Do not use a `VITE_` prefix for the ElevenLabs key.
+
+## Run
 
 ```bash
 npm install
 npm run dev
 ```
 
-Then:
+Open `http://localhost:5173`. Vite proxies `/api` to the local Node service on `127.0.0.1:3001`.
 
-1. Choose a `.MOV`, `.MP4`, `.M4V`, or `.WEBM` source.
-2. Click **Create working media**.
-3. Enter the ElevenLabs API key and transcribe.
-4. Choose Light / Balanced / Aggressive cleanup and run Codex.
-5. Review the transcript. Removed words are struck through; click a word to toggle it.
-6. Preview directly from the proxy.
-7. Export with **Fast** or **Quality** mode.
+For a production-style local run:
 
-## Quality model
+```bash
+npm run build
+NODE_ENV=production npm start
+```
 
-The master file is never repeatedly transcoded. Editing changes only JSON. Previewing uses a low-resolution proxy. The original full-resolution video is decoded/encoded only once when the user exports.
+Then open `http://127.0.0.1:3001`.
 
-Fast export uses Apple `h264_videotoolbox` on macOS. Quality export uses `libx264` with CRF 16. Both preserve the original frame dimensions because no scale filter is used in the final render.
+## Working files
+
+By default, working files go under `~/VideoCleaner/projects/<project-id>/`:
+
+- `analysis.m4a`
+- `proxy.mp4`
+- `transcript.json`
+- `edl.json`
+- `project.json`
+
+The original master is referenced by path and is not copied into the project folder.
+
+## Scope
+
+This micro-app is intentionally only for dialogue cleanup. B-roll, captions, reframing, music, transitions, voice cloning, multi-speaker editing, auto zoom, and stock media search belong in separate apps.
 
 ## HDR note
 
-The app detects HDR transfer characteristics and surfaces a warning. V1 does not guarantee preservation of Dolby Vision dynamic metadata through final export. Test HDR outputs before production use; SDR iPhone recordings are the safest MVP input.
-
-## Security
-
-- The renderer has no Node.js integration.
-- Electron context isolation is enabled.
-- FFmpeg and Codex are invoked with `spawn(..., { shell: false })`.
-- Codex receives a schema-constrained, delete-only task and does not control FFmpeg commands.
-- The ElevenLabs key is held only in renderer state for the current session and is not written to project files.
-
-## Project data
-
-Working files live under Electron's per-user application data directory:
-
-```text
-projects/<uuid>/
-  analysis.m4a
-  proxy.mp4
-  transcript.json
-  edl.schema.json
-  codex-edl.json
-  edl.json
-```
-
-The selected original video remains wherever the user stored it.
-
-## Current MVP limitations
-
-- Projects are kept in memory for the running session; reopening saved projects is not implemented yet.
-- Multi-audio-track selection is not implemented; the first audio stream is used.
-- HDR/Dolby Vision export metadata preservation is not guaranteed.
-- Final smart rendering around GOP boundaries is not implemented; final export intentionally uses one high-quality encode for correctness at arbitrary word-level cut points.
+HDR sources are detected. V1 attempts to keep HDR exports in 10-bit HEVC, but Dolby Vision dynamic metadata preservation is not guaranteed; validate HDR output before production use.
