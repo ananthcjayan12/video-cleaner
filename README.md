@@ -1,92 +1,153 @@
 # Video Cleaner
 
-Local-first, non-destructive talking-head dialogue cleaner built with React + Vite and a lightweight Node.js service.
+Local-first talking-head video cleaner with semantic B-roll image generation, built with React + Vite and a lightweight Node.js service.
 
-## Why this architecture
+## Core architecture
 
-The browser handles only the editor UI. A local Node service owns filesystem access and runs the tools already installed on the machine: `ffprobe`, `ffmpeg`, and `codex`. There is no Electron runtime and no upload/copy of the original iPhone master into the app.
+The browser is only the editor UI. The local Node service owns filesystem access and runs `ffprobe`, `ffmpeg`, `codex`, and optionally `grok`. The original iPhone/master video stays referenced in place; it is not uploaded or copied into the project workspace.
 
-Pipeline:
+Dialogue cleaning remains non-destructive: FFmpeg creates a tiny analysis-audio file and optional 30 fps proxy, ElevenLabs provides word timestamps, Codex returns a delete-only EDL, and final export reads the untouched master once.
 
-1. Native OS file picker returns the source path to the local Node service.
-2. `ffprobe` captures codec, resolution, frame rate, source bitrate, size, and HDR metadata.
-3. FFmpeg reads the large iPhone source once and emits both a lightweight browser proxy and a 16 kHz mono analysis-audio file from the same pass.
-4. The proxy is capped at a 720 px long edge and 30 fps. On supported macOS FFmpeg builds, VideoToolbox decode + H.264 VideoToolbox encoding are used automatically.
-5. Only the small analysis audio is sent to ElevenLabs Scribe v2 for word timestamps.
-6. The local Codex CLI receives timestamped source words and returns a schema-constrained delete-only EDL.
-7. React previews the EDL by seeking over removed regions in the proxy — no intermediate render.
-8. Codex can group the cleaned narration into semantic B-roll scenes and write production-ready image prompts for each scene.
-9. Approved prompts can generate high-quality B-roll stills through the OpenAI Images API and save them inside the local project.
-10. Final dialogue-only export reads the untouched master once, applies the EDL with a single `select/aselect` timeline filter, and encodes the output once.
+## B-roll can run in three modes
 
-## Hyper-realistic B-roll images
+### 1. Cleaned video -> B-roll -> final video
 
-After dialogue cleanup, click **Plan B-roll scenes**. Codex reads only the kept transcript, groups it into major visual ideas, assigns source word/timestamp ranges, and writes an editable prompt for each scene.
+Use the normal flow:
 
-The built-in visual preset is tuned to the supplied references:
+`raw video -> proxy/audio -> transcript -> Codex cleanup -> B-roll plan/images -> final video`
 
-- premium hyper-real commercial photography rather than illustration or CGI
-- authentic South-Asian / Indian subjects and environments when contextually appropriate
-- natural skin texture, teeth, hands, food, fabrics, dental/medical tools, and believable anatomy
-- clinically plausible healthcare scenes with appropriate PPE, instruments, and patient positioning
-- soft natural or diffused practical lighting and restrained cinematic contrast
-- full-frame 35 mm / 50 mm / 85 mm prime-lens aesthetic with believable shallow depth of field
-- candid editorial compositions instead of generic posed stock photography
-- clean clinic, home, nutrition, and lifestyle production design
-- central safe composition for social-video crops
-- no text, logos, watermarks, UI, malformed anatomy, duplicated tools, plastic skin, or obvious AI artifacts
+B-roll scene timing is anchored to source timestamps. During final rendering the images are overlaid on the original timeline before the cleaned EDL is compacted, so timing stays aligned with the cleaned narration.
 
-Prompts are editable before generation and each scene can be generated or regenerated independently. **Generate all** runs scenes sequentially and asks for confirmation before using API credits.
+### 2. Raw video -> B-roll -> final video
 
-Codex CLI handles scene planning using the existing `codex login`. Image pixels are generated separately by the OpenAI Images API, so this feature needs `OPENAI_API_KEY`. `OPENAI_IMAGE_MODEL` defaults to `gpt-image-2`.
+Choose **Raw video -> B-roll -> final video**. A proxy is not required. If no transcript exists, the server extracts only lightweight analysis audio, sends that to ElevenLabs, lets Codex plan B-roll against the raw narration, generates images, and renders them over the original video.
 
-Portrait projects request a portrait image and normalize it to a 1080×1920 9:16 still. Landscape projects normalize to 1920×1080 16:9. Generated files are stored under `broll/` in the local project.
+### 3. Raw video -> B-roll assets only
 
-This version creates and reviews B-roll **assets only**. Automatically placing/animating those images in the final video is intentionally left for the next feature so the image quality and scene selection can be validated independently.
+Choose **Raw video -> B-roll image files + timing JSON**. The app generates individual image files and exports an editable `broll-timing.json` package. You can change timings/prompts in the UI before export or edit the JSON/files in another editor afterward.
 
-## Fast final export
+## B-roll planning
 
-The normal High Quality export is hardware-first rather than CPU `slow`-preset-first:
+Codex CLI is the scene planner. It groups narration into semantic visual ideas and writes structured scene data containing:
 
-- source HEVC/H.265 -> HEVC VideoToolbox when available
-- source H.264 -> H.264 VideoToolbox when available
-- VideoToolbox decode is enabled when the installed FFmpeg build exposes it
-- source resolution and frame rate are preserved
-- output bitrate is derived from source bitrate/resolution/fps and biased toward quality rather than small files
-- Fast mode adds VideoToolbox speed priority; High Quality mode keeps the hardware encoder without the extra speed-priority flag
-- software fallbacks use usable `veryfast`/`fast` presets instead of the old `slow` presets
+- source word IDs and source start/end timestamps
+- narration covered by the scene
+- visual intent and shot type
+- an editable hyper-real image prompt
+- enabled/disabled state
+- generated provider/model metadata
 
-FFmpeg export runs asynchronously. The editor polls live export state and shows percent complete, encoder, processing speed (`x` realtime), and rendered frame count.
+Image count is configurable:
+
+- **Auto** — Codex chooses the number of strong semantic scenes
+- **Exact count** — the JSON schema requires exactly the requested number
+- **Images per minute** — the app calculates an exact scene count from narration duration
+
+Min/max target scene duration and output aspect ratio (`auto`, `9:16`, `16:9`) are also configurable.
+
+## Hyper-real visual preset
+
+The built-in prompt language is tuned to the supplied references: premium real-camera commercial photography, authentic South-Asian / Indian subjects when contextually appropriate, natural skin/teeth/hands/anatomy, believable clinic/home/lifestyle environments, clinically plausible dental/medical details, soft natural/diffused light, restrained cinematic contrast, full-frame prime-lens perspective, shallow optical depth of field, candid editorial framing, and no text/logos/watermarks/obvious AI artifacts.
+
+## Image providers
+
+Choose the provider per B-roll plan in the UI.
+
+### Gemini API
+
+Stable provider. Defaults to `gemini-3.1-flash-image`, requests the selected aspect ratio and 2K image output, then normalizes the still for the video workflow.
+
+```env
+GEMINI_API_KEY=
+GEMINI_IMAGE_MODEL=gemini-3.1-flash-image
+```
+
+### Grok Build CLI
+
+Experimental local provider. The app auto-detects `grok` (or uses `GROK_BIN`) and invokes documented headless mode with `-p`, `--cwd`, `--always-approve`, and `--no-auto-update`. The prompt requires the CLI to create the actual image at an exact local path; the app verifies that a usable image file was written.
+
+This depends on an image-generation capability/tool being available in your Grok Build environment. If the CLI completes without writing an image, the app returns a clear provider error instead of pretending generation succeeded.
+
+```env
+GROK_BIN=
+GROK_IMAGE_MODEL=
+```
+
+### Codex CLI
+
+Experimental local image provider. Codex remains the required planner/cleaner and uses the existing `codex login`. When selected for pixels, the app asks the local Codex environment to use any configured image-generation tool/skill and verifies the output file. This is intentionally marked experimental because Codex CLI does not expose a dedicated documented image-generation command.
+
+### OpenAI Images API
+
+Optional API provider retained from the first B-roll implementation.
+
+```env
+OPENAI_API_KEY=
+OPENAI_IMAGE_MODEL=gpt-image-2
+```
+
+## Provider selection
+
+```env
+IMAGE_PROVIDER=gemini
+```
+
+Supported values:
+
+```text
+gemini
+grok-cli
+codex-cli
+openai
+```
+
+The same provider, model, API key, and binary overrides are configurable from Settings. API secrets stay in the local Node service and are never exposed as `VITE_` variables.
+
+## Editable scene timings
+
+Each B-roll card exposes start/end seconds, enabled state, title and generation prompt. Save changes before generation/rendering. The final video renderer uses those edited source timings.
+
+Assets-only export creates a folder such as:
+
+```text
+video-cleaner-broll-abc12345/
+├── scene-001.png
+├── scene-002.png
+├── scene-003.png
+├── broll-timing.json
+└── README.txt
+```
+
+## Final B-roll render
+
+Generated stills can now be composited into the final video. FFmpeg scales/crops each image to the master frame and displays it only for its configured source-time range. Cleaned mode applies B-roll before the delete-only EDL is compacted; raw mode keeps the original video/audio timeline.
+
+The same source-aware hardware-first H.264/HEVC export path is reused, including VideoToolbox where available and live FFmpeg progress/speed reporting.
 
 ## Requirements
 
 - Node.js 20+
-- FFmpeg / ffprobe installed locally
+- FFmpeg / ffprobe
 - Codex CLI installed and authenticated (`codex login`)
 - ElevenLabs API key
-- OpenAI API key only when generating B-roll images
-
-Codex does **not** require an OpenAI API key for cleanup or B-roll planning in this app. The server invokes the local `codex` binary and uses its existing CLI login. The separate API key is used only for image generation.
+- at least one configured/available B-roll image provider
+- optional Grok Build CLI for the `grok-cli` provider
 
 ## Configuration
-
-Copy the sample environment file:
 
 ```bash
 cp .env.example .env.local
 ```
 
-Then configure:
+Minimum for the recommended Gemini path:
 
-```bash
+```env
 ELEVENLABS_API_KEY=your_elevenlabs_key
-OPENAI_API_KEY=your_openai_api_key
-OPENAI_IMAGE_MODEL=gpt-image-2
+IMAGE_PROVIDER=gemini
+GEMINI_API_KEY=your_gemini_key
 ```
 
-`OPENAI_API_KEY` is optional until you click Generate on a B-roll image. `CODEX_BIN`, `FFMPEG_BIN`, and `FFPROBE_BIN` are also optional; if blank, the server auto-detects them from `PATH`. The same secrets and binary overrides can be entered from the Settings panel in the UI.
-
-Secrets are server-side only. Do not use a `VITE_` prefix for either API key.
+`CODEX_BIN`, `GROK_BIN`, `FFMPEG_BIN`, and `FFPROBE_BIN` may be left blank for PATH auto-detection.
 
 ## Run
 
@@ -95,9 +156,9 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:5173`. Vite proxies `/api` to the local Node service on `127.0.0.1:3001`.
+Open `http://localhost:5173`.
 
-For a production-style local run:
+Production-style local run:
 
 ```bash
 npm run build
@@ -108,23 +169,23 @@ Then open `http://127.0.0.1:3001`.
 
 ## Working files
 
-By default, working files go under `~/VideoCleaner/projects/<project-id>/`:
+By default:
 
-- `analysis.m4a`
-- `proxy.mp4`
-- `transcript.json`
-- `edl.json`
-- `broll-plan.json`
-- `broll/scene-001.png`
-- `broll/scene-002.png`
-- `project.json`
+```text
+~/VideoCleaner/projects/<project-id>/
+├── analysis.m4a
+├── proxy.mp4                 # only when requested
+├── transcript.json
+├── edl.json
+├── broll-plan.json
+├── broll/
+│   ├── scene-001.png
+│   └── scene-002.png
+└── project.json
+```
 
-The original master is referenced by path and is not copied into the project folder.
-
-## Scope
-
-This app currently covers dialogue cleanup plus semantic B-roll still planning/generation. B-roll motion/compositing, captions, reframing, music, transitions, voice cloning, multi-speaker editing, auto zoom, and stock media search are not part of this version.
+The master source is not copied into this directory.
 
 ## HDR note
 
-HDR sources are detected. V1 uses HEVC/Main10 where the local encoder supports it and carries source color tags, but Dolby Vision dynamic metadata preservation is not guaranteed; validate HDR output before production use.
+HDR sources are detected. HEVC/Main10 and source color tags are preserved where the local encoder supports them, but Dolby Vision dynamic metadata preservation is not guaranteed; validate HDR output before production use.
