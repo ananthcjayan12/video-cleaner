@@ -1,5 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { api, type Edl, type ExportStatus, type KeepRange, type Project, type SystemStatus, type Word } from './api';
+import {
+  api,
+  type BrollPlan,
+  type BrollScene,
+  type Edl,
+  type ExportStatus,
+  type KeepRange,
+  type Project,
+  type SystemStatus,
+  type Word,
+} from './api';
 import './settings.css';
 
 function App() {
@@ -7,10 +17,21 @@ function App() {
   const [proxyUrl, setProxyUrl] = useState('');
   const [words, setWords] = useState<Word[]>([]);
   const [edl, setEdl] = useState<Edl | null>(null);
+  const [broll, setBroll] = useState<BrollPlan | null>(null);
+  const [brollPrompts, setBrollPrompts] = useState<Record<string, string>>({});
+  const [brollGenerating, setBrollGenerating] = useState<string | null>(null);
+  const [generatingAll, setGeneratingAll] = useState(false);
   const [intensity, setIntensity] = useState<'light' | 'balanced' | 'aggressive'>('balanced');
   const [system, setSystem] = useState<SystemStatus | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settingsForm, setSettingsForm] = useState({ elevenLabsApiKey: '', codexBin: '', ffmpegBin: '', ffprobeBin: '', projectsDir: '' });
+  const [settingsForm, setSettingsForm] = useState({
+    elevenLabsApiKey: '',
+    openAiApiKey: '',
+    codexBin: '',
+    ffmpegBin: '',
+    ffprobeBin: '',
+    projectsDir: '',
+  });
   const [status, setStatus] = useState('Choose an iPhone video to begin.');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -59,6 +80,17 @@ function App() {
     return start && end ? { start: Math.max(0, start.start - 0.08), end: end.end + 0.12 } : null;
   }).filter(Boolean) as Array<{ start: number; end: number }>, [edl, words, index]);
 
+  function resetBroll() {
+    setBroll(null);
+    setBrollPrompts({});
+    setBrollGenerating(null);
+  }
+
+  function applyBrollPlan(plan: BrollPlan) {
+    setBroll(plan);
+    setBrollPrompts(Object.fromEntries(plan.scenes.map((scene) => [scene.id, scene.imagePrompt])));
+  }
+
   async function refreshSystem() {
     try {
       const result = await api.settings();
@@ -92,8 +124,8 @@ function App() {
     await action('Saving local settings…', async () => {
       const result = await api.saveSettings(settingsForm);
       setSystem(result);
-      setSettingsForm((current) => ({ ...current, elevenLabsApiKey: '' }));
-      setStatus('Settings saved. Dependencies and hardware acceleration re-checked.');
+      setSettingsForm((current) => ({ ...current, elevenLabsApiKey: '', openAiApiKey: '' }));
+      setStatus('Settings saved. Dependencies and image generation were re-checked.');
     });
   }
 
@@ -104,6 +136,7 @@ function App() {
       setProxyUrl('');
       setWords([]);
       setEdl(null);
+      resetBroll();
       setExportJob(null);
       setStatus('Source ready. Create lightweight working media.');
     });
@@ -124,6 +157,7 @@ function App() {
       const result = await api.transcribe(project.id);
       setWords(result.transcript.words);
       setEdl(result.edl);
+      resetBroll();
       setStatus('Transcript ready. Run Codex cleanup or manually edit words.');
     });
   }
@@ -133,7 +167,17 @@ function App() {
     await action(`Running ${intensity} delete-only Codex cleanup…`, async () => {
       const result = await api.clean(project.id, intensity);
       setEdl(result);
+      resetBroll();
       setStatus('AI edit ready. Preview instantly from the proxy; no render was created.');
+    });
+  }
+
+  async function planBroll() {
+    if (!project || !edl) return;
+    await action('Codex is planning semantic B-roll scenes and writing image prompts…', async () => {
+      const plan = await api.planBroll(project.id);
+      applyBrollPlan(plan);
+      setStatus(`B-roll plan ready: ${plan.scenes.length} scene${plan.scenes.length === 1 ? '' : 's'}. Review prompts before generating images.`);
     });
   }
 
@@ -151,12 +195,13 @@ function App() {
   }
 
   async function toggleWord(wordIndex: number) {
-    if (!project || busy || exportRunning) return;
+    if (!project || busy || exportRunning || generatingAll) return;
     const nextMask = [...keepMask];
     nextMask[wordIndex] = !nextMask[wordIndex];
     if (!nextMask.some(Boolean)) return;
     try {
       setEdl(await api.setEdl(project.id, maskToRanges(nextMask)));
+      resetBroll();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -172,8 +217,76 @@ function App() {
     else video.pause();
   }
 
+  function replaceScene(scene: BrollScene) {
+    setBroll((current) => current ? { ...current, scenes: current.scenes.map((item) => item.id === scene.id ? scene : item) } : current);
+    setBrollPrompts((current) => ({ ...current, [scene.id]: scene.imagePrompt }));
+  }
+
+  async function saveScenePrompt(scene: BrollScene) {
+    if (!project) return;
+    const draft = (brollPrompts[scene.id] ?? scene.imagePrompt).trim();
+    if (!draft || draft === scene.imagePrompt) return;
+    try {
+      const updated = await api.updateBrollScene(project.id, scene.id, { imagePrompt: draft });
+      replaceScene(updated);
+      setStatus(`Saved prompt for ${updated.title}.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function generateScene(scene: BrollScene) {
+    if (!project || brollGenerating || generatingAll) return;
+    try {
+      setError('');
+      setBrollGenerating(scene.id);
+      setStatus(`Generating hyper-realistic image for ${scene.title}…`);
+      await saveScenePrompt(scene);
+      const result = await api.generateBrollScene(project.id, scene.id);
+      replaceScene(result.scene);
+      setStatus(`Generated B-roll image for ${result.scene.title}.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBrollGenerating(null);
+    }
+  }
+
+  async function generateAllBroll() {
+    if (!project || !broll || generatingAll || brollGenerating) return;
+    if (!system?.openaiImages?.configured) {
+      setError('Add OPENAI_API_KEY in Settings before generating B-roll images.');
+      return;
+    }
+    const confirmed = window.confirm(`Generate ${broll.scenes.length} high-quality ${system.openaiImages.model} B-roll images? This uses OpenAI API credits.`);
+    if (!confirmed) return;
+
+    setGeneratingAll(true);
+    setError('');
+    try {
+      for (let i = 0; i < broll.scenes.length; i += 1) {
+        const scene = broll.scenes[i];
+        setBrollGenerating(scene.id);
+        setStatus(`Generating B-roll ${i + 1}/${broll.scenes.length}: ${scene.title}…`);
+        const draft = (brollPrompts[scene.id] ?? scene.imagePrompt).trim();
+        if (draft && draft !== scene.imagePrompt) {
+          const updated = await api.updateBrollScene(project.id, scene.id, { imagePrompt: draft });
+          replaceScene(updated);
+        }
+        const result = await api.generateBrollScene(project.id, scene.id);
+        replaceScene(result.scene);
+      }
+      setStatus(`Generated ${broll.scenes.length} hyper-realistic B-roll images.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBrollGenerating(null);
+      setGeneratingAll(false);
+    }
+  }
+
   async function exportVideo(mode: 'fast' | 'quality') {
-    if (!project || exportRunning) return;
+    if (!project || exportRunning || generatingAll) return;
     try {
       setBusy(true);
       setError('');
@@ -201,36 +314,38 @@ function App() {
         <div className="headerActions">
           <span className={`readyBadge ${ready ? 'ready' : ''}`}>{ready ? 'System ready' : 'Setup required'}</span>
           <button className="ghost" onClick={() => setSettingsOpen((value) => !value)}>Settings</button>
-          <button className="ghost" onClick={pick} disabled={busy || exportRunning || !system?.ffprobe.installed}>{project ? 'Change source' : 'Choose video'}</button>
+          <button className="ghost" onClick={pick} disabled={busy || exportRunning || generatingAll || !system?.ffprobe.installed}>{project ? 'Change source' : 'Choose video'}</button>
         </div>
       </header>
 
       {settingsOpen && (
         <section className="panel settingsPanel">
-          <div className="sectionTitle"><div><span className="label">LOCAL DEPENDENCIES</span><h3>Settings</h3></div><button onClick={refreshSystem} disabled={busy || exportRunning}>Re-check</button></div>
+          <div className="sectionTitle"><div><span className="label">LOCAL DEPENDENCIES</span><h3>Settings</h3></div><button onClick={refreshSystem} disabled={busy || exportRunning || generatingAll}>Re-check</button></div>
           <div className="systemGrid">
             <SystemItem label="Codex CLI" ok={Boolean(system?.codex.installed && system?.codex.authenticated)} detail={system?.codex.path ?? 'Not detected'} />
             <SystemItem label="FFmpeg" ok={Boolean(system?.ffmpeg.installed)} detail={ffmpegDetail} />
             <SystemItem label="FFprobe" ok={Boolean(system?.ffprobe.installed)} detail={system?.ffprobe.path ?? 'Not detected'} />
             <SystemItem label="ElevenLabs" ok={Boolean(system?.elevenLabs.configured)} detail={system?.elevenLabs.configured ? 'API key configured' : 'API key missing'} />
+            <SystemItem label="B-roll Images" ok={Boolean(system?.openaiImages?.configured)} detail={system?.openaiImages?.configured ? `${system.openaiImages.model} configured` : 'OPENAI_API_KEY missing'} />
           </div>
           <div className="settingsGrid">
             <label>ElevenLabs API key<input type="password" value={settingsForm.elevenLabsApiKey} onChange={(e) => setSettingsForm({ ...settingsForm, elevenLabsApiKey: e.target.value })} placeholder={system?.elevenLabs.configured ? 'Configured — enter only to replace' : 'xi-…'} /></label>
+            <label>OpenAI API key · B-roll images<input type="password" value={settingsForm.openAiApiKey} onChange={(e) => setSettingsForm({ ...settingsForm, openAiApiKey: e.target.value })} placeholder={system?.openaiImages?.configured ? 'Configured — enter only to replace' : 'sk-…'} /></label>
             <label>Codex binary override<input value={settingsForm.codexBin} onChange={(e) => setSettingsForm({ ...settingsForm, codexBin: e.target.value })} placeholder="Auto detect from PATH" /></label>
             <label>FFmpeg binary override<input value={settingsForm.ffmpegBin} onChange={(e) => setSettingsForm({ ...settingsForm, ffmpegBin: e.target.value })} placeholder="Auto detect from PATH" /></label>
             <label>FFprobe binary override<input value={settingsForm.ffprobeBin} onChange={(e) => setSettingsForm({ ...settingsForm, ffprobeBin: e.target.value })} placeholder="Auto detect from PATH" /></label>
-            <label className="wide">Projects directory<input value={settingsForm.projectsDir} onChange={(e) => setSettingsForm({ ...settingsForm, projectsDir: e.target.value })} placeholder={system?.projectsDir || '~/VideoCleaner/projects'} /></label>
+            <label>Projects directory<input value={settingsForm.projectsDir} onChange={(e) => setSettingsForm({ ...settingsForm, projectsDir: e.target.value })} placeholder={system?.projectsDir || '~/VideoCleaner/projects'} /></label>
           </div>
-          <p className="muted settingsNote">Codex uses the existing local CLI login. FFmpeg capability detection automatically enables VideoToolbox decode and source-matched H.264/HEVC hardware exports where available.</p>
-          <button className="primary" onClick={saveSettings} disabled={busy || exportRunning}>Save settings</button>
+          <p className="muted settingsNote">Codex uses the existing CLI login for cleanup and B-roll planning. Image pixels are generated separately by {system?.openaiImages?.model || 'GPT Image'} through the OpenAI API, so that feature needs OPENAI_API_KEY. Both API keys remain in the local Node service.</p>
+          <button className="primary" onClick={saveSettings} disabled={busy || exportRunning || generatingAll}>Save settings</button>
         </section>
       )}
 
       {!project ? (
         <section className="hero panel">
           <div className="heroMark">VC</div>
-          <h2>Clean raw talking-head footage without touching the master.</h2>
-          <p>The local service reads the original once to create a small 30 fps proxy plus analysis audio. Editing stays non-destructive; the source is rendered only at final export.</p>
+          <h2>Clean raw talking-head footage and plan visual B-roll without touching the master.</h2>
+          <p>The local service creates a small proxy, cleans dialogue with Codex, then can turn each major visual idea into an editable hyper-realistic B-roll prompt and generated still.</p>
           <button className="primary" onClick={pick} disabled={busy || !system?.ffprobe.installed}>Choose iPhone video</button>
         </section>
       ) : (
@@ -249,14 +364,17 @@ function App() {
           <section className="workflow">
             <aside className="panel controls">
               <h3>Pipeline</h3>
-              <button onClick={prepare} disabled={busy || exportRunning || !!proxyUrl || !system?.ffmpeg.installed}>1. Create working media</button>
-              <button onClick={transcribe} disabled={busy || exportRunning || !proxyUrl || !system?.elevenLabs.configured || !!words.length}>2. Transcribe audio</button>
+              <button onClick={prepare} disabled={busy || exportRunning || generatingAll || !!proxyUrl || !system?.ffmpeg.installed}>1. Create working media</button>
+              <button onClick={transcribe} disabled={busy || exportRunning || generatingAll || !proxyUrl || !system?.elevenLabs.configured || !!words.length}>2. Transcribe audio</button>
               <label>Cleanup intensity<select value={intensity} onChange={(e) => setIntensity(e.target.value as typeof intensity)}><option value="light">Light</option><option value="balanced">Balanced</option><option value="aggressive">Aggressive</option></select></label>
-              <button onClick={clean} disabled={busy || exportRunning || !words.length || !system?.codex.authenticated}>3. Run Codex cleanup</button>
+              <button onClick={clean} disabled={busy || exportRunning || generatingAll || !words.length || !system?.codex.authenticated}>3. Run Codex cleanup</button>
+              <button onClick={planBroll} disabled={busy || exportRunning || generatingAll || !edl || !system?.codex.authenticated}>4. Plan B-roll scenes</button>
+              {broll && <button className="primary" onClick={generateAllBroll} disabled={busy || exportRunning || generatingAll || !!brollGenerating || !system?.openaiImages?.configured}>Generate all B-roll images</button>}
+              <small className="muted">Planning uses Codex. Image generation uses {system?.openaiImages?.model || 'GPT Image'} API credits and only runs after you click Generate.</small>
               <div className="divider" />
-              <button className="primary" onClick={() => exportVideo('quality')} disabled={busy || exportRunning || !edl}>High quality export · Recommended</button>
-              <button onClick={() => exportVideo('fast')} disabled={busy || exportRunning || !edl}>Fast export</button>
-              <small className="muted">High quality matches the source codec and favors source-level bitrate while still using hardware acceleration when available.</small>
+              <button className="primary" onClick={() => exportVideo('quality')} disabled={busy || exportRunning || generatingAll || !edl}>High quality export · Recommended</button>
+              <button onClick={() => exportVideo('fast')} disabled={busy || exportRunning || generatingAll || !edl}>Fast export</button>
+              <small className="muted">B-roll images are generated assets only in this version; final video compositing comes next.</small>
               {exportJob && exportJob.state !== 'idle' && <ExportProgress job={exportJob} />}
               {project.media.hdr && <p className="warningText">HDR uses HEVC/Main10 where supported. Dolby Vision dynamic metadata preservation is still not guaranteed in V1.</p>}
             </aside>
@@ -266,13 +384,94 @@ function App() {
                 <div className="sectionTitle"><div><span className="label">EDIT DECISION LIST</span><h3>Transcript</h3></div><span className="legend"><i /> kept <i className="removedDot" /> removed</span></div>
                 {words.length ? <div className="transcript">{words.map((word, i) => <button key={word.id} className={`word ${keepMask[i] ? 'kept' : 'removed'}`} title={`${word.start.toFixed(2)}s – ${word.end.toFixed(2)}s · click to toggle`} onClick={() => toggleWord(i)}>{word.text}</button>)}</div> : <p className="muted">Word-level timestamps will appear here after transcription.</p>}
               </div>
+              <BrollPanel
+                project={project}
+                plan={broll}
+                prompts={brollPrompts}
+                generatingScene={brollGenerating}
+                generatingAll={generatingAll}
+                canGenerate={Boolean(system?.openaiImages?.configured)}
+                onPlan={planBroll}
+                onPromptChange={(sceneId, value) => setBrollPrompts((current) => ({ ...current, [sceneId]: value }))}
+                onPromptBlur={saveScenePrompt}
+                onGenerate={generateScene}
+                onGenerateAll={generateAllBroll}
+                disabled={busy || exportRunning}
+              />
             </section>
           </section>
         </>
       )}
-      <footer className="statusbar"><span className={busy || exportRunning ? 'pulse' : ''}>{busy || exportRunning ? '●' : '○'}</span> {status}{error && <strong className="error">{error}</strong>}</footer>
+      <footer className="statusbar"><span className={busy || exportRunning || generatingAll || brollGenerating ? 'pulse' : ''}>{busy || exportRunning || generatingAll || brollGenerating ? '●' : '○'}</span> {status}{error && <strong className="error">{error}</strong>}</footer>
     </main>
   );
+}
+
+function BrollPanel({
+  project,
+  plan,
+  prompts,
+  generatingScene,
+  generatingAll,
+  canGenerate,
+  onPlan,
+  onPromptChange,
+  onPromptBlur,
+  onGenerate,
+  onGenerateAll,
+  disabled,
+}: {
+  project: Project;
+  plan: BrollPlan | null;
+  prompts: Record<string, string>;
+  generatingScene: string | null;
+  generatingAll: boolean;
+  canGenerate: boolean;
+  onPlan: () => void;
+  onPromptChange: (sceneId: string, value: string) => void;
+  onPromptBlur: (scene: BrollScene) => void;
+  onGenerate: (scene: BrollScene) => void;
+  onGenerateAll: () => void;
+  disabled: boolean;
+}) {
+  return <section className="panel brollPanel">
+    <div className="sectionTitle brollTitle">
+      <div><span className="label">CODEX B-ROLL DIRECTOR</span><h3>Hyper-realistic scene images</h3></div>
+      <div className="brollActions">
+        <button onClick={onPlan} disabled={disabled || generatingAll || !!generatingScene}>{plan ? 'Re-plan scenes' : 'Plan scenes'}</button>
+        {plan && <button className="primary" onClick={onGenerateAll} disabled={disabled || generatingAll || !!generatingScene || !canGenerate}>{generatingAll ? 'Generating…' : 'Generate all'}</button>}
+      </div>
+    </div>
+    {!plan ? (
+      <div className="brollEmpty">
+        <strong>Turn the cleaned narration into visual scenes.</strong>
+        <p>Codex groups the kept transcript into major visual ideas and writes production-ready prompts tuned to the supplied reference style: premium Indian healthcare/lifestyle photography, natural skin and anatomy, realistic clinic/home environments, shallow depth of field and clean 9:16-safe composition.</p>
+      </div>
+    ) : (
+      <>
+        <div className="styleStrip"><strong>{plan.orientation === 'portrait' ? '9:16 vertical' : '16:9 landscape'}</strong><span>{plan.scenes.length} scenes</span><span>High-realism commercial photography</span><span>No text / logos</span></div>
+        <div className="brollGrid">
+          {plan.scenes.map((scene) => {
+            const generating = generatingScene === scene.id;
+            const imageUrl = scene.generatedAt ? api.brollImageUrl(project.id, scene.id, scene.generatedAt) : '';
+            return <article className="brollCard" key={scene.id}>
+              <div className={`brollImage ${plan.orientation}`}>
+                {imageUrl ? <img src={imageUrl} alt={`${scene.title} B-roll`} /> : <div className="brollPlaceholder"><span>{generating ? 'Generating image…' : scene.id.toUpperCase()}</span><small>{scene.shotType || 'B-roll still'}</small></div>}
+              </div>
+              <div className="brollBody">
+                <div className="sceneMeta"><span>{scene.sourceStart.toFixed(1)}–{scene.sourceEnd.toFixed(1)}s</span><span>{scene.shotType}</span></div>
+                <h4>{scene.title}</h4>
+                <p className="sceneNarration">“{scene.narration}”</p>
+                {scene.visualIntent && <p className="visualIntent">{scene.visualIntent}</p>}
+                <label>Image prompt<textarea value={prompts[scene.id] ?? scene.imagePrompt} onChange={(e) => onPromptChange(scene.id, e.target.value)} onBlur={() => onPromptBlur(scene)} rows={9} /></label>
+                <button className={scene.generatedAt ? '' : 'primary'} onClick={() => onGenerate(scene)} disabled={disabled || generatingAll || !!generatingScene || !canGenerate}>{generating ? 'Generating…' : scene.generatedAt ? 'Regenerate image' : 'Generate image'}</button>
+              </div>
+            </article>;
+          })}
+        </div>
+      </>
+    )}
+  </section>;
 }
 
 function ExportProgress({ job }: { job: ExportStatus }) {
