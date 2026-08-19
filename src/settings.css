@@ -11,4 +11,13 @@
 .settingsGrid label { color:#a1a1aa; font-size:12px; display:flex; flex-direction:column; gap:7px; }
 .settingsGrid .wide { grid-column:1/-1; }
 .settingsNote { font-size:12px; line-height:1.55; }
+.exportProgress { margin-top:8px; padding:12px; border:1px solid #27272a; background:#0f0f11; border-radius:12px; }
+.exportProgressHead,.exportMeta { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.exportProgressHead { font-size:12px; }
+.exportProgressHead span { color:#a1a1aa; font-variant-numeric:tabular-nums; }
+.progressTrack { height:7px; overflow:hidden; border-radius:999px; background:#27272a; margin:9px 0; }
+.progressTrack span { display:block; height:100%; border-radius:inherit; background:#f4f4f5; transition:width .35s ease; }
+.exportProgress.completed .progressTrack span { background:#86efac; }
+.exportProgress.failed .progressTrack span { background:#fb7185; }
+.exportMeta { color:#71717a; font-size:10px; flex-wrap:wrap; }
 @media (max-width:1000px) { .headerActions{flex-wrap:wrap;justify-content:flex-end}.systemGrid,.settingsGrid{grid-template-columns:1fr}.settingsGrid .wide{grid-column:auto} }
