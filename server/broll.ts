@@ -30,11 +30,15 @@ export type BrollScene = {
   visualIntent: string;
   shotType: string;
   imagePrompt: string;
+  videoPrompt?: string;
   enabled: boolean;
   imageFile?: string;
   generatedAt?: string;
-  provider?: ImageProvider;
+  provider?: ImageProvider | 'manual';
   model?: string;
+  videoFile?: string;
+  videoGeneratedAt?: string;
+  videoModel?: string;
 };
 
 export type BrollPlan = {
@@ -53,6 +57,7 @@ export type ImageProviderConfig = {
   geminiModel?: string;
   grokBin?: string;
   grokModel?: string;
+  grokVideoModel?: string;
   codexBin?: string;
   ffmpegBin?: string;
 };
@@ -137,14 +142,8 @@ function planSchema(exactCount = 0) {
           additionalProperties: false,
           required: ['id', 'title', 'startWordId', 'endWordId', 'narration', 'visualIntent', 'shotType', 'imagePrompt'],
           properties: {
-            id: { type: 'string' },
-            title: { type: 'string' },
-            startWordId: { type: 'string' },
-            endWordId: { type: 'string' },
-            narration: { type: 'string' },
-            visualIntent: { type: 'string' },
-            shotType: { type: 'string' },
-            imagePrompt: { type: 'string' },
+            id: { type: 'string' }, title: { type: 'string' }, startWordId: { type: 'string' }, endWordId: { type: 'string' },
+            narration: { type: 'string' }, visualIntent: { type: 'string' }, shotType: { type: 'string' }, imagePrompt: { type: 'string' },
           },
         },
       },
@@ -154,22 +153,12 @@ function planSchema(exactCount = 0) {
 }
 
 function normalizeSettings(raw: Partial<BrollPlanSettings> | undefined): BrollPlanSettings {
-  const workflowMode: BrollWorkflowMode = ['cleaned-video', 'raw-video', 'assets-only'].includes(String(raw?.workflowMode))
-    ? raw!.workflowMode as BrollWorkflowMode
-    : 'cleaned-video';
-  const provider: ImageProvider = ['openai', 'gemini', 'grok-cli', 'codex-cli'].includes(String(raw?.provider))
-    ? raw!.provider as ImageProvider
-    : 'gemini';
-  const countMode: BrollCountMode = ['auto', 'exact', 'per-minute'].includes(String(raw?.countMode))
-    ? raw!.countMode as BrollCountMode
-    : 'auto';
-  const aspectRatio = ['auto', '9:16', '16:9'].includes(String(raw?.aspectRatio))
-    ? raw!.aspectRatio as BrollPlanSettings['aspectRatio']
-    : 'auto';
+  const workflowMode: BrollWorkflowMode = ['cleaned-video', 'raw-video', 'assets-only'].includes(String(raw?.workflowMode)) ? raw!.workflowMode as BrollWorkflowMode : 'cleaned-video';
+  const provider: ImageProvider = ['openai', 'gemini', 'grok-cli', 'codex-cli'].includes(String(raw?.provider)) ? raw!.provider as ImageProvider : 'gemini';
+  const countMode: BrollCountMode = ['auto', 'exact', 'per-minute'].includes(String(raw?.countMode)) ? raw!.countMode as BrollCountMode : 'auto';
+  const aspectRatio = ['auto', '9:16', '16:9'].includes(String(raw?.aspectRatio)) ? raw!.aspectRatio as BrollPlanSettings['aspectRatio'] : 'auto';
   return {
-    workflowMode,
-    provider,
-    countMode,
+    workflowMode, provider, countMode,
     targetCount: Math.max(1, Math.min(40, Number(raw?.targetCount) || 6)),
     imagesPerMinute: Math.max(0.5, Math.min(20, Number(raw?.imagesPerMinute) || 5)),
     minSceneDuration: Math.max(1, Math.min(20, Number(raw?.minSceneDuration) || 3)),
@@ -178,96 +167,52 @@ function normalizeSettings(raw: Partial<BrollPlanSettings> | undefined): BrollPl
   };
 }
 
-function validatePlan(
-  words: BrollWord[],
-  keepRanges: BrollKeepRange[] | undefined,
-  raw: any,
-  orientation: 'portrait' | 'landscape',
-  settings: BrollPlanSettings,
-): BrollPlan {
+function validatePlan(words: BrollWord[], keepRanges: BrollKeepRange[] | undefined, raw: any, orientation: 'portrait' | 'landscape', settings: BrollPlanSettings): BrollPlan {
   const { index, kept } = keptWordIndexes(words, keepRanges);
   const scenes: BrollScene[] = [];
   let previousStart = -1;
-
   for (const candidate of raw.scenes ?? []) {
     const start = index.get(candidate.startWordId);
     const end = index.get(candidate.endWordId);
     if (start === undefined || end === undefined || start > end) continue;
     if (!kept.has(start) || !kept.has(end) || start < previousStart) continue;
-
     const narrationWords: string[] = [];
-    for (let position = start; position <= end; position += 1) {
-      if (kept.has(position)) narrationWords.push(words[position].text);
-    }
+    for (let position = start; position <= end; position += 1) if (kept.has(position)) narrationWords.push(words[position].text);
     const imagePrompt = String(candidate.imagePrompt ?? '').trim();
     if (!narrationWords.length || imagePrompt.length < 40) continue;
-
     const sceneNumber = scenes.length + 1;
     scenes.push({
       id: `scene-${String(sceneNumber).padStart(3, '0')}`,
       title: String(candidate.title ?? `Scene ${sceneNumber}`).trim().slice(0, 100) || `Scene ${sceneNumber}`,
-      startWordId: words[start].id,
-      endWordId: words[end].id,
-      sourceStart: words[start].start,
-      sourceEnd: words[end].end,
-      narration: narrationWords.join(' '),
-      visualIntent: String(candidate.visualIntent ?? '').trim(),
-      shotType: String(candidate.shotType ?? '').trim(),
-      imagePrompt,
-      enabled: true,
+      startWordId: words[start].id, endWordId: words[end].id,
+      sourceStart: words[start].start, sourceEnd: words[end].end,
+      narration: narrationWords.join(' '), visualIntent: String(candidate.visualIntent ?? '').trim(), shotType: String(candidate.shotType ?? '').trim(),
+      imagePrompt, enabled: true,
     });
     previousStart = start;
   }
-
   if (!scenes.length) throw new Error('The planning agent did not return any valid B-roll scenes');
   const expected = targetSceneCount(words, keepRanges, settings);
-  if (expected && scenes.length !== expected) {
-    throw new Error(`The planning agent returned ${scenes.length} scenes; ${expected} were requested. Retry planning.`);
-  }
-  return {
-    version: 2,
-    orientation,
-    stylePreset: BROLL_STYLE_PRESET,
-    settings,
-    scenes,
-    notes: Array.isArray(raw.notes) ? raw.notes.map((note: unknown) => String(note)) : [],
-  };
+  if (expected && scenes.length !== expected) throw new Error(`The planning agent returned ${scenes.length} scenes; ${expected} were requested. Retry planning.`);
+  return { version: 2, orientation, stylePreset: BROLL_STYLE_PRESET, settings, scenes, notes: Array.isArray(raw.notes) ? raw.notes.map((note: unknown) => String(note)) : [] };
 }
 
 export async function createBrollPlan(options: {
-  codexBin: string;
-  workDir: string;
-  words: BrollWord[];
-  keepRanges?: BrollKeepRange[];
-  orientation: 'portrait' | 'landscape';
-  settings?: Partial<BrollPlanSettings>;
+  codexBin: string; workDir: string; words: BrollWord[]; keepRanges?: BrollKeepRange[]; orientation: 'portrait' | 'landscape'; settings?: Partial<BrollPlanSettings>;
 }) {
   const settings = normalizeSettings(options.settings);
   const { codexBin, workDir, words, keepRanges, orientation } = options;
   const { kept } = keptWordIndexes(words, keepRanges);
-  const transcript = words
-    .map((word, index) => ({ word, index }))
-    .filter(({ index }) => kept.has(index))
-    .map(({ word }) => `[${word.id} ${word.start.toFixed(3)}-${word.end.toFixed(3)}] ${word.text}`)
-    .join('\n');
-
+  const transcript = words.map((word, index) => ({ word, index })).filter(({ index }) => kept.has(index)).map(({ word }) => `[${word.id} ${word.start.toFixed(3)}-${word.end.toFixed(3)}] ${word.text}`).join('\n');
   const requestedCount = targetSceneCount(words, keepRanges, settings);
   const schemaPath = path.join(workDir, 'broll-plan.schema.json');
   const outputPath = path.join(workDir, 'codex-broll-plan.json');
   await fs.writeFile(schemaPath, JSON.stringify(planSchema(requestedCount), null, 2));
-
-  const targetAspect = settings.aspectRatio === 'auto'
-    ? (orientation === 'portrait' ? 'vertical 9:16' : 'landscape 16:9')
-    : settings.aspectRatio;
-  const countInstruction = requestedCount
-    ? `Create exactly ${requestedCount} B-roll scenes.`
-    : `Choose the number of scenes automatically. Prefer one strong image per major idea, usually ${settings.minSceneDuration}-${settings.maxSceneDuration} seconds apart.`;
-
-  const prompt = `You are the B-roll director and image-prompt writer for a polished talking-head video.\n\n${countInstruction}\n\nAnalyze ONLY the supplied narration words. Group the narration into distinct visual ideas. Do not create a new scene for every sentence when consecutive lines describe the same idea. Do not invent claims that are not supported by the narration.\n\nEvery scene must use startWordId and endWordId from the supplied words. Keep scene order chronological. Prefer concrete visuals over abstract symbolism. The B-roll should enhance the narration rather than show a person speaking to camera.\n\nTARGET FRAME: ${targetAspect}.\nTARGET SCENE DURATION: normally ${settings.minSceneDuration}-${settings.maxSceneDuration} seconds.\n\nREFERENCE VISUAL LANGUAGE:\n${BROLL_STYLE_PRESET}\n\nPROMPT-WRITING RULES:\n- imagePrompt must be a complete standalone production prompt.\n- Describe the exact subject, action, environment, wardrobe/props, camera distance, lens perspective, lighting, depth of field, composition and realism details.\n- For healthcare or dental scenes, be clinically believable: correct PPE, tools and patient positioning; no gore.\n- When a South-Asian/Indian context is natural, explicitly say so.\n- Keep important faces/actions inside the central safe area for the final crop.\n- Explicitly request natural skin texture, realistic hands/teeth/anatomy and a real-camera photographic look.\n- Explicitly forbid text, logos, watermarks and artificial/CGI appearance.\n- Vary close-up, medium, environmental and detail shots across adjacent scenes.\n\nNARRATION WORDS:\n${transcript}`;
-
+  const targetAspect = settings.aspectRatio === 'auto' ? (orientation === 'portrait' ? 'vertical 9:16' : 'landscape 16:9') : settings.aspectRatio;
+  const countInstruction = requestedCount ? `Create exactly ${requestedCount} B-roll scenes.` : `Choose the number of scenes automatically. Prefer one strong image per major idea, usually ${settings.minSceneDuration}-${settings.maxSceneDuration} seconds apart.`;
+  const prompt = `You are the B-roll director and image-prompt writer for a polished talking-head video.\n\n${countInstruction}\n\nAnalyze ONLY the supplied narration words. Group the narration into distinct visual ideas. Do not create a new scene for every sentence when consecutive lines describe the same idea. Do not invent claims unsupported by the narration.\n\nEvery scene must use startWordId and endWordId from the supplied words. Keep scene order chronological. Prefer concrete visuals over abstract symbolism.\n\nTARGET FRAME: ${targetAspect}.\nTARGET SCENE DURATION: normally ${settings.minSceneDuration}-${settings.maxSceneDuration} seconds.\n\nREFERENCE VISUAL LANGUAGE:\n${BROLL_STYLE_PRESET}\n\nPROMPT-WRITING RULES:\n- imagePrompt must be a complete standalone production prompt.\n- Describe subject, action, environment, wardrobe/props, camera distance, lens, lighting, depth of field, composition and realism.\n- Healthcare/dental scenes must be clinically believable with correct PPE/tools/patient positioning and no gore.\n- Prefer authentic Indian context when natural.\n- Keep important faces/actions in the central safe area.\n- Require natural skin, realistic hands/teeth/anatomy, real-camera photography, and forbid text/logos/watermarks/CGI appearance.\n- Vary composition across adjacent scenes.\n\nNARRATION WORDS:\n${transcript}`;
   await run(codexBin, ['exec', '--ephemeral', '--output-schema', schemaPath, '--output-last-message', outputPath, '-'], prompt);
-  const raw = JSON.parse(await fs.readFile(outputPath, 'utf8'));
-  const plan = validatePlan(words, keepRanges, raw, orientation, settings);
+  const plan = validatePlan(words, keepRanges, JSON.parse(await fs.readFile(outputPath, 'utf8')), orientation, settings);
   await saveBrollPlan(workDir, plan);
   return plan;
 }
@@ -280,38 +225,40 @@ export async function saveBrollPlan(workDir: string, plan: BrollPlan) {
 export async function loadBrollPlan(workDir: string): Promise<BrollPlan | null> {
   try {
     const raw = JSON.parse(await fs.readFile(path.join(workDir, 'broll-plan.json'), 'utf8')) as BrollPlan;
-    if (raw.version === 2) return raw;
-    return null;
-  } catch {
-    return null;
-  }
+    return raw.version === 2 ? raw : null;
+  } catch { return null; }
 }
 
-export async function updateBrollScene(
-  workDir: string,
-  plan: BrollPlan,
-  sceneId: string,
-  patch: { imagePrompt?: string; title?: string; sourceStart?: number; sourceEnd?: number; enabled?: boolean },
-) {
+export async function updateBrollScene(workDir: string, plan: BrollPlan, sceneId: string, patch: { imagePrompt?: string; videoPrompt?: string; title?: string; sourceStart?: number; sourceEnd?: number; enabled?: boolean }) {
   const scene = plan.scenes.find((candidate) => candidate.id === sceneId);
   if (!scene) throw new Error('B-roll scene not found');
   if (typeof patch.title === 'string' && patch.title.trim()) scene.title = patch.title.trim().slice(0, 100);
   if (typeof patch.imagePrompt === 'string' && patch.imagePrompt.trim()) scene.imagePrompt = patch.imagePrompt.trim();
+  if (typeof patch.videoPrompt === 'string') scene.videoPrompt = patch.videoPrompt.trim() || undefined;
   if (typeof patch.enabled === 'boolean') scene.enabled = patch.enabled;
   const nextStart = Number.isFinite(patch.sourceStart) ? Math.max(0, Number(patch.sourceStart)) : scene.sourceStart;
   const nextEnd = Number.isFinite(patch.sourceEnd) ? Math.max(0, Number(patch.sourceEnd)) : scene.sourceEnd;
   if (nextEnd <= nextStart) throw new Error('B-roll end time must be after start time');
-  scene.sourceStart = nextStart;
-  scene.sourceEnd = nextEnd;
+  scene.sourceStart = nextStart; scene.sourceEnd = nextEnd;
   await saveBrollPlan(workDir, plan);
   return scene;
 }
 
+export async function deleteBrollScene(workDir: string, plan: BrollPlan, sceneId: string) {
+  const index = plan.scenes.findIndex((scene) => scene.id === sceneId);
+  if (index < 0) throw new Error('B-roll scene not found');
+  const [scene] = plan.scenes.splice(index, 1);
+  await Promise.all([
+    scene.imageFile ? fs.rm(scene.imageFile, { force: true }) : Promise.resolve(),
+    scene.videoFile ? fs.rm(scene.videoFile, { force: true }) : Promise.resolve(),
+  ]);
+  await saveBrollPlan(workDir, plan);
+  return plan;
+}
+
 function generatedImagePrompt(scene: BrollScene, plan: BrollPlan) {
-  const aspect = plan.settings.aspectRatio === 'auto'
-    ? (plan.orientation === 'portrait' ? 'vertical 9:16' : 'landscape 16:9')
-    : plan.settings.aspectRatio;
-  return `${scene.imagePrompt}\n\nFINAL QUALITY BAR: ${BROLL_STYLE_PRESET}\n\nDeliver exactly one hyper-realistic photographic still composed for a ${aspect} B-roll frame. The result must look like a frame captured on a real premium camera in a real location. Keep the essential subject and action safely centered. Absolutely no text, captions, logos, watermark or graphic-design elements.`;
+  const aspect = targetAspect(plan);
+  return `${scene.imagePrompt}\n\nFINAL QUALITY BAR: ${BROLL_STYLE_PRESET}\n\nDeliver exactly one hyper-realistic photographic still composed for a ${aspect} B-roll frame. It must look captured on a real premium camera in a real location. Keep the essential subject/action safely centered. Absolutely no text, captions, logos, watermark or graphic-design elements.`;
 }
 
 function targetAspect(plan: BrollPlan) {
@@ -324,21 +271,10 @@ function findBase64Image(value: any): string | undefined {
   if (typeof value === 'object') {
     if (typeof value.data === 'string' && (value.type === 'image' || value.mime_type?.startsWith?.('image/'))) return value.data;
     if (typeof value.b64_json === 'string') return value.b64_json;
-    if (value.output_image) {
-      const nested = findBase64Image(value.output_image);
-      if (nested) return nested;
-    }
-    for (const child of Object.values(value)) {
-      const nested = findBase64Image(child);
-      if (nested) return nested;
-    }
+    if (value.output_image) { const nested = findBase64Image(value.output_image); if (nested) return nested; }
+    for (const child of Object.values(value)) { const nested = findBase64Image(child); if (nested) return nested; }
   }
-  if (Array.isArray(value)) {
-    for (const child of value) {
-      const nested = findBase64Image(child);
-      if (nested) return nested;
-    }
-  }
+  if (Array.isArray(value)) for (const child of value) { const nested = findBase64Image(child); if (nested) return nested; }
   return undefined;
 }
 
@@ -346,14 +282,9 @@ async function generateOpenAi(prompt: string, aspect: '9:16' | '16:9', config: I
   if (!config.openAiApiKey) throw new Error('OPENAI_API_KEY is not configured');
   const model = config.openAiModel || 'gpt-image-2';
   const size = aspect === '9:16' ? '1024x1536' : '1536x1024';
-  const response = await fetch('https://api.openai.com/v1/images/generations', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${config.openAiApiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model, prompt, size, quality: 'high' }),
-  });
+  const response = await fetch('https://api.openai.com/v1/images/generations', { method: 'POST', headers: { Authorization: `Bearer ${config.openAiApiKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ model, prompt, size, quality: 'high' }) });
   if (!response.ok) throw new Error(`OpenAI image generation failed: ${response.status} ${await response.text()}`);
-  const payload: any = await response.json();
-  const encoded = payload.data?.[0]?.b64_json;
+  const encoded = (await response.json() as any).data?.[0]?.b64_json;
   if (!encoded) throw new Error('OpenAI image generation returned no image data');
   await fs.writeFile(outputPath, Buffer.from(encoded, 'base64'));
   return model;
@@ -362,30 +293,15 @@ async function generateOpenAi(prompt: string, aspect: '9:16' | '16:9', config: I
 async function generateGemini(prompt: string, aspect: '9:16' | '16:9', config: ImageProviderConfig, outputPath: string) {
   if (!config.geminiApiKey) throw new Error('GEMINI_API_KEY is not configured');
   const model = config.geminiModel || 'gemini-3.1-flash-image';
-  const response = await fetch('https://generativelanguage.googleapis.com/v1beta/interactions', {
-    method: 'POST',
-    headers: { 'x-goog-api-key': config.geminiApiKey, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model,
-      input: prompt,
-      response_format: { type: 'image', mime_type: 'image/png', aspect_ratio: aspect, image_size: '2K' },
-    }),
-  });
+  const response = await fetch('https://generativelanguage.googleapis.com/v1beta/interactions', { method: 'POST', headers: { 'x-goog-api-key': config.geminiApiKey, 'Content-Type': 'application/json' }, body: JSON.stringify({ model, input: prompt, response_format: { type: 'image', mime_type: 'image/png', aspect_ratio: aspect, image_size: '2K' } }) });
   if (!response.ok) throw new Error(`Gemini image generation failed: ${response.status} ${await response.text()}`);
-  const payload: any = await response.json();
-  const encoded = findBase64Image(payload);
+  const encoded = findBase64Image(await response.json());
   if (!encoded) throw new Error('Gemini image generation returned no image data');
   await fs.writeFile(outputPath, Buffer.from(encoded, 'base64'));
   return model;
 }
 
-async function generateWithAgentCli(
-  provider: 'grok-cli' | 'codex-cli',
-  prompt: string,
-  config: ImageProviderConfig,
-  workDir: string,
-  outputPath: string,
-) {
+async function generateWithAgentCli(provider: 'grok-cli' | 'codex-cli', prompt: string, config: ImageProviderConfig, workDir: string, outputPath: string) {
   await fs.rm(outputPath, { force: true });
   if (provider === 'grok-cli') {
     if (!config.grokBin) throw new Error('Grok CLI was not found. Configure GROK_BIN or install Grok Build.');
@@ -395,34 +311,38 @@ async function generateWithAgentCli(
     await run(config.grokBin, args, undefined, 300000);
   } else {
     if (!config.codexBin) throw new Error('Codex CLI was not found. Configure CODEX_BIN or install Codex.');
-    const agentPrompt = `Create exactly one image for this production prompt using any image-generation tool or skill available in your Codex environment. Save the actual final image file to this exact path: ${outputPath}\nDo not merely describe the image. Do not create HTML or SVG. The task is complete only when the image file exists.\n\n${prompt}`;
+    const agentPrompt = `Create exactly one image for this production prompt using any image-generation tool or skill available in your Codex environment. Save the actual final image file to this exact path: ${outputPath}\nDo not merely describe the image. The task is complete only when the image file exists.\n\n${prompt}`;
     await run(config.codexBin, ['exec', '--ephemeral', '--sandbox', 'workspace-write', '-C', workDir, '-'], agentPrompt, 300000);
   }
   const stat = await fs.stat(outputPath).catch(() => null);
-  if (!stat?.isFile() || stat.size < 10_000) {
-    throw new Error(`${provider === 'grok-cli' ? 'Grok CLI' : 'Codex CLI'} completed without creating a usable image. This provider requires an image-generation tool/skill to be available in that CLI environment.`);
-  }
+  if (!stat?.isFile() || stat.size < 10_000) throw new Error(`${provider === 'grok-cli' ? 'Grok CLI' : 'Codex CLI'} completed without creating a usable image. This provider requires an image-generation capability in that CLI environment.`);
   return provider === 'grok-cli' ? (config.grokModel || 'grok-cli') : 'codex-cli';
 }
 
 async function normalizeImage(rawPath: string, outputPath: string, aspect: '9:16' | '16:9', ffmpegBin?: string) {
-  if (!ffmpegBin) {
-    await fs.rename(rawPath, outputPath);
-    return;
-  }
-  const filter = aspect === '9:16'
-    ? 'scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,crop=1080:1920'
-    : 'scale=1920:1080:force_original_aspect_ratio=increase:flags=lanczos,crop=1920:1080';
+  if (!ffmpegBin) { await fs.copyFile(rawPath, outputPath); if (rawPath !== outputPath) await fs.rm(rawPath, { force: true }); return; }
+  const filter = aspect === '9:16' ? 'scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,crop=1080:1920' : 'scale=1920:1080:force_original_aspect_ratio=increase:flags=lanczos,crop=1920:1080';
   await run(ffmpegBin, ['-hide_banner', '-loglevel', 'error', '-y', '-i', rawPath, '-vf', filter, '-frames:v', '1', outputPath], undefined, 120000);
-  await fs.rm(rawPath, { force: true });
+  if (rawPath !== outputPath) await fs.rm(rawPath, { force: true });
 }
 
-export async function generateBrollImage(options: {
-  config: ImageProviderConfig;
-  workDir: string;
-  plan: BrollPlan;
-  sceneId: string;
-}) {
+export async function importBrollImage(options: { workDir: string; plan: BrollPlan; sceneId: string; sourcePath: string; ffmpegBin?: string }) {
+  const scene = options.plan.scenes.find((candidate) => candidate.id === options.sceneId);
+  if (!scene) throw new Error('B-roll scene not found');
+  const brollDir = path.join(options.workDir, 'broll');
+  await fs.mkdir(brollDir, { recursive: true });
+  const outputPath = path.join(brollDir, `${scene.id}.png`);
+  await normalizeImage(options.sourcePath, outputPath, targetAspect(options.plan), options.ffmpegBin);
+  scene.imageFile = outputPath;
+  scene.generatedAt = new Date().toISOString();
+  scene.provider = 'manual';
+  scene.model = 'manual-import';
+  if (scene.videoFile) { await fs.rm(scene.videoFile, { force: true }); scene.videoFile = undefined; scene.videoGeneratedAt = undefined; scene.videoModel = undefined; }
+  await saveBrollPlan(options.workDir, options.plan);
+  return scene;
+}
+
+export async function generateBrollImage(options: { config: ImageProviderConfig; workDir: string; plan: BrollPlan; sceneId: string }) {
   const { config, workDir, plan, sceneId } = options;
   const scene = plan.scenes.find((candidate) => candidate.id === sceneId);
   if (!scene) throw new Error('B-roll scene not found');
@@ -433,45 +353,77 @@ export async function generateBrollImage(options: {
   await fs.mkdir(brollDir, { recursive: true });
   const rawPath = path.join(brollDir, `${scene.id}.raw.png`);
   const outputPath = path.join(brollDir, `${scene.id}.png`);
-
   let model: string;
   if (provider === 'openai') model = await generateOpenAi(prompt, aspect, config, rawPath);
   else if (provider === 'gemini') model = await generateGemini(prompt, aspect, config, rawPath);
   else model = await generateWithAgentCli(provider, prompt, config, workDir, rawPath);
-
   await normalizeImage(rawPath, outputPath, aspect, config.ffmpegBin);
-  scene.imageFile = outputPath;
-  scene.generatedAt = new Date().toISOString();
-  scene.provider = provider;
-  scene.model = model;
+  scene.imageFile = outputPath; scene.generatedAt = new Date().toISOString(); scene.provider = provider; scene.model = model;
+  if (scene.videoFile) { await fs.rm(scene.videoFile, { force: true }); scene.videoFile = undefined; scene.videoGeneratedAt = undefined; scene.videoModel = undefined; }
   await saveBrollPlan(workDir, plan);
   return scene;
 }
 
-export function buildBrollOverlayFilter(options: {
-  plan: BrollPlan;
-  width: number;
-  height: number;
-  fps: number;
-  cleanedSegments?: Array<{ start: number; end: number }>;
-}) {
-  const active = options.plan.scenes.filter((scene) => scene.enabled && scene.imageFile);
-  if (!active.length) throw new Error('Generate at least one enabled B-roll image before exporting video');
+export async function createVideoPrompt(options: { codexBin: string; workDir: string; plan: BrollPlan; sceneId: string }) {
+  const scene = options.plan.scenes.find((candidate) => candidate.id === options.sceneId);
+  if (!scene) throw new Error('B-roll scene not found');
+  if (!scene.imageFile) throw new Error('Add or generate a B-roll image before creating video');
+  const schemaPath = path.join(options.workDir, `${scene.id}-video-prompt.schema.json`);
+  const outputPath = path.join(options.workDir, `${scene.id}-video-prompt.json`);
+  const schema = { type: 'object', additionalProperties: false, required: ['videoPrompt'], properties: { videoPrompt: { type: 'string' } } };
+  await fs.writeFile(schemaPath, JSON.stringify(schema, null, 2));
+  const duration = Math.max(2, Math.min(12, scene.sourceEnd - scene.sourceStart));
+  const prompt = `You are a cinematic image-to-video motion director. Write ONE production-ready motion prompt that animates the existing still image for this B-roll scene.\n\nNarration: ${scene.narration}\nVisual intent: ${scene.visualIntent}\nShot type: ${scene.shotType}\nStill-image prompt: ${scene.imagePrompt}\nTarget duration: about ${duration.toFixed(1)} seconds.\n\nRules:\n- Preserve the exact people, identity, clothing, anatomy, environment, lighting, composition and clinical details already present in the still.\n- Add subtle believable motion only: natural breathing, blinking, small hand/body movement, gentle environmental motion, and restrained camera movement such as a slow push, drift or parallax when appropriate.\n- Do not introduce new people, objects, tools, text or logos.\n- Do not morph faces, hands, teeth or medical instruments. Do not change ethnicity, age, wardrobe or room design.\n- Avoid dramatic camera moves, fast zooms, scene cuts, surreal motion, lip-sync/talking unless the scene explicitly requires it, and obvious AI warping.\n- Make the result feel like a real premium live-action shot captured immediately after the still frame.\n- Return only a concise but detailed videoPrompt in the required JSON schema.`;
+  await run(options.codexBin, ['exec', '--ephemeral', '--output-schema', schemaPath, '--output-last-message', outputPath, '-'], prompt);
+  const raw = JSON.parse(await fs.readFile(outputPath, 'utf8'));
+  const videoPrompt = String(raw.videoPrompt ?? '').trim();
+  if (videoPrompt.length < 30) throw new Error('Codex returned an unusable video prompt');
+  scene.videoPrompt = videoPrompt;
+  await saveBrollPlan(options.workDir, options.plan);
+  return scene;
+}
+
+export async function generateBrollVideoWithGrokCli(options: { config: ImageProviderConfig; workDir: string; plan: BrollPlan; sceneId: string }) {
+  const scene = options.plan.scenes.find((candidate) => candidate.id === options.sceneId);
+  if (!scene) throw new Error('B-roll scene not found');
+  if (!scene.imageFile) throw new Error('Add or generate a B-roll image first');
+  if (!scene.videoPrompt) throw new Error('Create a Codex video prompt first');
+  if (!options.config.grokBin) throw new Error('Grok CLI was not found. Configure GROK_BIN or install Grok Build.');
+  const brollDir = path.join(options.workDir, 'broll');
+  const outputPath = path.join(brollDir, `${scene.id}.mp4`);
+  await fs.rm(outputPath, { force: true });
+  const duration = Math.max(2, Math.min(12, scene.sourceEnd - scene.sourceStart));
+  const videoModel = options.config.grokVideoModel || 'grok-imagine-video-1.5';
+  const agentPrompt = `Turn the local still image at ${scene.imageFile} into an image-to-video clip and save the final playable MP4 to this exact path: ${outputPath}\n\nUse the xAI/Grok Imagine image-to-video capability available in this Grok Build environment. Prefer model ${videoModel}. Target duration: ${duration.toFixed(1)} seconds. Use the source still as the starting image, not merely as a loose visual reference.\n\nMOTION PROMPT:\n${scene.videoPrompt}\n\nYou may use shell/code/tools available to Grok Build to complete the task. Do not stop after giving instructions or code. The task is complete only after the MP4 exists at the exact output path. Do not modify or delete the source still.`;
+  const args = ['--no-auto-update', '--always-approve', '--cwd', options.workDir, '-p', agentPrompt, '--output-format', 'plain'];
+  if (options.config.grokModel) args.splice(4, 0, '-m', options.config.grokModel);
+  await run(options.config.grokBin, args, undefined, 900000);
+  const stat = await fs.stat(outputPath).catch(() => null);
+  if (!stat?.isFile() || stat.size < 50_000) throw new Error('Grok CLI completed without creating a usable MP4. The current Grok CLI environment must have access to an image-to-video capability/authentication.');
+  if (options.config.ffmpegBin) await run(options.config.ffmpegBin, ['-v', 'error', '-i', outputPath, '-f', 'null', '-'], undefined, 120000);
+  scene.videoFile = outputPath;
+  scene.videoGeneratedAt = new Date().toISOString();
+  scene.videoModel = videoModel;
+  await saveBrollPlan(options.workDir, options.plan);
+  return scene;
+}
+
+export function buildBrollOverlayFilter(options: { plan: BrollPlan; width: number; height: number; fps: number; cleanedSegments?: Array<{ start: number; end: number }> }) {
+  const active = options.plan.scenes.filter((scene) => scene.enabled && (scene.videoFile || scene.imageFile));
+  if (!active.length) throw new Error('Add at least one enabled B-roll image or video before exporting');
   const parts: string[] = ['[0:v]setpts=PTS-STARTPTS[base0]'];
   let previous = 'base0';
   active.forEach((scene, index) => {
     const input = index + 1;
-    const imageLabel = `img${index}`;
+    const mediaLabel = `broll${index}`;
     const output = `base${index + 1}`;
-    parts.push(`[${input}:v]scale=${options.width}:${options.height}:force_original_aspect_ratio=increase:flags=lanczos,crop=${options.width}:${options.height},setsar=1[${imageLabel}]`);
-    parts.push(`[${previous}][${imageLabel}]overlay=0:0:eof_action=pass:enable='between(t,${scene.sourceStart.toFixed(6)},${scene.sourceEnd.toFixed(6)})'[${output}]`);
+    const duration = Math.max(0.1, scene.sourceEnd - scene.sourceStart);
+    parts.push(`[${input}:v]scale=${options.width}:${options.height}:force_original_aspect_ratio=increase:flags=lanczos,crop=${options.width}:${options.height},setsar=1,trim=duration=${duration.toFixed(6)},setpts=PTS-STARTPTS+${scene.sourceStart.toFixed(6)}/TB[${mediaLabel}]`);
+    parts.push(`[${previous}][${mediaLabel}]overlay=0:0:eof_action=pass:enable='between(t,${scene.sourceStart.toFixed(6)},${scene.sourceEnd.toFixed(6)})'[${output}]`);
     previous = output;
   });
-
   if (options.cleanedSegments?.length) {
-    const expression = options.cleanedSegments
-      .map((segment) => `between(t\\,${segment.start.toFixed(6)}\\,${segment.end.toFixed(6)})`)
-      .join('+');
+    const expression = options.cleanedSegments.map((segment) => `between(t\\,${segment.start.toFixed(6)}\\,${segment.end.toFixed(6)})`).join('+');
     parts.push(`[${previous}]select='${expression}',setpts=N/${options.fps.toFixed(6)}/TB[vout]`);
     parts.push(`[0:a]aselect='${expression}',asetpts=N/SR/TB[aout]`);
   } else {
