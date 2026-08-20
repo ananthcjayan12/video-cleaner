@@ -56,7 +56,7 @@
 
 .brollPanel { padding:20px; overflow:hidden; margin-top:18px; }
 .brollTitle { align-items:flex-start; }
-.brollActions,.sceneButtons,.brollFooterActions,.assetActions { display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; }
+.brollActions,.sceneButtons,.brollFooterActions,.assetActions,.promptActions,.modalActions { display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; }
 .brollConfig { display:grid; grid-template-columns:repeat(auto-fit,minmax(175px,1fr)); gap:10px; padding:12px; border:1px solid #27272a; background:#0f0f11; border-radius:14px; margin-bottom:10px; }
 .brollConfig label,.timingGrid label { color:#a1a1aa; font-size:11px; display:flex; flex-direction:column; gap:6px; }
 .brollModeHelp { font-size:11px; line-height:1.55; margin:0 0 16px; }
@@ -94,8 +94,14 @@ button.danger:hover:not(:disabled) { background:rgba(127,29,29,.28); border-colo
 .timingGrid { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
 textarea { width:100%; border:1px solid #3f3f46; background:#09090b; color:#e4e4e7; border-radius:9px; padding:10px 11px; outline:none; resize:vertical; line-height:1.45; font:inherit; font-size:11px; }
 textarea:focus { border-color:#71717a; }
+.promptActions { justify-content:flex-start; }
 .sceneButtons { justify-content:flex-start; margin-top:auto; }
 .brollFooterActions { border-top:1px solid #27272a; padding-top:16px; margin-top:18px; }
+.modalBackdrop { position:fixed; inset:0; z-index:20; display:grid; place-items:center; padding:20px; background:rgba(0,0,0,.72); }
+.sceneModal { width:min(680px,100%); max-height:calc(100vh - 40px); overflow:auto; padding:20px; border:1px solid #3f3f46; border-radius:16px; background:#18181b; box-shadow:0 24px 80px rgba(0,0,0,.55); }
+.sceneModal > .muted { margin:0 0 14px; line-height:1.5; }
+.sceneModal label { display:flex; flex-direction:column; gap:7px; color:#a1a1aa; font-size:11px; }
+.modalActions { justify-content:flex-end; margin-top:16px; }
 
 @media (max-width:1000px) {
   .headerActions{flex-wrap:wrap;justify-content:flex-end}

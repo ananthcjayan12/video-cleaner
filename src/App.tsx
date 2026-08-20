@@ -17,6 +17,7 @@ import './settings.css';
 
 type SceneDraft = { title: string; imagePrompt: string; videoPrompt: string; sourceStart: string; sourceEnd: string; enabled: boolean };
 type ParallelFailure<T> = { item: T; error: string };
+type SceneDialog = { kind: 'image-prompt' | 'video-prompt' | 'image-regeneration' | 'video-regeneration'; sceneId: string; value: string };
 
 const DEFAULT_BROLL: BrollPlanSettings = {
   workflowMode: 'cleaned-video', provider: 'gemini', countMode: 'auto', targetCount: 6, imagesPerMinute: 5,
@@ -219,9 +220,9 @@ function App() {
     const updated = await api.updateBrollScene(project.id, scene.id, draftPatch(draft)); replaceScene(updated); setStatus('Saved locally ✓'); return updated;
   }
 
-  async function generateScene(scene: BrollScene) {
+  async function generateScene(scene: BrollScene, regenerationComment?: string) {
     if (!project || brollGenerating || generatingAll) return;
-    try { setError(''); setBrollGenerating(scene.id); setStatus(`Generating ${scene.title} with ${providerLabel(broll?.settings.provider ?? brollSettings.provider)}…`); const saved = await saveScene(scene); const result = await api.generateBrollScene(project.id, saved.id); replaceScene(result.scene); setStatus(`Generated ${result.scene.title}. Saved locally ✓`); }
+    try { setError(''); setBrollGenerating(scene.id); setStatus(`Generating ${scene.title} with ${providerLabel(broll?.settings.provider ?? brollSettings.provider)}…`); const saved = await saveScene(scene); const result = await api.generateBrollScene(project.id, saved.id, regenerationComment?.trim() || undefined); replaceScene(result.scene); setStatus(`Generated ${result.scene.title}. Saved locally ✓`); }
     catch (err) { setError(message(err)); } finally { setBrollGenerating(null); }
   }
 
@@ -244,10 +245,10 @@ function App() {
     catch (err) { setError(message(err)); } finally { setBrollGenerating(null); }
   }
 
-  async function createSceneVideo(scene: BrollScene) {
+  async function createSceneVideo(scene: BrollScene, regenerationComment?: string) {
     if (!project || brollGenerating || generatingAll) return;
     if (!system?.brollVideo?.configured) { setError('Codex + Grok CLI must be available in Settings before creating B-roll video.'); return; }
-    try { setError(''); setBrollGenerating(scene.id); setStatus(`${scene.videoPrompt ? 'Creating' : 'Codex is prompting, then creating'} video for ${scene.title} with Grok CLI…`); const saved = await saveScene(scene); const result = await api.createBrollVideo(project.id, saved.id); replaceScene(result.scene); setStatus(`B-roll video ready for ${result.scene.title}. Saved locally ✓`); }
+    try { setError(''); setBrollGenerating(scene.id); setStatus(`${scene.videoPrompt ? 'Creating' : 'Codex is prompting, then creating'} video for ${scene.title} with Grok CLI…`); const saved = await saveScene(scene); const result = await api.createBrollVideo(project.id, saved.id, regenerationComment?.trim() || undefined); replaceScene(result.scene); setStatus(`B-roll video ready for ${result.scene.title}. Saved locally ✓`); }
     catch (err) { setError(message(err)); } finally { setBrollGenerating(null); }
   }
 
@@ -280,6 +281,28 @@ function App() {
 
   async function generateAllBroll() { if (broll) await runImageBatch(broll.scenes, 'all'); }
   async function generateMissingBroll() { if (broll) await runImageBatch(broll.scenes.filter((scene) => !scene.imageFile), 'missing'); }
+
+  async function generateAllVideoPrompts() {
+    if (!project || !broll || generatingAll || brollGenerating) return;
+    const scenes = broll.scenes.filter((scene) => scene.imageFile);
+    if (!scenes.length) { setStatus('Generate or add at least one B-roll image before creating video prompts.'); return; }
+    if (!system?.codex.authenticated) { setError('Codex must be available in Settings before creating B-roll video prompts.'); return; }
+    const concurrency = resolveConcurrency(videoConcurrency, 2, 3);
+    if (!window.confirm(`Generate video motion prompts for all ${scenes.length} B-roll image${scenes.length === 1 ? '' : 's'} using up to ${concurrency} parallel worker${concurrency === 1 ? '' : 's'}? This replaces any existing video prompts.`)) return;
+    setGeneratingAll(true); setParallelRunning([]); setError('');
+    try {
+      const savedScenes: BrollScene[] = []; for (const scene of scenes) savedScenes.push(await saveScene(scene));
+      const failures = await runParallel(savedScenes, concurrency, async (scene) => {
+        setParallelRunning((current) => current.includes(scene.id) ? current : [...current, scene.id]);
+        try { const updated = await withTransientRetry(() => api.createBrollVideoPrompt(project.id, scene.id), 3); replaceScene(updated); }
+        finally { setParallelRunning((current) => current.filter((id) => id !== scene.id)); }
+      }, (completed, total, failed) => setStatus(`Generating video prompts in parallel · ${completed}/${total} finished${failed ? ` · ${failed} failed` : ''}`));
+      await finalizeParallelPlan(savedScenes); const succeeded = savedScenes.length - failures.length;
+      setStatus(`Video prompt generation complete: ${succeeded}/${savedScenes.length} succeeded. Project saved locally ✓`);
+      if (failures.length) setError(`${failures.length} video prompt job${failures.length === 1 ? '' : 's'} failed. ${failures[0].error}`);
+    } catch (err) { setError(message(err)); }
+    finally { setParallelRunning([]); setGeneratingAll(false); }
+  }
 
   async function runVideoBatch(scenes: BrollScene[], mode: 'all' | 'missing') {
     if (!project || !broll || generatingAll || brollGenerating) return;
@@ -340,7 +363,7 @@ function App() {
         <section className="workflow"><aside className="panel controls"><h3>Dialogue flow</h3><button onClick={prepare} disabled={busy || exportRunning || !!proxyUrl || !system?.ffmpeg.installed || !project.sourceAvailable}>1. Create proxy + audio</button><button onClick={transcribe} disabled={busy || exportRunning || !system?.elevenLabs.configured || !!words.length}>2. Transcribe audio</button><label>Cleanup intensity<select value={intensity} onChange={(e) => setIntensity(e.target.value as typeof intensity)}><option value="light">Light</option><option value="balanced">Balanced</option><option value="aggressive">Aggressive</option></select></label><button onClick={clean} disabled={busy || exportRunning || !system?.codex.authenticated}>3. Clean with Codex</button><div className="divider" /><button onClick={() => exportBaseVideo('quality')} disabled={busy || exportRunning || !edl || !project.sourceAvailable}>Export cleaned video only</button>{exportJob && exportJob.state !== 'idle' && <ExportProgress job={exportJob} />}</aside>
           <section className="workspace"><div className="panel playerCard">{proxyUrl ? <video ref={videoRef} src={proxyUrl} controls onTimeUpdate={syncPreview} onSeeked={syncPreview} /> : <div className="emptyPlayer">Proxy is optional for standalone B-roll. Saved projects restore it automatically when available.</div>}</div><div className="panel transcriptCard"><div className="sectionTitle"><div><span className="label">EDIT DECISION LIST</span><h3>Transcript</h3></div><span className="legend"><i /> kept <i className="removedDot" /> removed</span></div>{words.length ? <div className="transcript">{words.map((word, i) => <button key={word.id} className={`word ${keepMask[i] ? 'kept' : 'removed'}`} title={`${word.start.toFixed(2)}s – ${word.end.toFixed(2)}s`} onClick={() => toggleWord(i)}>{word.text}</button>)}</div> : <p className="muted">No transcript yet. Raw/asset-only B-roll planning can create it automatically.</p>}</div></section>
         </section>
-        <BrollWorkspace project={project} system={system} plan={broll} settings={brollSettings} setSettings={setBrollSettings} drafts={sceneDrafts} changeDraft={changeDraft} planBroll={planBroll} generateScene={generateScene} importSceneImage={importSceneImage} deleteScene={deleteScene} rewriteVideoPrompt={rewriteVideoPrompt} createSceneVideo={createSceneVideo} generateAll={generateAllBroll} generateMissing={generateMissingBroll} generateAllVideos={generateAllVideos} generateMissingVideos={generateMissingVideos} saveScene={saveScene} generating={brollGenerating} parallelRunning={parallelRunning} generatingAll={generatingAll} busy={busy || exportRunning} exportAssets={exportAssets} exportVideo={() => exportBrollVideo('quality')} imageConcurrency={imageConcurrency} setImageConcurrency={setImageConcurrency} videoConcurrency={videoConcurrency} setVideoConcurrency={setVideoConcurrency} />
+        <BrollWorkspace project={project} system={system} plan={broll} settings={brollSettings} setSettings={setBrollSettings} drafts={sceneDrafts} changeDraft={changeDraft} planBroll={planBroll} generateScene={generateScene} importSceneImage={importSceneImage} deleteScene={deleteScene} rewriteVideoPrompt={rewriteVideoPrompt} createSceneVideo={createSceneVideo} generateAll={generateAllBroll} generateMissing={generateMissingBroll} generateAllVideoPrompts={generateAllVideoPrompts} generateAllVideos={generateAllVideos} generateMissingVideos={generateMissingVideos} saveScene={saveScene} generating={brollGenerating} parallelRunning={parallelRunning} generatingAll={generatingAll} busy={busy || exportRunning} exportAssets={exportAssets} exportVideo={() => exportBrollVideo('quality')} imageConcurrency={imageConcurrency} setImageConcurrency={setImageConcurrency} videoConcurrency={videoConcurrency} setVideoConcurrency={setVideoConcurrency} />
       </>}
       <footer className="statusbar"><span className={busy || exportRunning || generatingAll ? 'pulse' : ''}>{busy || exportRunning || generatingAll ? '●' : '○'}</span> {status}{error && <strong className="error">{error}</strong>}</footer>
     </main>
@@ -371,11 +394,23 @@ function SettingsPanel({ system, form, setForm, save, refresh, disabled, ffmpegD
   </section>;
 }
 
-function BrollWorkspace({ project, system, plan, settings, setSettings, drafts, changeDraft, planBroll, generateScene, importSceneImage, deleteScene, rewriteVideoPrompt, createSceneVideo, generateAll, generateMissing, generateAllVideos, generateMissingVideos, saveScene, generating, parallelRunning, generatingAll, busy, exportAssets, exportVideo, imageConcurrency, setImageConcurrency, videoConcurrency, setVideoConcurrency }: any) {
+function BrollWorkspace({ project, system, plan, settings, setSettings, drafts, changeDraft, planBroll, generateScene, importSceneImage, deleteScene, rewriteVideoPrompt, createSceneVideo, generateAll, generateMissing, generateAllVideoPrompts, generateAllVideos, generateMissingVideos, saveScene, generating, parallelRunning, generatingAll, busy, exportAssets, exportVideo, imageConcurrency, setImageConcurrency, videoConcurrency, setVideoConcurrency }: any) {
+  const [dialog, setDialog] = useState<SceneDialog | null>(null);
   const providerIsReady = providerReady(system, settings.provider); const imageProfile = imageConcurrencyProfile(settings.provider); const imageConcurrencyValue = imageConcurrency === 0 ? 0 : Math.min(imageConcurrency, imageProfile.maxConcurrency); const videoConcurrencyValue = videoConcurrency === 0 ? 0 : Math.min(videoConcurrency, 3);
-  const missingImages = plan?.scenes.filter((scene: BrollScene) => !scene.imageFile).length ?? 0; const missingVideos = plan?.scenes.filter((scene: BrollScene) => scene.imageFile && !scene.videoFile).length ?? 0;
+  const missingImages = plan?.scenes.filter((scene: BrollScene) => !scene.imageFile).length ?? 0; const missingVideos = plan?.scenes.filter((scene: BrollScene) => scene.imageFile && !scene.videoFile).length ?? 0; const imageScenes = plan?.scenes.filter((scene: BrollScene) => scene.imageFile).length ?? 0;
+  const dialogScene = dialog ? plan?.scenes.find((scene: BrollScene) => scene.id === dialog.sceneId) : undefined;
+  function openDialog(kind: SceneDialog['kind'], scene: BrollScene, value = '') { setDialog({ kind, sceneId: scene.id, value }); }
+  function submitDialog() {
+    if (!dialog || !dialogScene) return;
+    const value = dialog.value.trim();
+    if (dialog.kind === 'image-prompt') { if (value) changeDraft(dialogScene.id, { imagePrompt: value }); setDialog(null); return; }
+    if (dialog.kind === 'video-prompt') { if (value) changeDraft(dialogScene.id, { videoPrompt: value }); setDialog(null); return; }
+    setDialog(null);
+    if (dialog.kind === 'image-regeneration') void generateScene(dialogScene, value || undefined);
+    else void createSceneVideo(dialogScene, value || undefined);
+  }
   return <section className="panel brollPanel">
-    <div className="sectionTitle brollTitle"><div><span className="label">INDEPENDENT OR IN-FLOW MODULE</span><h3>Hyper-real B-roll</h3></div><div className="brollActions"><button onClick={planBroll} disabled={busy || generatingAll || !system?.codex.authenticated || !system?.elevenLabs.configured}>{plan ? 'Re-plan scenes' : 'Plan B-roll scenes'}</button>{plan && missingImages > 0 && <button onClick={generateMissing} disabled={busy || generatingAll || !!generating || !providerIsReady}>Generate missing images ({missingImages})</button>}{plan && <button className="primary" onClick={generateAll} disabled={busy || generatingAll || !!generating || !providerIsReady}>Regenerate all images</button>}{plan && missingVideos > 0 && <button onClick={generateMissingVideos} disabled={busy || generatingAll || !!generating || !system?.brollVideo?.configured}>Create missing videos ({missingVideos})</button>}{plan && <button onClick={generateAllVideos} disabled={busy || generatingAll || !!generating || !system?.brollVideo?.configured || !plan.scenes.some((scene: BrollScene) => scene.imageFile)}>Create all videos</button>}</div></div>
+    <div className="sectionTitle brollTitle"><div><span className="label">INDEPENDENT OR IN-FLOW MODULE</span><h3>Hyper-real B-roll</h3></div><div className="brollActions"><button onClick={planBroll} disabled={busy || generatingAll || !system?.codex.authenticated || !system?.elevenLabs.configured}>{plan ? 'Re-plan scenes' : 'Plan B-roll scenes'}</button>{plan && missingImages > 0 && <button onClick={generateMissing} disabled={busy || generatingAll || !!generating || !providerIsReady}>Generate missing images ({missingImages})</button>}{plan && <button className="primary" onClick={generateAll} disabled={busy || generatingAll || !!generating || !providerIsReady}>Regenerate all images</button>}{plan && imageScenes > 0 && <button onClick={generateAllVideoPrompts} disabled={busy || generatingAll || !!generating || !system?.codex.authenticated}>Generate video prompts ({imageScenes})</button>}{plan && missingVideos > 0 && <button onClick={generateMissingVideos} disabled={busy || generatingAll || !!generating || !system?.brollVideo?.configured}>Create missing videos ({missingVideos})</button>}{plan && <button onClick={generateAllVideos} disabled={busy || generatingAll || !!generating || !system?.brollVideo?.configured || !plan.scenes.some((scene: BrollScene) => scene.imageFile)}>Create all videos</button>}</div></div>
     <div className="brollConfig"><label>Workflow<select value={settings.workflowMode} onChange={(e) => setSettings({ ...settings, workflowMode: e.target.value })}><option value="cleaned-video">Proxy/audio cleaned → B-roll → final video</option><option value="raw-video">Raw video → B-roll → final video</option><option value="assets-only">Raw video → B-roll files + timing JSON</option></select></label><label>Image provider<select value={settings.provider} onChange={(e) => setSettings({ ...settings, provider: e.target.value })}><option value="gemini">Gemini API</option><option value="grok-cli">Grok CLI · experimental</option><option value="codex-cli">Codex CLI · experimental</option><option value="openai">OpenAI Images API</option></select></label><label>Parallel images<select value={imageConcurrencyValue} onChange={(e) => setImageConcurrency(Number(e.target.value))}><option value="0">Auto ({imageProfile.defaultConcurrency})</option>{Array.from({ length: imageProfile.maxConcurrency }, (_, index) => <option key={index + 1} value={index + 1}>{index + 1}</option>)}</select></label><label>Parallel videos<select value={videoConcurrencyValue} onChange={(e) => setVideoConcurrency(Number(e.target.value))}><option value="0">Auto (2)</option>{[1, 2, 3].map((value) => <option key={value} value={value}>{value}</option>)}</select></label><label>Image count<select value={settings.countMode} onChange={(e) => setSettings({ ...settings, countMode: e.target.value })}><option value="auto">Auto by semantic scenes</option><option value="exact">Exact count</option><option value="per-minute">Images per minute</option></select></label>{settings.countMode === 'exact' && <label>Exact images<input type="number" min="1" max="40" value={settings.targetCount} onChange={(e) => setSettings({ ...settings, targetCount: Number(e.target.value) })} /></label>}{settings.countMode === 'per-minute' && <label>Images / minute<input type="number" min="0.5" max="20" step="0.5" value={settings.imagesPerMinute} onChange={(e) => setSettings({ ...settings, imagesPerMinute: Number(e.target.value) })} /></label>}<label>Aspect ratio<select value={settings.aspectRatio} onChange={(e) => setSettings({ ...settings, aspectRatio: e.target.value })}><option value="auto">Auto from video</option><option value="9:16">9:16 portrait</option><option value="16:9">16:9 landscape</option></select></label><label>Min scene sec<input type="number" min="1" max="20" value={settings.minSceneDuration} onChange={(e) => setSettings({ ...settings, minSceneDuration: Number(e.target.value) })} /></label><label>Max scene sec<input type="number" min="2" max="30" value={settings.maxSceneDuration} onChange={(e) => setSettings({ ...settings, maxSceneDuration: Number(e.target.value) })} /></label></div>
     <p className="muted brollModeHelp">Scene title, timing and prompts autosave locally about 700 ms after editing. Interrupted generation can be resumed with Generate missing images / Create missing videos without spending again on completed scenes.</p>
 
@@ -394,15 +429,28 @@ function BrollWorkspace({ project, system, plan, settings, setSettings, drafts, 
             <label>Scene title<input value={draft.title} onChange={(e) => changeDraft(scene.id, { title: e.target.value })} /></label>
             <div className="timingGrid"><label>Start sec<input type="number" step="0.05" min="0" value={draft.sourceStart} onChange={(e) => changeDraft(scene.id, { sourceStart: e.target.value })} /></label><label>End sec<input type="number" step="0.05" min="0" value={draft.sourceEnd} onChange={(e) => changeDraft(scene.id, { sourceEnd: e.target.value })} /></label></div>
             <p className="sceneNarration">“{scene.narration}”</p><p className="visualIntent">{scene.visualIntent}</p>
-            <label>Image prompt<textarea rows={6} value={draft.imagePrompt} onChange={(e) => changeDraft(scene.id, { imagePrompt: e.target.value })} /></label>
-            {scene.videoPrompt && <label>Video motion prompt<textarea rows={5} value={draft.videoPrompt} onChange={(e) => changeDraft(scene.id, { videoPrompt: e.target.value })} /></label>}
-            <div className="sceneButtons"><button onClick={() => saveScene(scene)} disabled={busy || generatingAll || !!generating}>Save now</button><button onClick={() => generateScene(scene)} disabled={busy || generatingAll || !!generating || !providerReady(system, plan.settings.provider)}>{isWorking ? 'Working…' : scene.imageFile ? 'Regenerate image' : 'Generate image'}</button><button className="primary" onClick={() => createSceneVideo(scene)} disabled={busy || generatingAll || !!generating || !scene.imageFile || !system?.brollVideo?.configured}>{isWorking ? 'Working…' : scene.videoFile ? 'Regenerate video' : 'Create video'}</button>{scene.imageFile && <button onClick={() => rewriteVideoPrompt(scene)} disabled={busy || generatingAll || !!generating || !system?.codex.authenticated}>{scene.videoPrompt ? 'Rewrite video prompt' : 'Create video prompt'}</button>}</div>
+            <div className="promptActions"><button onClick={() => openDialog('image-prompt', scene, draft.imagePrompt)} disabled={busy || generatingAll || !!generating}>Edit image prompt</button>{scene.videoPrompt ? <button onClick={() => openDialog('video-prompt', scene, draft.videoPrompt)} disabled={busy || generatingAll || !!generating}>Edit video prompt</button> : scene.imageFile && <button onClick={() => rewriteVideoPrompt(scene)} disabled={busy || generatingAll || !!generating || !system?.codex.authenticated}>Create video prompt</button>}</div>
+            <div className="sceneButtons"><button onClick={() => saveScene(scene)} disabled={busy || generatingAll || !!generating}>Save now</button><button onClick={() => scene.imageFile ? openDialog('image-regeneration', scene) : void generateScene(scene)} disabled={busy || generatingAll || !!generating || !providerReady(system, plan.settings.provider)}>{isWorking ? 'Working…' : scene.imageFile ? 'Regenerate image' : 'Generate image'}</button><button className="primary" onClick={() => scene.videoFile ? openDialog('video-regeneration', scene) : void createSceneVideo(scene)} disabled={busy || generatingAll || !!generating || !scene.imageFile || !system?.brollVideo?.configured}>{isWorking ? 'Working…' : scene.videoFile ? 'Regenerate video' : 'Create video'}</button></div>
           </div>
         </article>;
       })}</div>
       <div className="brollFooterActions">{plan.settings.workflowMode === 'assets-only' ? <button className="primary" onClick={exportAssets} disabled={busy || generatingAll}>Export images/videos + timing JSON</button> : <button className="primary" onClick={exportVideo} disabled={busy || generatingAll || !project.sourceAvailable || !plan.scenes.some((scene: BrollScene) => (scene.videoFile || scene.imageFile) && scene.enabled)}>Render final video with B-roll</button>}</div>
     </>}
+    {dialog && dialogScene && <SceneDialogModal dialog={dialog} scene={dialogScene} setDialog={setDialog} onSubmit={submitDialog} />}
   </section>;
+}
+
+function SceneDialogModal({ dialog, scene, setDialog, onSubmit }: { dialog: SceneDialog; scene: BrollScene; setDialog: (dialog: SceneDialog | null) => void; onSubmit: () => void }) {
+  const isPromptEditor = dialog.kind === 'image-prompt' || dialog.kind === 'video-prompt';
+  const isImage = dialog.kind === 'image-prompt' || dialog.kind === 'image-regeneration';
+  const title = dialog.kind === 'image-prompt' ? 'Edit image prompt' : dialog.kind === 'video-prompt' ? 'Edit video motion prompt' : dialog.kind === 'image-regeneration' ? 'Regenerate image' : 'Regenerate video';
+  const placeholder = isPromptEditor ? (isImage ? 'Describe the still image you want to generate…' : 'Describe the motion you want in this clip…') : (isImage ? 'Optional: describe what should look different in this new image' : 'Optional: describe how this new video should move differently');
+  return <div className="modalBackdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setDialog(null); }}><section className="sceneModal" role="dialog" aria-modal="true" aria-labelledby="scene-modal-title">
+    <div className="sectionTitle"><div><span className="label">{scene.id}</span><h3 id="scene-modal-title">{title}</h3></div><button className="ghost" onClick={() => setDialog(null)} aria-label="Close dialog">Close</button></div>
+    <p className="muted">{isPromptEditor ? 'Changes are saved to this scene’s editable prompt.' : 'This optional note is used only for this regeneration and does not change the saved prompt.'}</p>
+    <label>{isPromptEditor ? (isImage ? 'Image prompt' : 'Video motion prompt') : 'Optional guidance'}<textarea autoFocus rows={isPromptEditor ? 10 : 4} maxLength={2000} value={dialog.value} onChange={(event) => setDialog({ ...dialog, value: event.target.value })} placeholder={placeholder} /></label>
+    <div className="modalActions"><button onClick={() => setDialog(null)}>Cancel</button><button className="primary" onClick={onSubmit}>{isPromptEditor ? 'Save prompt' : title}</button></div>
+  </section></div>;
 }
 
 async function runParallel<T>(items: T[], concurrency: number, task: (item: T) => Promise<void>, onProgress?: (completed: number, total: number, failed: number) => void): Promise<ParallelFailure<T>[]> {
