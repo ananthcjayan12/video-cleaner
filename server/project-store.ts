@@ -144,13 +144,15 @@ async function reconcileBrollFiles(project: Project, plan: BrollPlan | null) {
     const imageCandidate = path.join(project.workDir, 'broll', `${scene.id}.png`);
     const videoCandidate = path.join(project.workDir, 'broll', `${scene.id}.mp4`);
     const storedImage = await statFile(scene.imageFile);
-    const diskImage = storedImage ?? await statFile(imageCandidate);
-    if (diskImage && scene.imageFile !== imageCandidate && !storedImage) { scene.imageFile = imageCandidate; scene.generatedAt ||= diskImage.mtime.toISOString(); changed = true; }
+    const candidateImage = await statFile(imageCandidate);
+    const diskImage = storedImage ?? candidateImage;
+    if (diskImage && !storedImage) { scene.imageFile = imageCandidate; scene.generatedAt ||= diskImage.mtime.toISOString(); changed = true; }
     if (!diskImage && scene.imageFile) { scene.imageFile = undefined; scene.generatedAt = undefined; scene.model = undefined; changed = true; }
 
     const storedVideo = await statFile(scene.videoFile);
-    const diskVideo = storedVideo ?? await statFile(videoCandidate);
-    if (diskVideo && scene.videoFile !== videoCandidate && !storedVideo) { scene.videoFile = videoCandidate; scene.videoGeneratedAt ||= diskVideo.mtime.toISOString(); changed = true; }
+    const candidateVideo = await statFile(videoCandidate);
+    const diskVideo = storedVideo ?? candidateVideo;
+    if (diskVideo && !storedVideo) { scene.videoFile = videoCandidate; scene.videoGeneratedAt ||= diskVideo.mtime.toISOString(); changed = true; }
     if (!diskVideo && scene.videoFile) { scene.videoFile = undefined; scene.videoGeneratedAt = undefined; scene.videoModel = undefined; changed = true; }
   }
   if (changed) await atomicWriteJson(path.join(project.workDir, 'broll-plan.json'), plan);
