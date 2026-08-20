@@ -28,6 +28,7 @@ export type BrollScene = {
 
 export type BrollPlan = { version: 2; orientation: 'portrait' | 'landscape'; stylePreset: string; settings: BrollPlanSettings; scenes: BrollScene[]; notes: string[] };
 export type ImageProviderConfig = { openAiApiKey?: string; openAiModel?: string; geminiApiKey?: string; geminiModel?: string; grokBin?: string; grokModel?: string; grokVideoModel?: string; codexBin?: string; ffmpegBin?: string };
+type RunOptions = { cwd?: string; env?: NodeJS.ProcessEnv };
 
 export const BROLL_STYLE_PRESET = [
   'Hyper-realistic premium commercial photography that looks like a genuine frame from a high-end live-action video, never like illustration or CGI.',
@@ -41,9 +42,9 @@ export const BROLL_STYLE_PRESET = [
   'Avoid plastic skin, excessive beauty retouching, oversharpening, surreal lighting, orange/teal grading, impossible reflections, malformed teeth, extra fingers, duplicated tools, uncanny faces or obviously AI-generated details.',
 ].join(' ');
 
-async function run(command: string, args: string[], stdin?: string, timeoutMs = 0) {
+async function run(command: string, args: string[], stdin?: string, timeoutMs = 0, options?: RunOptions) {
   return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
-    const child = spawn(command, args, { shell: false, windowsHide: true }); let stdout = ''; let stderr = ''; let timer: NodeJS.Timeout | undefined;
+    const child = spawn(command, args, { shell: false, windowsHide: true, cwd: options?.cwd, env: options?.env }); let stdout = ''; let stderr = ''; let timer: NodeJS.Timeout | undefined;
     if (timeoutMs > 0) timer = setTimeout(() => { child.kill('SIGTERM'); reject(new Error(`${command} timed out`)); }, timeoutMs);
     child.stdout.on('data', (chunk) => (stdout += chunk.toString())); child.stderr.on('data', (chunk) => (stderr += chunk.toString()));
     child.on('error', (error) => { if (timer) clearTimeout(timer); reject(error); });
@@ -103,11 +104,32 @@ function generatedImagePrompt(scene: BrollScene, plan: BrollPlan) { return `${sc
 function findBase64Image(value: any): string | undefined { if (!value) return undefined; if (typeof value === 'object') { if (typeof value.data === 'string' && (value.type === 'image' || value.mime_type?.startsWith?.('image/'))) return value.data; if (typeof value.b64_json === 'string') return value.b64_json; if (value.output_image) { const nested = findBase64Image(value.output_image); if (nested) return nested; } for (const child of Object.values(value)) { const nested = findBase64Image(child); if (nested) return nested; } } if (Array.isArray(value)) for (const child of value) { const nested = findBase64Image(child); if (nested) return nested; } return undefined; }
 async function generateOpenAi(prompt: string, aspect: '9:16' | '16:9', config: ImageProviderConfig, outputPath: string) { if (!config.openAiApiKey) throw new Error('OPENAI_API_KEY is not configured'); const model = config.openAiModel || 'gpt-image-2'; const size = aspect === '9:16' ? '1024x1536' : '1536x1024'; const response = await fetch('https://api.openai.com/v1/images/generations', { method: 'POST', headers: { Authorization: `Bearer ${config.openAiApiKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ model, prompt, size, quality: 'high' }) }); if (!response.ok) throw new Error(`OpenAI image generation failed: ${response.status} ${await response.text()}`); const encoded = (await response.json() as any).data?.[0]?.b64_json; if (!encoded) throw new Error('OpenAI image generation returned no image data'); await fs.writeFile(outputPath, Buffer.from(encoded, 'base64')); return model; }
 async function generateGemini(prompt: string, aspect: '9:16' | '16:9', config: ImageProviderConfig, outputPath: string) { if (!config.geminiApiKey) throw new Error('GEMINI_API_KEY is not configured'); const model = config.geminiModel || 'gemini-3.1-flash-image'; const response = await fetch('https://generativelanguage.googleapis.com/v1beta/interactions', { method: 'POST', headers: { 'x-goog-api-key': config.geminiApiKey, 'Content-Type': 'application/json' }, body: JSON.stringify({ model, input: prompt, response_format: { type: 'image', mime_type: 'image/png', aspect_ratio: aspect, image_size: '2K' } }) }); if (!response.ok) throw new Error(`Gemini image generation failed: ${response.status} ${await response.text()}`); const encoded = findBase64Image(await response.json()); if (!encoded) throw new Error('Gemini image generation returned no image data'); await fs.writeFile(outputPath, Buffer.from(encoded, 'base64')); return model; }
+function codexImageQuality() { return String(process.env.CODEX_IMAGE_QUALITY || 'high').toLowerCase() === 'medium' ? 'medium' : 'high'; }
+async function ensureGitRepo(workDir: string) {
+  const gitDir = path.join(workDir, '.git'); const stat = await fs.stat(gitDir).catch(() => null); if (stat?.isDirectory()) return;
+  try { await run('git', ['init', '-q'], undefined, 10000, { cwd: workDir }); }
+  catch (error) { throw new Error(`Codex $imagegen needs a git-backed working folder and git init failed: ${error instanceof Error ? error.message : String(error)}`); }
+}
 async function generateWithAgentCli(provider: 'grok-cli' | 'codex-cli', prompt: string, config: ImageProviderConfig, workDir: string, outputPath: string) {
   await fs.rm(outputPath, { force: true });
-  if (provider === 'grok-cli') { if (!config.grokBin) throw new Error('Grok CLI was not found.'); const agentPrompt = `Create exactly one image using any image-generation capability available to your Grok Build environment. Save the actual final image file to this exact path: ${outputPath}\nThe task is complete only when the image file exists.\n\n${prompt}`; const args = ['--no-auto-update', '--always-approve', '--cwd', workDir, '-p', agentPrompt, '--output-format', 'plain']; if (config.grokModel) args.splice(4, 0, '-m', config.grokModel); await run(config.grokBin, args, undefined, 300000); }
-  else { if (!config.codexBin) throw new Error('Codex CLI was not found.'); const agentPrompt = `Create exactly one image using any image-generation tool or skill available in your Codex environment. Save the actual final image file to this exact path: ${outputPath}\nThe task is complete only when the image file exists.\n\n${prompt}`; await run(config.codexBin, ['exec', '--ephemeral', '--sandbox', 'workspace-write', '-C', workDir, '-'], agentPrompt, 300000); }
-  const stat = await fs.stat(outputPath).catch(() => null); if (!stat?.isFile() || stat.size < 10_000) throw new Error(`${provider === 'grok-cli' ? 'Grok CLI' : 'Codex CLI'} completed without creating a usable image.`); return provider === 'grok-cli' ? (config.grokModel || 'grok-cli') : 'codex-cli';
+  if (provider === 'grok-cli') {
+    if (!config.grokBin) throw new Error('Grok CLI was not found.');
+    const agentPrompt = `Create exactly one image using any image-generation capability available to your Grok Build environment. Save the actual final image file to this exact path: ${outputPath}\nThe task is complete only when the image file exists.\n\n${prompt}`;
+    const args = ['--no-auto-update', '--always-approve', '--cwd', workDir, '-p', agentPrompt, '--output-format', 'plain']; if (config.grokModel) args.splice(4, 0, '-m', config.grokModel); await run(config.grokBin, args, undefined, 300000);
+  } else {
+    if (!config.codexBin) throw new Error('Codex CLI was not found.');
+    const sceneKey = path.basename(outputPath).replace(/\.raw\.png$/i, '').replace(/[^a-z0-9_-]/gi, '-');
+    const codexWorkDir = path.join(workDir, 'broll', 'codex-work', sceneKey); await fs.mkdir(codexWorkDir, { recursive: true }); await ensureGitRepo(codexWorkDir);
+    const outputName = path.basename(outputPath); const codexOutputPath = path.join(codexWorkDir, outputName); await fs.rm(codexOutputPath, { force: true });
+    const quality = codexImageQuality();
+    const agentPrompt = `$imagegen\n\n${prompt}\n\nGenerate ONE image using ${quality.toUpperCase()} image quality.\n\nSave the finished generated image into the current working directory as:\n\n${outputName}\n\nUse Codex built-in image generation.\nDo NOT call the OpenAI API manually.\nDo NOT create a Python image generation script.\nDo NOT use an API key.\nActually generate the image.`;
+    const codexEnv: NodeJS.ProcessEnv = { ...process.env }; delete codexEnv.OPENAI_API_KEY; delete codexEnv.CODEX_API_KEY;
+    await run(config.codexBin, ['exec', '--ephemeral', '--sandbox', 'workspace-write', agentPrompt], undefined, 900000, { cwd: codexWorkDir, env: codexEnv });
+    const generated = await fs.stat(codexOutputPath).catch(() => null); if (!generated?.isFile() || generated.size < 10_000) throw new Error(`Codex $imagegen completed without creating ${outputName}. Check Codex login and built-in image generation availability.`);
+    await fs.copyFile(codexOutputPath, outputPath);
+    return `Codex $imagegen (${quality})`;
+  }
+  const stat = await fs.stat(outputPath).catch(() => null); if (!stat?.isFile() || stat.size < 10_000) throw new Error('Grok CLI completed without creating a usable image.'); return config.grokModel || 'grok-cli';
 }
 
 async function normalizeImage(rawPath: string, outputPath: string, aspect: '9:16' | '16:9', ffmpegBin?: string, removeSource = true) {
