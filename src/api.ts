@@ -22,6 +22,7 @@ export type Project = {
   id: string;
   name: string;
   sourceName: string;
+  clipCount?: number;
   createdAt: string;
   updatedAt: string;
   sourceAvailable: boolean;
