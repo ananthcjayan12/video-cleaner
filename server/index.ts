@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -7,6 +7,7 @@ import process from 'node:process';
 import express from 'express';
 import dotenv from 'dotenv';
 import {
+  BROLL_DISPLAY_TEMPLATES,
   buildBrollOverlayFilter,
   createBrollPlan,
   createVideoPrompt,
@@ -15,11 +16,14 @@ import {
   generateBrollVideoWithGrokCli,
   importBrollImage,
   loadBrollPlan,
+  planNeedsPresenterMatte,
   updateBrollScene,
+  type BrollDisplayTemplate,
   type BrollPlan,
   type BrollPlanSettings,
   type ImageProvider,
 } from './broll.js';
+import { ensurePresenterMatte, mattingSystemStatus, presenterMatteStatus } from './presenter.js';
 import {
   atomicWriteJson,
   loadProjectDirectory,
@@ -43,8 +47,8 @@ type LocalSettings = {
 };
 type FfmpegCapabilities = { videoToolboxDecode: boolean; h264VideoToolbox: boolean; hevcVideoToolbox: boolean };
 type ExportJob = {
-  state: 'idle' | 'running' | 'completed' | 'failed'; progress: number; outTime: string; speed: string; frame: number;
-  outputPath?: string; encoder?: string; error?: string; startedAt?: number;
+  state: 'idle' | 'running' | 'completed' | 'failed' | 'stopped'; progress: number; outTime: string; speed: string; frame: number;
+  outputPath?: string; encoder?: string; error?: string; startedAt?: number; checkpointCompleted?: number; checkpointTotal?: number; resumable?: boolean; resumed?: boolean; stopRequested?: boolean;
 };
 
 const CONFIG_DIR = path.join(os.homedir(), '.video-cleaner');
@@ -53,6 +57,7 @@ const app = express();
 const projects = new Map<string, Project>();
 const brollPlans = new Map<string, BrollPlan>();
 const exportJobs = new Map<string, ExportJob>();
+const exportProcesses = new Map<string, ReturnType<typeof spawn>>();
 const capabilityCache = new Map<string, FfmpegCapabilities>();
 let localSettings: LocalSettings = {};
 app.use(express.json({ limit: '1mb' }));
@@ -81,6 +86,10 @@ async function loadSettings() { try { localSettings = JSON.parse(await fs.readFi
 async function saveSettings() { await fs.mkdir(CONFIG_DIR, { recursive: true }); await fs.writeFile(CONFIG_PATH, JSON.stringify(localSettings, null, 2), { mode: 0o600 }); }
 async function detectBinary(name: string) { try { const { stdout } = await run(process.platform === 'win32' ? 'where' : 'which', [name], undefined, 3000); return stdout.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? ''; } catch { return ''; } }
 function providerValue(value: unknown): ImageProvider { return ['openai', 'gemini', 'grok-cli', 'codex-cli'].includes(String(value)) ? value as ImageProvider : 'gemini'; }
+function displayTemplateValue(value: unknown): BrollDisplayTemplate {
+  const candidate = String(value || 'full-frame') as BrollDisplayTemplate;
+  return BROLL_DISPLAY_TEMPLATES.some((template) => template.id === candidate) ? candidate : 'full-frame';
+}
 
 async function resolvedSettings() {
   const codexOverride = localSettings.codexBin || process.env.CODEX_BIN || '';
@@ -124,7 +133,11 @@ async function ffmpegCapabilities(ffmpegBin: string): Promise<FfmpegCapabilities
 async function systemStatus() {
   const settings = await resolvedSettings();
   const [codexInstalled, grokInstalled, ffmpegInstalled, ffprobeInstalled] = await Promise.all([canRun(settings.codexBin, ['--version']), canRun(settings.grokBin, ['version']), canRun(settings.ffmpegBin, ['-version']), canRun(settings.ffprobeBin, ['-version'])]);
-  const [codexAuthenticated, capabilities] = await Promise.all([codexInstalled ? canRun(settings.codexBin, ['login', 'status']) : Promise.resolve(false), ffmpegInstalled ? ffmpegCapabilities(settings.ffmpegBin) : Promise.resolve({ videoToolboxDecode: false, h264VideoToolbox: false, hevcVideoToolbox: false })]);
+  const [codexAuthenticated, capabilities, matting] = await Promise.all([
+    codexInstalled ? canRun(settings.codexBin, ['login', 'status']) : Promise.resolve(false),
+    ffmpegInstalled ? ffmpegCapabilities(settings.ffmpegBin) : Promise.resolve({ videoToolboxDecode: false, h264VideoToolbox: false, hevcVideoToolbox: false }),
+    mattingSystemStatus(ffmpegInstalled ? settings.ffmpegBin : ''),
+  ]);
   return {
     codex: { installed: codexInstalled, authenticated: codexAuthenticated, path: settings.codexBin || null },
     grok: { installed: grokInstalled, path: settings.grokBin || null, model: settings.grokModel || 'CLI default', videoModel: settings.grokVideoModel },
@@ -135,6 +148,7 @@ async function systemStatus() {
       grokCli: { configured: grokInstalled, model: settings.grokModel || 'CLI default', experimental: true }, codexCli: { configured: codexInstalled && codexAuthenticated, model: 'Codex CLI', experimental: true },
     },
     brollVideo: { configured: grokInstalled && codexInstalled && codexAuthenticated, provider: 'Grok CLI', model: settings.grokVideoModel, experimental: true },
+    matting,
     projectsDir: settings.projectsDir,
   };
 }
@@ -191,6 +205,30 @@ function rangesToSeconds(project: Project) {
 }
 function proxySize(media: MediaProfile, maxEdge = 720) { const width = media.width || 1280; const height = media.height || 720; const even = (v: number) => Math.max(2, Math.round(v / 2) * 2); if (width >= height) { const w = Math.min(maxEdge, width); return { width: even(w), height: even(height * w / width) }; } const h = Math.min(maxEdge, height); return { width: even(width * h / height), height: even(h) }; }
 
+async function renderBrollScenePreview(project: Project, plan: BrollPlan, sceneId: string, ffmpegBin: string) {
+  const scene = plan.scenes.find((candidate) => candidate.id === sceneId); if (!scene) throw new Error('B-roll scene not found');
+  const assetPath = scene.videoFile || scene.imageFile; if (!assetPath) throw new Error('Add or generate a B-roll image or video before previewing');
+  const sourcePath = project.proxyPath && await fs.stat(project.proxyPath).then((stat) => stat.isFile()).catch(() => false) ? project.proxyPath : project.sourcePath;
+  const [sourceStat, assetStat] = await Promise.all([fs.stat(sourcePath), fs.stat(assetPath)]); const dimensions = proxySize(project.media, 720); const fps = Math.min(30, Math.max(15, project.media.frameRate || 30)); const duration = Math.max(0.5, Math.min(12, scene.sourceEnd - scene.sourceStart)); const template = scene.displayTemplate || plan.settings.displayTemplate || 'full-frame';
+  const cacheKey = createHash('sha256').update(JSON.stringify({ previewPipeline: 2, sourcePath, sourceSize: sourceStat.size, sourceMtime: sourceStat.mtimeMs, assetPath, assetSize: assetStat.size, assetMtime: assetStat.mtimeMs, start: scene.sourceStart, duration, template, width: dimensions.width, height: dimensions.height, fps })).digest('hex').slice(0, 16);
+  const previewDir = path.join(project.workDir, 'previews', scene.id); const previewPath = path.join(previewDir, 'preview.mp4'); const segmentPath = path.join(previewDir, 'source-segment.mp4'); const metaPath = path.join(previewDir, 'preview.json'); await fs.mkdir(previewDir, { recursive: true });
+  const [previewStat, cachedMeta] = await Promise.all([fs.stat(previewPath).catch(() => null), fs.readFile(metaPath, 'utf8').then((value) => JSON.parse(value)).catch(() => null)]);
+  if (previewStat?.isFile() && previewStat.size > 10_000 && cachedMeta?.cacheKey === cacheKey) return { previewPath, cacheKey, duration, cached: true };
+
+  await run(ffmpegBin, ['-hide_banner', '-loglevel', 'error', '-y', '-ss', scene.sourceStart.toFixed(6), '-t', duration.toFixed(6), '-i', sourcePath, '-map', '0:v:0', '-map', '0:a:0?', '-vf', `scale=${dimensions.width}:${dimensions.height}:flags=fast_bilinear,fps=${fps.toFixed(6)},format=yuv420p`, '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '27', '-c:a', 'aac', '-b:a', '96k', '-movflags', '+faststart', segmentPath], undefined, 300_000);
+  const previewScene = { ...scene, sourceStart: 0, sourceEnd: duration, enabled: true }; const previewPlan: BrollPlan = { ...plan, orientation: dimensions.height >= dimensions.width ? 'portrait' : 'landscape', settings: { ...plan.settings, workflowMode: 'raw-video' }, scenes: [previewScene] };
+  let mattePath: string | undefined;
+  if (planNeedsPresenterMatte(previewPlan)) {
+    const matte = await ensurePresenterMatte({ workDir: previewDir, sourcePath: segmentPath, proxyPath: segmentPath, width: dimensions.width, height: dimensions.height, ffmpegBin }); mattePath = matte.maskPath;
+    if (!mattePath) throw new Error('Presenter cutout preview could not prepare its alpha mask');
+  }
+  const { filter, activeScenes } = buildBrollOverlayFilter({ plan: previewPlan, width: dimensions.width, height: dimensions.height, fps, presenterInputIndex: mattePath ? 2 : undefined });
+  const brollInputs = activeScenes[0].videoFile ? ['-stream_loop', '-1', '-i', activeScenes[0].videoFile] : ['-loop', '1', '-framerate', String(fps), '-i', activeScenes[0].imageFile!]; const presenterInput = mattePath ? ['-i', mattePath] : [];
+  await run(ffmpegBin, ['-hide_banner', '-loglevel', 'error', '-y', '-i', segmentPath, ...brollInputs, ...presenterInput, '-filter_complex', filter, '-map', '[vout]', '-map', '[aout]', '-t', duration.toFixed(6), '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', previewPath], undefined, 600_000);
+  const resultStat = await fs.stat(previewPath).catch(() => null); if (!resultStat?.isFile() || resultStat.size < 10_000) throw new Error('Scene preview finished without creating a playable video');
+  await atomicWriteJson(metaPath, { cacheKey, generatedAt: new Date().toISOString(), duration, template }); return { previewPath, cacheKey, duration, cached: false };
+}
+
 async function ensureAnalysisAudio(project: Project) {
   if (project.audioPath) { const exists = await fs.stat(project.audioPath).catch(() => null); if (exists?.isFile()) return project.audioPath; }
   await requireSource(project);
@@ -210,10 +248,7 @@ function defaultBitRate(media: MediaProfile, hevc: boolean) { const pixels = (me
 function exportBitRate(media: MediaProfile, hevc: boolean, mode: 'fast' | 'quality') { const baseline = media.bitRate || defaultBitRate(media, hevc); const floor = defaultBitRate(media, hevc); const desired = mode === 'quality' ? Math.max(floor, baseline * 1.05) : Math.max(floor * 0.75, baseline * 0.78); return Math.min(140_000_000, Math.round(desired)); }
 function formatBitRate(value: number) { return `${Math.max(1, Math.round(value / 1000))}k`; }
 function sourceBitDepth(pixelFormat?: string) { const match = String(pixelFormat ?? '').toLowerCase().match(/(9|10|12|14|16)(?:le|be)?$/); return match ? Number(match[1]) : 8; }
-function hevcOutputPixelFormat(media: MediaProfile) {
-  // VideoToolbox HEVC reliably accepts 8-bit 4:2:0 or Main 10. Normalize higher-chroma/high-bit-depth inputs to Main 10 instead of passing through unsupported formats such as yuv422p10le, yuv444p10le, p010, or 12-bit sources.
-  return media.hdr || sourceBitDepth(media.pixelFormat) > 8 ? 'yuv420p10le' : 'yuv420p';
-}
+function hevcOutputPixelFormat(media: MediaProfile) { return media.hdr || sourceBitDepth(media.pixelFormat) > 8 ? 'yuv420p10le' : 'yuv420p'; }
 function encodingArgs(project: Project, capabilities: FfmpegCapabilities, mode: 'fast' | 'quality') {
   const sourceCodec = String(project.media.videoCodec || '').toLowerCase(); const useHevc = project.media.hdr || sourceCodec === 'hevc' || sourceCodec === 'h265'; const hardware = useHevc ? capabilities.hevcVideoToolbox : capabilities.h264VideoToolbox; const targetBitRate = exportBitRate(project.media, useHevc, mode); const pixelFormat = hevcOutputPixelFormat(project.media); const main10 = pixelFormat === 'yuv420p10le';
   if (hardware) { const encoder = useHevc ? 'hevc_videotoolbox' : 'h264_videotoolbox'; return { encoder, hardware, targetBitRate, args: ['-c:v', encoder, '-realtime', '1', '-allow_sw', '1', ...(mode === 'fast' ? ['-prio_speed', '1'] : []), '-b:v', formatBitRate(targetBitRate), '-maxrate', formatBitRate(Math.round(targetBitRate * 1.2)), '-bufsize', formatBitRate(Math.round(targetBitRate * 2)), ...(useHevc ? ['-pix_fmt', pixelFormat, '-tag:v', 'hvc1', ...(main10 ? ['-profile:v', 'main10'] : [])] : [])] }; }
@@ -223,11 +258,74 @@ function encodingArgs(project: Project, capabilities: FfmpegCapabilities, mode: 
 function colorArgs(project: Project) { const args: string[] = []; if (project.media.colorPrimaries) args.push('-color_primaries', project.media.colorPrimaries); if (project.media.colorTransfer) args.push('-color_trc', project.media.colorTransfer); if (project.media.colorSpace) args.push('-colorspace', project.media.colorSpace); return args; }
 function buildTimelineFilter(segments: Array<{ start: number; end: number }>, fps: number) { const expression = segments.map((segment) => `between(t\\,${segment.start.toFixed(6)}\\,${segment.end.toFixed(6)})`).join('+'); return `[0:v]select='${expression}',setpts=N/${fps.toFixed(6)}/TB[vout];[0:a]aselect='${expression}',asetpts=N/SR/TB[aout]`; }
 function parseFfmpegTime(value: string) { const parts = value.split(':').map(Number); if (parts.length !== 3 || parts.some((part) => !Number.isFinite(part))) return 0; return parts[0] * 3600 + parts[1] * 60 + parts[2]; }
+type CheckpointRange = { start: number; end: number; duration: number };
+function checkpointRanges(segments: Array<{ start: number; end: number }>, scenes: BrollPlan['scenes'], targetDuration = 12) {
+  const ranges: CheckpointRange[] = [];
+  for (const segment of segments) {
+    let cursor = Math.max(0, segment.start); const segmentEnd = Math.max(cursor, segment.end);
+    while (segmentEnd - cursor > 0.01) {
+      let boundary = Math.min(segmentEnd, cursor + targetDuration);
+      if (boundary < segmentEnd) {
+        const crossing = scenes.filter((scene) => scene.enabled && (scene.videoFile || scene.imageFile) && scene.sourceStart < boundary && scene.sourceEnd > boundary);
+        if (crossing.length) boundary = Math.min(segmentEnd, Math.max(...crossing.map((scene) => scene.sourceEnd)));
+        if (segmentEnd - boundary < 2) boundary = segmentEnd;
+      }
+      if (boundary <= cursor + 0.01) boundary = segmentEnd;
+      ranges.push({ start: cursor, end: boundary, duration: boundary - cursor }); cursor = boundary;
+    }
+  }
+  return ranges;
+}
+async function checkpointSignature(filePath: string) { const stat = await fs.stat(filePath); return { path: filePath, size: stat.size, mtimeMs: Math.round(stat.mtimeMs) }; }
+async function checkpointFingerprint(options: { project: Project; plan: BrollPlan; mattePath?: string; mode: 'fast' | 'quality'; segments: Array<{ start: number; end: number }>; encodingArgs: string[]; fps: number }) {
+  const activeScenes = options.plan.scenes.filter((scene) => scene.enabled && (scene.videoFile || scene.imageFile)); const files = [options.project.sourcePath, options.mattePath, ...activeScenes.map((scene) => scene.videoFile || scene.imageFile)].filter((value): value is string => Boolean(value)); const signatures = await Promise.all(files.map(checkpointSignature));
+  const payload = { pipeline: 1, signatures, mode: options.mode, segments: options.segments, encodingArgs: options.encodingArgs, fps: options.fps, width: options.project.media.width, height: options.project.media.height, color: [options.project.media.colorPrimaries, options.project.media.colorTransfer, options.project.media.colorSpace], scenes: activeScenes.map((scene) => ({ id: scene.id, start: scene.sourceStart, end: scene.sourceEnd, template: scene.displayTemplate || options.plan.settings.displayTemplate, file: scene.videoFile || scene.imageFile })) };
+  return createHash('sha256').update(JSON.stringify(payload)).digest('hex').slice(0, 24);
+}
+function runTrackedExportProcess(projectId: string, command: string, args: string[], onProgress?: (seconds: number, speed: string, frame: number) => void) {
+  return new Promise<void>((resolve, reject) => {
+    const child = spawn(command, ['-hide_banner', '-y', '-nostats', '-progress', 'pipe:1', ...args], { shell: false, windowsHide: true }); exportProcesses.set(projectId, child); let stdoutBuffer = ''; let stderr = ''; let speed = ''; let frame = 0; let seconds = 0; let settled = false;
+    const finish = (error?: Error) => { if (settled) return; settled = true; if (exportProcesses.get(projectId) === child) exportProcesses.delete(projectId); error ? reject(error) : resolve(); };
+    const handleLine = (line: string) => { const equals = line.indexOf('='); if (equals < 0) return; const key = line.slice(0, equals); const value = line.slice(equals + 1); if (key === 'out_time') seconds = parseFfmpegTime(value); else if (key === 'out_time_us' || key === 'out_time_ms') seconds = Number(value) / 1_000_000; else if (key === 'speed') speed = value; else if (key === 'frame') frame = Number(value) || frame; onProgress?.(seconds, speed, frame); };
+    child.stdout.on('data', (chunk) => { stdoutBuffer += chunk.toString(); let newline = stdoutBuffer.indexOf('\n'); while (newline >= 0) { handleLine(stdoutBuffer.slice(0, newline).trim()); stdoutBuffer = stdoutBuffer.slice(newline + 1); newline = stdoutBuffer.indexOf('\n'); } }); child.stderr.on('data', (chunk) => { stderr = `${stderr}${chunk.toString()}`.slice(-12000); }); child.on('error', (error) => finish(error)); child.on('close', (code, signal) => code === 0 ? finish() : finish(new Error(stderr || `FFmpeg exited with ${signal || `code ${code}`}`)));
+  });
+}
+function launchCheckpointExport(options: { projectId: string; command: string; sessionDir: string; fingerprint: string; outputPath: string; encoder: string; ranges: CheckpointRange[]; buildPartArgs: (range: CheckpointRange, outputPath: string) => string[]; audioArgs: (outputPath: string) => string[] }) {
+  const { projectId, command, sessionDir, fingerprint, outputPath, encoder, ranges } = options; const totalDuration = ranges.reduce((sum, range) => sum + range.duration, 0); const partPath = (index: number) => path.join(sessionDir, `part-${String(index).padStart(4, '0')}.mp4`); const manifestPath = path.join(sessionDir, 'manifest.json');
+  const job: ExportJob = { state: 'running', progress: 0, outTime: '00:00:00.000000', speed: 'Checking saved checkpoints…', frame: 0, outputPath, encoder, checkpointCompleted: 0, checkpointTotal: ranges.length, resumable: true, resumed: false, startedAt: Date.now() }; exportJobs.set(projectId, job);
+  void (async () => {
+    const completed = new Set<number>();
+    for (let index = 0; index < ranges.length; index += 1) { const stat = await fs.stat(partPath(index)).catch(() => null); if (stat?.isFile() && stat.size > 10_000) completed.add(index); }
+    const resumed = completed.size > 0; const completedDuration = () => [...completed].reduce((sum, index) => sum + ranges[index].duration, 0); Object.assign(job, { progress: totalDuration ? completedDuration() / totalDuration * 92 : 0, speed: resumed ? `Resuming · ${completed.size}/${ranges.length} checkpoints ready` : 'Starting checkpoint 1', checkpointCompleted: completed.size, resumed });
+    const saveManifest = () => atomicWriteJson(manifestPath, { version: 1, fingerprint, updatedAt: new Date().toISOString(), completed: [...completed].sort((a, b) => a - b), ranges });
+    try {
+      await saveManifest();
+      for (let index = 0; index < ranges.length; index += 1) {
+        if (job.stopRequested) { job.state = 'stopped'; job.speed = 'Stopped · checkpoints saved'; return; }
+        if (completed.has(index)) continue; const range = ranges[index]; const partialPath = `${partPath(index)}.partial.mp4`; await fs.rm(partialPath, { force: true }); job.speed = `Checkpoint ${index + 1}/${ranges.length}`;
+        try { await runTrackedExportProcess(projectId, command, options.buildPartArgs(range, partialPath), (seconds, speed, frame) => { job.progress = totalDuration ? Math.min(92, (completedDuration() + Math.min(range.duration, Math.max(0, seconds))) / totalDuration * 92) : 0; job.speed = `Checkpoint ${index + 1}/${ranges.length}${speed ? ` · ${speed}` : ''}`; job.frame = frame; }); }
+        catch (error) { await fs.rm(partialPath, { force: true }); if (job.stopRequested) { job.state = 'stopped'; job.speed = 'Stopped · checkpoints saved'; job.checkpointCompleted = completed.size; return; } throw error; }
+        await fs.rename(partialPath, partPath(index)); completed.add(index); job.checkpointCompleted = completed.size; await saveManifest();
+      }
+      if (job.stopRequested) { job.state = 'stopped'; job.speed = 'Stopped · checkpoints saved'; return; }
+      const concatPath = path.join(sessionDir, 'parts.txt'); const joinedVideo = path.join(sessionDir, 'joined-video.mp4'); const audioPath = path.join(sessionDir, 'audio.m4a'); await fs.writeFile(concatPath, `${ranges.map((_range, index) => `file '${partPath(index).replaceAll("'", "'\\''")}'`).join('\n')}\n`);
+      job.progress = 94; job.speed = 'Joining checkpoint video'; await runTrackedExportProcess(projectId, command, ['-f', 'concat', '-safe', '0', '-i', concatPath, '-map', '0:v:0', '-c', 'copy', joinedVideo]);
+      job.progress = 96; job.speed = 'Rendering final audio'; await runTrackedExportProcess(projectId, command, options.audioArgs(audioPath));
+      job.progress = 98; job.speed = 'Muxing final video'; await runTrackedExportProcess(projectId, command, ['-i', joinedVideo, '-i', audioPath, '-map', '0:v:0', '-map', '1:a:0', '-c', 'copy', '-shortest', '-movflags', '+faststart', outputPath]);
+      job.state = 'completed'; job.progress = 100; job.speed = 'Checkpoint render complete'; job.resumable = false; await fs.rm(sessionDir, { recursive: true, force: true });
+    } catch (error) {
+      if (job.stopRequested) { job.state = 'stopped'; job.speed = 'Stopped · checkpoints saved'; }
+      else { job.state = 'failed'; job.speed = ''; job.error = error instanceof Error ? error.message : String(error); }
+      job.checkpointCompleted = completed.size; await fs.rm(outputPath, { force: true }).catch(() => undefined); await saveManifest().catch(() => undefined);
+    }
+  })();
+}
 function launchExport(projectId: string, command: string, args: string[], outputDuration: number, outputPath: string, encoder: string) {
-  const job: ExportJob = { state: 'running', progress: 0, outTime: '00:00:00.000000', speed: '', frame: 0, outputPath, encoder, startedAt: Date.now() }; exportJobs.set(projectId, job);
-  const child = spawn(command, ['-hide_banner', '-y', '-nostats', '-progress', 'pipe:1', ...args], { shell: false, windowsHide: true }); let stdoutBuffer = ''; let stderr = '';
-  const handleLine = (line: string) => { const equals = line.indexOf('='); if (equals < 0) return; const key = line.slice(0, equals); const value = line.slice(equals + 1); if (key === 'out_time') { job.outTime = value; const seconds = parseFfmpegTime(value); job.progress = outputDuration > 0 ? Math.min(99.5, Math.max(0, seconds / outputDuration * 100)) : 0; } else if (key === 'speed') job.speed = value; else if (key === 'frame') job.frame = Number(value) || job.frame; };
-  child.stdout.on('data', (chunk) => { stdoutBuffer += chunk.toString(); let newline = stdoutBuffer.indexOf('\n'); while (newline >= 0) { handleLine(stdoutBuffer.slice(0, newline).trim()); stdoutBuffer = stdoutBuffer.slice(newline + 1); newline = stdoutBuffer.indexOf('\n'); } }); child.stderr.on('data', (chunk) => { stderr = `${stderr}${chunk.toString()}`.slice(-12000); }); child.on('error', (error) => { job.state = 'failed'; job.error = error.message; }); child.on('close', (code) => { if (code === 0) { job.state = 'completed'; job.progress = 100; } else if (job.state !== 'failed') { job.state = 'failed'; job.error = stderr || `FFmpeg exited with code ${code}`; } });
+  const existing = exportJobs.get(projectId); const job: ExportJob = existing?.state === 'running' ? existing : { state: 'running', progress: 0, outTime: '00:00:00.000000', speed: '', frame: 0, outputPath, encoder, startedAt: Date.now() };
+  Object.assign(job, { state: 'running', progress: 0, outTime: '00:00:00.000000', speed: 'Starting first frame', frame: 0, outputPath, encoder, startedAt: job.startedAt ?? Date.now(), error: undefined }); exportJobs.set(projectId, job);
+  const child = spawn(command, ['-hide_banner', '-y', '-nostats', '-progress', 'pipe:1', ...args], { shell: false, windowsHide: true }); exportProcesses.set(projectId, child); let stdoutBuffer = ''; let stderr = '';
+  const handleLine = (line: string) => { const equals = line.indexOf('='); if (equals < 0) return; const key = line.slice(0, equals); const value = line.slice(equals + 1); let seconds: number | undefined; if (key === 'out_time') { job.outTime = value; seconds = parseFfmpegTime(value); } else if (key === 'out_time_us' || key === 'out_time_ms') seconds = Number(value) / 1_000_000; if (seconds !== undefined && Number.isFinite(seconds)) job.progress = outputDuration > 0 ? Math.min(99.5, Math.max(0, seconds / outputDuration * 100)) : 0; else if (key === 'speed') job.speed = value; else if (key === 'frame') job.frame = Number(value) || job.frame; };
+  child.stdout.on('data', (chunk) => { stdoutBuffer += chunk.toString(); let newline = stdoutBuffer.indexOf('\n'); while (newline >= 0) { handleLine(stdoutBuffer.slice(0, newline).trim()); stdoutBuffer = stdoutBuffer.slice(newline + 1); newline = stdoutBuffer.indexOf('\n'); } }); child.stderr.on('data', (chunk) => { stderr = `${stderr}${chunk.toString()}`.slice(-12000); }); child.on('error', (error) => { job.state = 'failed'; job.error = error.message; }); child.on('close', (code) => { if (exportProcesses.get(projectId) === child) exportProcesses.delete(projectId); if (job.stopRequested) { job.state = 'stopped'; job.speed = 'Stopped'; } else if (code === 0) { job.state = 'completed'; job.progress = 100; } else if (job.state !== 'failed') { job.state = 'failed'; job.error = stderr || `FFmpeg exited with code ${code}`; } });
 }
 function route(handler: (req: express.Request, res: express.Response) => Promise<void>) { return (req: express.Request, res: express.Response) => { handler(req, res).catch((error) => res.status(500).json({ error: error instanceof Error ? error.message : String(error) })); }; }
 
@@ -292,8 +390,20 @@ app.put('/api/projects/:id/edl', route(async (req, res) => { const project = get
 
 app.post('/api/projects/:id/broll/plan', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const settings = await resolvedSettings(); if (!settings.codexBin) throw new Error('Codex CLI was not found; it is required for B-roll scene planning.'); const transcript = await transcribeProject(project); const requested = (req.body?.settings ?? {}) as Partial<BrollPlanSettings>; const workflowMode = ['cleaned-video', 'raw-video', 'assets-only'].includes(String(requested.workflowMode)) ? requested.workflowMode : 'cleaned-video'; const keepRanges = workflowMode === 'cleaned-video' ? project.edl?.keepRanges : undefined; const orientation = (project.media.height || 0) > (project.media.width || 0) ? 'portrait' : 'landscape'; const plan = await createBrollPlan({ codexBin: settings.codexBin, workDir: project.workDir, words: transcript.words, keepRanges, orientation, settings: { ...requested, provider: requested.provider || settings.imageProvider } }); brollPlans.set(project.id, plan); await touchProject(project); res.json({ plan, transcript, edl: project.edl }); }));
 app.get('/api/projects/:id/broll', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const cached = brollPlans.get(project.id); if (cached) return void res.json(cached); const plan = await loadBrollPlan(project.workDir); if (!plan) return void res.status(404).json({ error: 'B-roll plan has not been created yet' }); brollPlans.set(project.id, plan); res.json(plan); }));
-app.put('/api/projects/:id/broll/scenes/:sceneId', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const sceneId = routeParam(req.params.sceneId); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet'); const scene = await updateBrollScene(project.workDir, plan, sceneId, { title: typeof req.body?.title === 'string' ? req.body.title : undefined, imagePrompt: typeof req.body?.imagePrompt === 'string' ? req.body.imagePrompt : undefined, videoPrompt: typeof req.body?.videoPrompt === 'string' ? req.body.videoPrompt : undefined, sourceStart: Number.isFinite(Number(req.body?.sourceStart)) ? Number(req.body.sourceStart) : undefined, sourceEnd: Number.isFinite(Number(req.body?.sourceEnd)) ? Number(req.body.sourceEnd) : undefined, enabled: typeof req.body?.enabled === 'boolean' ? req.body.enabled : undefined }); brollPlans.set(project.id, plan); await touchProject(project); res.json(scene); }));
+app.put('/api/projects/:id/broll/scenes/:sceneId', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id)); const sceneId = routeParam(req.params.sceneId); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet');
+  const displayTemplate = req.body?.displayTemplate === 'default' ? 'default' : typeof req.body?.displayTemplate === 'string' ? displayTemplateValue(req.body.displayTemplate) : undefined;
+  const scene = await updateBrollScene(project.workDir, plan, sceneId, { title: typeof req.body?.title === 'string' ? req.body.title : undefined, imagePrompt: typeof req.body?.imagePrompt === 'string' ? req.body.imagePrompt : undefined, videoPrompt: typeof req.body?.videoPrompt === 'string' ? req.body.videoPrompt : undefined, sourceStart: Number.isFinite(Number(req.body?.sourceStart)) ? Number(req.body.sourceStart) : undefined, sourceEnd: Number.isFinite(Number(req.body?.sourceEnd)) ? Number(req.body.sourceEnd) : undefined, enabled: typeof req.body?.enabled === 'boolean' ? req.body.enabled : undefined, displayTemplate }); brollPlans.set(project.id, plan); await touchProject(project); res.json(scene);
+}));
 app.delete('/api/projects/:id/broll/scenes/:sceneId', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet'); const updated = await deleteBrollScene(project.workDir, plan, routeParam(req.params.sceneId)); brollPlans.set(project.id, updated); await touchProject(project); res.json(updated); }));
+
+app.get('/api/projects/:id/presenter-matte', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id)); res.json(await presenterMatteStatus(project.workDir, project.sourcePath));
+}));
+app.post('/api/projects/:id/presenter-matte', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id)); await requireSource(project); const settings = await resolvedSettings(); if (!settings.ffmpegBin) throw new Error('FFmpeg was not found.');
+  const result = await ensurePresenterMatte({ workDir: project.workDir, sourcePath: project.sourcePath, proxyPath: project.proxyPath, width: project.media.width, height: project.media.height, ffmpegBin: settings.ffmpegBin }); await touchProject(project); res.json(result);
+}));
 
 app.post('/api/projects/:id/broll/scenes/:sceneId/generate', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id)); const sceneId = routeParam(req.params.sceneId); const settings = await resolvedSettings(); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet');
@@ -310,23 +420,48 @@ app.post('/api/projects/:id/broll/scenes/:sceneId/video', route(async (req, res)
   scene = await generateBrollVideoWithGrokCli({ workDir: project.workDir, plan, sceneId, regenerationComment, config: { grokBin: settings.grokBin, grokModel: settings.grokModel, grokVideoModel: settings.grokVideoModel, codexBin: settings.codexBin, ffmpegBin: settings.ffmpegBin } }); brollPlans.set(project.id, plan); await touchProject(project); res.json({ scene, videoUrl: `/api/projects/${project.id}/broll/scenes/${scene.id}/video?v=${encodeURIComponent(scene.videoGeneratedAt ?? '')}` });
 }));
 app.get('/api/projects/:id/broll/scenes/:sceneId/video', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); const scene = plan?.scenes.find((candidate) => candidate.id === routeParam(req.params.sceneId)); if (!scene?.videoFile) return void res.status(404).json({ error: 'B-roll video has not been created yet' }); res.setHeader('Cache-Control', 'private, max-age=31536000, immutable'); res.sendFile(scene.videoFile); }));
+app.post('/api/projects/:id/broll/scenes/:sceneId/preview', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id)); await requireSource(project); const settings = await resolvedSettings(); if (!settings.ffmpegBin) throw new Error('FFmpeg was not found'); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet');
+  const sceneId = routeParam(req.params.sceneId); const result = await renderBrollScenePreview(project, plan, sceneId, settings.ffmpegBin); res.json({ previewUrl: `/api/projects/${project.id}/broll/scenes/${sceneId}/preview?v=${result.cacheKey}`, duration: result.duration, cached: result.cached });
+}));
+app.get('/api/projects/:id/broll/scenes/:sceneId/preview', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id)); const previewPath = path.join(project.workDir, 'previews', routeParam(req.params.sceneId), 'preview.mp4'); const stat = await fs.stat(previewPath).catch(() => null); if (!stat?.isFile() || stat.size < 10_000) return void res.status(404).json({ error: 'B-roll scene preview has not been rendered yet' }); res.setHeader('Cache-Control', 'private, no-cache'); res.sendFile(previewPath);
+}));
 
 app.post('/api/projects/:id/broll/export-assets', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id)); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet'); const selectedFolder = await pickFolderPath(); if (!selectedFolder) return void res.status(400).json({ error: 'Export cancelled' }); const destination = path.join(selectedFolder, `video-cleaner-broll-${project.id.slice(0, 8)}`); await fs.mkdir(destination, { recursive: true }); const scenes = [];
-  for (const scene of plan.scenes) { let imageFile: string | null = null; let videoFile: string | null = null; if (scene.imageFile) { imageFile = `${scene.id}.png`; await fs.copyFile(scene.imageFile, path.join(destination, imageFile)); } if (scene.videoFile) { videoFile = `${scene.id}.mp4`; await fs.copyFile(scene.videoFile, path.join(destination, videoFile)); } scenes.push({ id: scene.id, title: scene.title, enabled: scene.enabled, sourceStart: scene.sourceStart, sourceEnd: scene.sourceEnd, startWordId: scene.startWordId, endWordId: scene.endWordId, narration: scene.narration, visualIntent: scene.visualIntent, shotType: scene.shotType, imagePrompt: scene.imagePrompt, videoPrompt: scene.videoPrompt || null, provider: scene.provider || plan.settings.provider, model: scene.model || null, imageFile, videoFile, videoModel: scene.videoModel || null }); }
+  for (const scene of plan.scenes) { let imageFile: string | null = null; let videoFile: string | null = null; if (scene.imageFile) { imageFile = `${scene.id}.png`; await fs.copyFile(scene.imageFile, path.join(destination, imageFile)); } if (scene.videoFile) { videoFile = `${scene.id}.mp4`; await fs.copyFile(scene.videoFile, path.join(destination, videoFile)); } scenes.push({ id: scene.id, title: scene.title, enabled: scene.enabled, sourceStart: scene.sourceStart, sourceEnd: scene.sourceEnd, startWordId: scene.startWordId, endWordId: scene.endWordId, narration: scene.narration, visualIntent: scene.visualIntent, shotType: scene.shotType, imagePrompt: scene.imagePrompt, videoPrompt: scene.videoPrompt || null, displayTemplate: scene.displayTemplate || plan.settings.displayTemplate || 'full-frame', provider: scene.provider || plan.settings.provider, model: scene.model || null, imageFile, videoFile, videoModel: scene.videoModel || null }); }
   const timing = { version: 2, sourceName: project.sourceName, workflowMode: plan.settings.workflowMode, orientation: plan.orientation, settings: plan.settings, scenes }; await atomicWriteJson(path.join(destination, 'broll-timing.json'), timing); await fs.writeFile(path.join(destination, 'README.txt'), 'B-roll images/videos and editable timing data exported by Video Cleaner. Edit broll-timing.json or import the files into any editor.\n'); res.json({ destination, sceneCount: scenes.length });
 }));
 
 app.post('/api/projects/:id/broll/export-video', route(async (req, res) => {
-  const projectId = routeParam(req.params.id); const project = getProject(projectId); await requireSource(project); const settings = await resolvedSettings(); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet'); if (plan.settings.workflowMode === 'assets-only') throw new Error('Assets-only projects export files and timing JSON, not a rendered video'); if (!settings.ffmpegBin) throw new Error('FFmpeg was not found'); const active = exportJobs.get(projectId); if (active?.state === 'running') return void res.status(409).json({ error: 'An export is already running for this project' }); const outputPath = await pickExportPath('video-with-broll.mp4', 'Export video with B-roll'); if (!outputPath) return void res.status(400).json({ error: 'Export cancelled' }); const mode: 'fast' | 'quality' = req.body?.mode === 'fast' ? 'fast' : 'quality'; const fps = project.media.frameRate && project.media.frameRate > 0 ? project.media.frameRate : 30; const cleanedSegments = plan.settings.workflowMode === 'cleaned-video' ? rangesToSeconds(project) : undefined;
-  const { filter, activeScenes } = buildBrollOverlayFilter({ plan, width: project.media.width || 1920, height: project.media.height || 1080, fps, cleanedSegments }); const capabilities = await ffmpegCapabilities(settings.ffmpegBin); const encoding = encodingArgs(project, capabilities, mode); const inputAcceleration = capabilities.videoToolboxDecode ? ['-hwaccel', 'videotoolbox'] : [];
-  const brollInputs = activeScenes.flatMap((scene) => scene.videoFile ? ['-stream_loop', '-1', '-i', scene.videoFile] : ['-loop', '1', '-framerate', String(Math.min(30, fps)), '-i', scene.imageFile!]);
-  const outputDuration = cleanedSegments?.length ? cleanedSegments.reduce((sum, segment) => sum + Math.max(0, segment.end - segment.start), 0) : project.media.duration;
-  const args = [...inputAcceleration, '-i', project.sourcePath, ...brollInputs, '-filter_complex', filter, '-map', '[vout]', '-map', '[aout]', '-fps_mode', 'passthrough', ...encoding.args, ...colorArgs(project), '-c:a', 'aac', '-b:a', '256k', '-movflags', '+faststart', outputPath]; launchExport(projectId, settings.ffmpegBin, args, outputDuration, outputPath, encoding.encoder); res.status(202).json({ started: true, outputPath, encoder: encoding.encoder, hardware: encoding.hardware, targetBitRate: encoding.targetBitRate, brollScenes: activeScenes.length });
+  const projectId = routeParam(req.params.id); const project = getProject(projectId); await requireSource(project); const settings = await resolvedSettings(); const storedPlan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!storedPlan) throw new Error('B-roll plan has not been created yet'); if (storedPlan.settings.workflowMode === 'assets-only') throw new Error('Assets-only projects export files and timing JSON, not a rendered video'); if (!settings.ffmpegBin) throw new Error('FFmpeg was not found');
+  const active = exportJobs.get(projectId); if (active?.state === 'running') return void res.status(409).json({ error: 'An export is already running for this project' }); const outputPath = await pickExportPath('video-with-broll.mp4', 'Export video with B-roll'); if (!outputPath) return void res.status(400).json({ error: 'Export cancelled' });
+  const plan = storedPlan;
+  const mode: 'fast' | 'quality' = req.body?.mode === 'fast' ? 'fast' : 'quality'; const fps = project.media.frameRate && project.media.frameRate > 0 ? project.media.frameRate : 30; const cleanedSegments = plan.settings.workflowMode === 'cleaned-video' ? rangesToSeconds(project) : undefined;
+  const activeSceneCount = plan.scenes.filter((scene) => scene.enabled && (scene.videoFile || scene.imageFile)).length; let mattePath: string | undefined;
+  if (planNeedsPresenterMatte(plan)) {
+    const matte = await ensurePresenterMatte({ workDir: project.workDir, sourcePath: project.sourcePath, proxyPath: project.proxyPath, width: project.media.width, height: project.media.height, ffmpegBin: settings.ffmpegBin });
+    mattePath = matte.maskPath;
+    if (!mattePath) throw new Error('Presenter matte generation did not produce a mask video');
+  }
+  const capabilities = await ffmpegCapabilities(settings.ffmpegBin); const encoding = encodingArgs(project, capabilities, mode); const inputAcceleration = capabilities.videoToolboxDecode ? ['-hwaccel', 'videotoolbox'] : [];
+  const sourceSegments = cleanedSegments?.length ? cleanedSegments : [{ start: 0, end: project.media.duration }]; const activeScenes = plan.scenes.filter((scene) => scene.enabled && (scene.videoFile || scene.imageFile)); const ranges = checkpointRanges(sourceSegments, activeScenes); if (!ranges.length) throw new Error('The export timeline is empty');
+  const fingerprint = await checkpointFingerprint({ project, plan, mattePath, mode, segments: sourceSegments, encodingArgs: encoding.args, fps }); const checkpointRoot = path.join(project.workDir, 'render-checkpoints'); const sessionDir = path.join(checkpointRoot, fingerprint); await fs.mkdir(checkpointRoot, { recursive: true });
+  for (const entry of await fs.readdir(checkpointRoot, { withFileTypes: true })) if (entry.isDirectory() && entry.name !== fingerprint) await fs.rm(path.join(checkpointRoot, entry.name), { recursive: true, force: true }); await fs.mkdir(sessionDir, { recursive: true });
+  const buildPartArgs = (range: CheckpointRange, partOutputPath: string) => {
+    const prepared = activeScenes.filter((scene) => scene.sourceEnd > range.start && scene.sourceStart < range.end).map((scene) => ({ original: scene, local: { ...scene, sourceStart: Math.max(scene.sourceStart, range.start) - range.start, sourceEnd: Math.min(scene.sourceEnd, range.end) - range.start } })); const chunkPlan: BrollPlan = { ...plan, settings: { ...plan.settings, workflowMode: 'raw-video' }, scenes: prepared.map((item) => item.local) }; const needsPresenter = planNeedsPresenterMatte(chunkPlan); const filter = prepared.length ? buildBrollOverlayFilter({ plan: chunkPlan, width: project.media.width || 1920, height: project.media.height || 1080, fps, presenterInputIndex: needsPresenter ? prepared.length + 1 : undefined, includeAudio: false }).filter : '[0:v]setpts=PTS-STARTPTS[vout]';
+    const brollInputs = prepared.flatMap(({ original }) => { const offset = Math.max(0, range.start - original.sourceStart); return original.videoFile ? ['-stream_loop', '-1', ...(offset > 0.001 ? ['-ss', offset.toFixed(6)] : []), ...inputAcceleration, '-i', original.videoFile] : ['-loop', '1', '-framerate', String(Math.min(30, fps)), '-i', original.imageFile!]; }); const presenterInput = needsPresenter && mattePath ? ['-ss', range.start.toFixed(6), '-t', range.duration.toFixed(6), ...inputAcceleration, '-i', mattePath] : [];
+    return ['-ss', range.start.toFixed(6), '-t', range.duration.toFixed(6), ...inputAcceleration, '-i', project.sourcePath, ...brollInputs, ...presenterInput, '-filter_complex', filter, '-map', '[vout]', '-an', '-t', range.duration.toFixed(6), '-fps_mode', 'passthrough', ...encoding.args, ...colorArgs(project), '-movflags', '+faststart', partOutputPath];
+  };
+  const audioArgs = (audioOutputPath: string) => { const expression = sourceSegments.map((segment) => `between(t\\,${segment.start.toFixed(6)}\\,${segment.end.toFixed(6)})`).join('+'); return ['-i', project.sourcePath, '-filter_complex', `[0:a]aselect='${expression}',asetpts=N/SR/TB[aout]`, '-map', '[aout]', '-vn', '-c:a', 'aac', '-b:a', '256k', audioOutputPath]; };
+  launchCheckpointExport({ projectId, command: settings.ffmpegBin, sessionDir, fingerprint, outputPath, encoder: encoding.encoder, ranges, buildPartArgs, audioArgs });
+  res.status(202).json({ started: true, outputPath, encoder: encoding.encoder, hardware: encoding.hardware, targetBitRate: encoding.targetBitRate, brollScenes: activeScenes.length, presenterMatte: Boolean(mattePath), checkpoints: ranges.length });
 }));
 
 app.post('/api/projects/:id/export', route(async (req, res) => { const projectId = routeParam(req.params.id); const project = getProject(projectId); await requireSource(project); const settings = await resolvedSettings(); if (!project.transcript || !project.edl) throw new Error('Missing transcript or edit decision list'); if (!settings.ffmpegBin) throw new Error('FFmpeg was not found'); const active = exportJobs.get(projectId); if (active?.state === 'running') return void res.status(409).json({ error: 'An export is already running for this project' }); const outputPath = await pickExportPath(); if (!outputPath) return void res.status(400).json({ error: 'Export cancelled' }); const mode: 'fast' | 'quality' = req.body?.mode === 'fast' ? 'fast' : 'quality'; const segments = rangesToSeconds(project); const outputDuration = segments.reduce((sum, segment) => sum + Math.max(0, segment.end - segment.start), 0); const fps = project.media.frameRate && project.media.frameRate > 0 ? project.media.frameRate : 30; const capabilities = await ffmpegCapabilities(settings.ffmpegBin); const encoding = encodingArgs(project, capabilities, mode); const inputAcceleration = capabilities.videoToolboxDecode ? ['-hwaccel', 'videotoolbox'] : []; const args = [...inputAcceleration, '-i', project.sourcePath, '-filter_complex', buildTimelineFilter(segments, fps), '-map', '[vout]', '-map', '[aout]', '-fps_mode', 'passthrough', ...encoding.args, ...colorArgs(project), '-c:a', 'aac', '-b:a', '256k', '-movflags', '+faststart', outputPath]; launchExport(projectId, settings.ffmpegBin, args, outputDuration, outputPath, encoding.encoder); res.status(202).json({ started: true, outputPath, encoder: encoding.encoder, hardware: encoding.hardware, targetBitRate: encoding.targetBitRate }); }));
 app.get('/api/projects/:id/export-status', route(async (req, res) => { res.json(exportJobs.get(routeParam(req.params.id)) ?? { state: 'idle', progress: 0, outTime: '00:00:00.000000', speed: '', frame: 0 }); }));
+app.post('/api/projects/:id/export-stop', route(async (req, res) => { const projectId = routeParam(req.params.id); const job = exportJobs.get(projectId); if (!job || job.state !== 'running') return void res.status(409).json({ error: 'No export is currently running' }); job.stopRequested = true; job.speed = job.resumable ? 'Stopping after preserving checkpoints…' : 'Stopping…'; const child = exportProcesses.get(projectId); if (child) child.kill('SIGTERM'); res.status(202).json({ stopping: true, resumable: Boolean(job.resumable) }); }));
 
 const PORT = Number(process.env.PORT || 3001); await loadSettings(); await hydrateProjects(true);
 if (process.env.NODE_ENV === 'production') { const distDir = path.resolve('dist'); app.use(express.static(distDir)); app.use((_req, res) => res.sendFile(path.join(distDir, 'index.html'))); }
