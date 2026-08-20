@@ -59,11 +59,12 @@ export type ProjectSummary = {
 
 const projectWriteChains = new Map<string, Promise<void>>();
 
-async function exists(filePath?: string) {
-  if (!filePath) return false;
+async function statFile(filePath?: string) {
+  if (!filePath) return null;
   const stat = await fs.stat(filePath).catch(() => null);
-  return Boolean(stat?.isFile());
+  return stat?.isFile() ? stat : null;
 }
+async function exists(filePath?: string) { return Boolean(await statFile(filePath)); }
 
 export async function atomicWriteJson(filePath: string, value: unknown) {
   const payload = `${JSON.stringify(value, null, 2)}\n`;
@@ -136,8 +137,29 @@ export async function scanProjects(projectsDir: string) {
   return loaded.filter((project): project is Project => Boolean(project));
 }
 
+async function reconcileBrollFiles(project: Project, plan: BrollPlan | null) {
+  if (!plan) return null;
+  let changed = false;
+  for (const scene of plan.scenes) {
+    const imageCandidate = path.join(project.workDir, 'broll', `${scene.id}.png`);
+    const videoCandidate = path.join(project.workDir, 'broll', `${scene.id}.mp4`);
+    const storedImage = await statFile(scene.imageFile);
+    const diskImage = storedImage ?? await statFile(imageCandidate);
+    if (diskImage && scene.imageFile !== imageCandidate && !storedImage) { scene.imageFile = imageCandidate; scene.generatedAt ||= diskImage.mtime.toISOString(); changed = true; }
+    if (!diskImage && scene.imageFile) { scene.imageFile = undefined; scene.generatedAt = undefined; scene.model = undefined; changed = true; }
+
+    const storedVideo = await statFile(scene.videoFile);
+    const diskVideo = storedVideo ?? await statFile(videoCandidate);
+    if (diskVideo && scene.videoFile !== videoCandidate && !storedVideo) { scene.videoFile = videoCandidate; scene.videoGeneratedAt ||= diskVideo.mtime.toISOString(); changed = true; }
+    if (!diskVideo && scene.videoFile) { scene.videoFile = undefined; scene.videoGeneratedAt = undefined; scene.videoModel = undefined; changed = true; }
+  }
+  if (changed) await atomicWriteJson(path.join(project.workDir, 'broll-plan.json'), plan);
+  return plan;
+}
+
 export async function summarizeProject(project: Project, brollPlan?: BrollPlan | null): Promise<ProjectSummary> {
-  const plan = brollPlan === undefined ? await loadBrollPlan(project.workDir) : brollPlan;
+  const loadedPlan = brollPlan === undefined ? await loadBrollPlan(project.workDir) : brollPlan;
+  const plan = await reconcileBrollFiles(project, loadedPlan ?? null);
   const scenes = plan?.scenes ?? [];
   const brollImages = scenes.filter((scene) => Boolean(scene.imageFile)).length;
   const brollVideos = scenes.filter((scene) => Boolean(scene.videoFile)).length;
@@ -166,7 +188,7 @@ export async function summarizeProject(project: Project, brollPlan?: BrollPlan |
 }
 
 export async function loadProjectSnapshot(project: Project) {
-  const broll = await loadBrollPlan(project.workDir);
+  const broll = await reconcileBrollFiles(project, await loadBrollPlan(project.workDir));
   return {
     project: await summarizeProject(project, broll),
     transcript: project.transcript ?? null,
