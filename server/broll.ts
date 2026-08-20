@@ -7,7 +7,7 @@ export type BrollKeepRange = { startWordId: string; endWordId: string };
 export type ImageProvider = 'openai' | 'gemini' | 'grok-cli' | 'codex-cli';
 export type BrollWorkflowMode = 'cleaned-video' | 'raw-video' | 'assets-only';
 export type BrollCountMode = 'auto' | 'exact' | 'per-minute';
-export type BrollDisplayTemplate = 'full-frame' | 'top-card' | 'split-top' | 'picture-in-picture' | 'top-card-presenter' | 'presenter-overlay';
+export type BrollDisplayTemplate = 'full-frame' | 'top-card' | 'split-top' | 'picture-in-picture' | 'top-card-presenter' | 'presenter-overlay' | 'stacked-cards-cutout';
 
 export const BROLL_DISPLAY_TEMPLATES: Array<{ id: BrollDisplayTemplate; label: string; needsPresenterMatte: boolean }> = [
   { id: 'full-frame', label: 'Full-screen B-roll', needsPresenterMatte: false },
@@ -16,6 +16,7 @@ export const BROLL_DISPLAY_TEMPLATES: Array<{ id: BrollDisplayTemplate; label: s
   { id: 'picture-in-picture', label: 'Picture in picture', needsPresenterMatte: false },
   { id: 'top-card-presenter', label: 'Top card + presenter cutout', needsPresenterMatte: true },
   { id: 'presenter-overlay', label: 'B-roll background + presenter cutout', needsPresenterMatte: true },
+  { id: 'stacked-cards-cutout', label: 'Stacked reel cards + presenter cutout', needsPresenterMatte: true },
 ];
 
 export type BrollPlanSettings = {
@@ -125,7 +126,7 @@ export async function updateBrollScene(workDir: string, plan: BrollPlan, sceneId
 export async function deleteBrollScene(workDir: string, plan: BrollPlan, sceneId: string) { const index = plan.scenes.findIndex((scene) => scene.id === sceneId); if (index < 0) throw new Error('B-roll scene not found'); const [scene] = plan.scenes.splice(index, 1); await Promise.all([scene.imageFile ? fs.rm(scene.imageFile, { force: true }) : Promise.resolve(), scene.videoFile ? fs.rm(scene.videoFile, { force: true }) : Promise.resolve()]); await saveBrollPlan(workDir, plan); return plan; }
 
 export function resolveSceneDisplayTemplate(plan: BrollPlan, scene: BrollScene) { return scene.displayTemplate || plan.settings.displayTemplate || 'full-frame'; }
-export function displayTemplateNeedsPresenterMatte(template: BrollDisplayTemplate) { return template === 'top-card-presenter' || template === 'presenter-overlay'; }
+export function displayTemplateNeedsPresenterMatte(template: BrollDisplayTemplate) { return template === 'top-card-presenter' || template === 'presenter-overlay' || template === 'stacked-cards-cutout'; }
 export function planNeedsPresenterMatte(plan: BrollPlan) { return plan.scenes.some((scene) => scene.enabled && displayTemplateNeedsPresenterMatte(resolveSceneDisplayTemplate(plan, scene))); }
 
 function targetAspect(plan: BrollPlan) { if (plan.settings.aspectRatio !== 'auto') return plan.settings.aspectRatio; return plan.orientation === 'portrait' ? '9:16' : '16:9'; }
@@ -191,6 +192,10 @@ export async function generateBrollVideoWithGrokCli(options: { config: ImageProv
 }
 
 function even(value: number) { const rounded = Math.max(2, Math.round(value)); return rounded % 2 === 0 ? rounded : rounded - 1; }
+function roundedAlpha(radius: number) {
+  return `if(lte(hypot(max(${radius}-X,0)+max(X-(W-${radius}),0),max(${radius}-Y,0)+max(Y-(H-${radius}),0)),${radius}),255,0)`;
+}
+function roundedRgba(radius: number) { return `format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='${roundedAlpha(radius)}'`; }
 function layoutRect(template: BrollDisplayTemplate, width: number, height: number) {
   if (template === 'top-card' || template === 'top-card-presenter') return { width: even(width * 0.92), height: even(height * 0.42), x: even(width * 0.04), y: even(height * 0.035) };
   if (template === 'split-top') return { width: even(width), height: even(height * 0.47), x: 0, y: 0 };
@@ -201,16 +206,18 @@ function layoutRect(template: BrollDisplayTemplate, width: number, height: numbe
   return { width: even(width), height: even(height), x: 0, y: 0 };
 }
 
-export function buildBrollOverlayFilter(options: { plan: BrollPlan; width: number; height: number; fps: number; cleanedSegments?: Array<{ start: number; end: number }>; presenterInputIndex?: number }) {
+export function buildBrollOverlayFilter(options: { plan: BrollPlan; width: number; height: number; fps: number; cleanedSegments?: Array<{ start: number; end: number }>; presenterInputIndex?: number; includeAudio?: boolean }) {
   const active = options.plan.scenes.filter((scene) => scene.enabled && (scene.videoFile || scene.imageFile));
   if (!active.length) throw new Error('Add at least one enabled B-roll image or video before exporting');
   const presenterScenes = active.filter((scene) => displayTemplateNeedsPresenterMatte(resolveSceneDisplayTemplate(options.plan, scene)));
+  const stackedScenes = active.filter((scene) => resolveSceneDisplayTemplate(options.plan, scene) === 'stacked-cards-cutout');
   if (presenterScenes.length && options.presenterInputIndex === undefined) throw new Error('A presenter-cutout template is selected but the presenter matte input is missing');
 
   const parts: string[] = [];
   let presenterLabels: string[] = [];
   if (presenterScenes.length) {
-    parts.push(`[0:v]setpts=PTS-STARTPTS,split=2[base0][presenterSource]`);
+    const sourceLabels = ['base0', 'presenterSource', ...stackedScenes.map((_scene, index) => `stackedSource${index}`)];
+    parts.push(`[0:v]setpts=PTS-STARTPTS,split=${sourceLabels.length}${sourceLabels.map((label) => `[${label}]`).join('')}`);
     parts.push(`[${options.presenterInputIndex}:v]fps=${options.fps.toFixed(6)},scale=${options.width}:${options.height}:flags=bilinear,format=gray,setpts=PTS-STARTPTS[presenterMask]`);
     parts.push('[presenterSource]format=rgba[presenterRgb]');
     parts.push('[presenterRgb][presenterMask]alphamerge[presenterAlpha]');
@@ -223,12 +230,26 @@ export function buildBrollOverlayFilter(options: { plan: BrollPlan; width: numbe
     parts.push('[0:v]setpts=PTS-STARTPTS[base0]');
   }
 
-  let previous = 'base0'; let presenterCursor = 0;
+  let previous = 'base0'; let presenterCursor = 0; let stackedCursor = 0;
   active.forEach((scene, index) => {
     const input = index + 1; const mediaLabel = `broll${index}`; const mediaOutput = `mediaBase${index}`; const output = `base${index + 1}`;
     const duration = Math.max(0.1, scene.sourceEnd - scene.sourceStart); const template = resolveSceneDisplayTemplate(options.plan, scene); const rect = layoutRect(template, options.width, options.height);
+    const between = `between(t,${scene.sourceStart.toFixed(6)},${scene.sourceEnd.toFixed(6)})`;
+    if (template === 'stacked-cards-cutout') {
+      const margin = even(options.width * 0.035); const topY = even(options.height * 0.025); const cardWidth = even(options.width - margin * 2); const topHeight = even(options.height * 0.43); const lowerY = even(options.height * 0.50); const lowerHeight = even(options.height * 0.475); const radius = even(Math.min(cardWidth, topHeight) * 0.065);
+      const presenterWidth = cardWidth; const presenterY = even(options.height * (options.height >= options.width ? 0.16 : 0.32)); const stackedSource = `stackedSource${stackedCursor++}`; const presenterLabel = presenterLabels[presenterCursor++];
+      parts.push(`[${input}:v]scale=${cardWidth}:${topHeight}:force_original_aspect_ratio=increase:flags=lanczos,crop=${cardWidth}:${topHeight},setsar=1,${roundedRgba(radius)},trim=duration=${duration.toFixed(6)},setpts=PTS-STARTPTS+${scene.sourceStart.toFixed(6)}/TB[${mediaLabel}]`);
+      parts.push(`[${stackedSource}]scale=${cardWidth}:${lowerHeight}:force_original_aspect_ratio=increase:flags=lanczos,crop=${cardWidth}:${lowerHeight},boxblur=luma_radius=12:luma_power=1:chroma_radius=6:chroma_power=1,${roundedRgba(radius)}[stackedRoom${index}]`);
+      parts.push(`[${presenterLabel}]scale=${presenterWidth}:-2:flags=lanczos[stackedPresenter${index}]`);
+      parts.push(`[${previous}]drawbox=x=0:y=0:w=iw:h=ih:color=black:t=fill:enable='${between}'[stackedBg${index}]`);
+      parts.push(`[stackedBg${index}][${mediaLabel}]overlay=${margin}:${topY}:eof_action=pass:enable='${between}'[stackedTop${index}]`);
+      parts.push(`[stackedTop${index}][stackedRoom${index}]overlay=${margin}:${lowerY}:eof_action=pass:enable='${between}'[stackedLower${index}]`);
+      parts.push(`[stackedLower${index}][stackedPresenter${index}]overlay=${margin}:${presenterY}:eof_action=pass:enable='${between}'[${output}]`);
+      previous = output;
+      return;
+    }
     parts.push(`[${input}:v]scale=${rect.width}:${rect.height}:force_original_aspect_ratio=increase:flags=lanczos,crop=${rect.width}:${rect.height},setsar=1,trim=duration=${duration.toFixed(6)},setpts=PTS-STARTPTS+${scene.sourceStart.toFixed(6)}/TB[${mediaLabel}]`);
-    parts.push(`[${previous}][${mediaLabel}]overlay=${rect.x}:${rect.y}:eof_action=pass:enable='between(t,${scene.sourceStart.toFixed(6)},${scene.sourceEnd.toFixed(6)})'[${mediaOutput}]`);
+    parts.push(`[${previous}][${mediaLabel}]overlay=${rect.x}:${rect.y}:eof_action=pass:enable='${between}'[${mediaOutput}]`);
     if (displayTemplateNeedsPresenterMatte(template)) {
       const presenterLabel = presenterLabels[presenterCursor++];
       parts.push(`[${mediaOutput}][${presenterLabel}]overlay=0:0:eof_action=pass:enable='between(t,${scene.sourceStart.toFixed(6)},${scene.sourceEnd.toFixed(6)})'[${output}]`);
@@ -241,9 +262,9 @@ export function buildBrollOverlayFilter(options: { plan: BrollPlan; width: numbe
   if (options.cleanedSegments?.length) {
     const expression = options.cleanedSegments.map((segment) => `between(t\\,${segment.start.toFixed(6)}\\,${segment.end.toFixed(6)})`).join('+');
     parts.push(`[${previous}]select='${expression}',setpts=N/${options.fps.toFixed(6)}/TB[vout]`);
-    parts.push(`[0:a]aselect='${expression}',asetpts=N/SR/TB[aout]`);
+    if (options.includeAudio !== false) parts.push(`[0:a]aselect='${expression}',asetpts=N/SR/TB[aout]`);
   } else {
-    parts.push(`[${previous}]setpts=PTS-STARTPTS[vout]`); parts.push('[0:a]asetpts=PTS-STARTPTS[aout]');
+    parts.push(`[${previous}]setpts=PTS-STARTPTS[vout]`); if (options.includeAudio !== false) parts.push('[0:a]asetpts=PTS-STARTPTS[aout]');
   }
   return { filter: parts.join(';'), activeScenes: active, needsPresenterMatte: presenterScenes.length > 0 };
 }

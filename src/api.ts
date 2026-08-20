@@ -4,7 +4,7 @@ export type Edl = { keepRanges: KeepRange[]; notes?: string[] };
 export type ImageProvider = 'openai' | 'gemini' | 'grok-cli' | 'codex-cli';
 export type BrollWorkflowMode = 'cleaned-video' | 'raw-video' | 'assets-only';
 export type BrollCountMode = 'auto' | 'exact' | 'per-minute';
-export type BrollDisplayTemplate = 'full-frame' | 'top-card' | 'split-top' | 'picture-in-picture' | 'top-card-presenter' | 'presenter-overlay';
+export type BrollDisplayTemplate = 'full-frame' | 'top-card' | 'split-top' | 'picture-in-picture' | 'top-card-presenter' | 'presenter-overlay' | 'stacked-cards-cutout';
 
 export type ProjectState = {
   proxyReady: boolean;
@@ -53,7 +53,7 @@ export type SystemStatus = {
 };
 
 export type PresenterMatteStatus = { ready: boolean; stale: boolean; generatedAt?: string; analysisSource?: 'proxy' | 'generated-proxy' };
-export type ExportStatus = { state: 'idle' | 'running' | 'completed' | 'failed'; progress: number; outTime: string; speed: string; frame: number; outputPath?: string; encoder?: string; error?: string };
+export type ExportStatus = { state: 'idle' | 'running' | 'completed' | 'failed' | 'stopped'; progress: number; outTime: string; speed: string; frame: number; outputPath?: string; encoder?: string; error?: string; checkpointCompleted?: number; checkpointTotal?: number; resumable?: boolean; resumed?: boolean };
 export type BrollPlanSettings = {
   workflowMode: BrollWorkflowMode; provider: ImageProvider; countMode: BrollCountMode; targetCount: number; imagesPerMinute: number;
   minSceneDuration: number; maxSceneDuration: number; aspectRatio: 'auto' | '9:16' | '16:9'; displayTemplate?: BrollDisplayTemplate;
@@ -103,12 +103,14 @@ export const api = {
   importBrollImage: (id: string, sceneId: string) => request<{ scene: BrollScene; imageUrl: string }>(`/api/projects/${id}/broll/scenes/${sceneId}/manual-image`, { method: 'POST' }),
   createBrollVideoPrompt: (id: string, sceneId: string) => request<BrollScene>(`/api/projects/${id}/broll/scenes/${sceneId}/video-prompt`, { method: 'POST' }),
   createBrollVideo: (id: string, sceneId: string, regenerationComment?: string) => request<{ scene: BrollScene; videoUrl: string }>(`/api/projects/${id}/broll/scenes/${sceneId}/video`, { method: 'POST', body: JSON.stringify({ regenerationComment }) }),
+  previewBrollScene: (id: string, sceneId: string) => request<{ previewUrl: string; duration: number; cached: boolean }>(`/api/projects/${id}/broll/scenes/${sceneId}/preview`, { method: 'POST' }),
   brollImageUrl: (id: string, sceneId: string, version?: string) => `/api/projects/${id}/broll/scenes/${sceneId}/image${version ? `?v=${encodeURIComponent(version)}` : ''}`,
   brollVideoUrl: (id: string, sceneId: string, version?: string) => `/api/projects/${id}/broll/scenes/${sceneId}/video${version ? `?v=${encodeURIComponent(version)}` : ''}`,
   presenterMatteStatus: (id: string) => request<PresenterMatteStatus>(`/api/projects/${id}/presenter-matte`),
   preparePresenterMatte: (id: string) => request<PresenterMatteStatus>(`/api/projects/${id}/presenter-matte`, { method: 'POST' }),
   exportBrollAssets: (id: string) => request<{ destination: string; sceneCount: number }>(`/api/projects/${id}/broll/export-assets`, { method: 'POST' }),
-  exportBrollVideo: (id: string, mode: 'fast' | 'quality') => request<{ started: boolean; outputPath: string; encoder: string; hardware: boolean; targetBitRate: number; brollScenes: number; presenterMatte?: boolean }>(`/api/projects/${id}/broll/export-video`, { method: 'POST', body: JSON.stringify({ mode }) }),
+  exportBrollVideo: (id: string, mode: 'fast' | 'quality') => request<{ started: boolean; outputPath: string; encoder: string; hardware: boolean; targetBitRate: number; brollScenes: number; presenterMatte?: boolean; checkpoints?: number }>(`/api/projects/${id}/broll/export-video`, { method: 'POST', body: JSON.stringify({ mode }) }),
   exportVideo: (id: string, mode: 'fast' | 'quality') => request<{ started: boolean; outputPath: string; encoder: string; hardware: boolean; targetBitRate: number }>(`/api/projects/${id}/export`, { method: 'POST', body: JSON.stringify({ mode }) }),
   exportStatus: (id: string) => request<ExportStatus>(`/api/projects/${id}/export-status`),
+  stopExport: (id: string) => request<{ stopping: boolean; resumable: boolean }>(`/api/projects/${id}/export-stop`, { method: 'POST' }),
 };

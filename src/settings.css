@@ -19,7 +19,10 @@
 .progressTrack span { display:block; height:100%; border-radius:inherit; background:#f4f4f5; transition:width .35s ease; }
 .exportProgress.completed .progressTrack span { background:#86efac; }
 .exportProgress.failed .progressTrack span { background:#fb7185; }
+.exportProgress.stopped .progressTrack span { background:#fbbf24; }
 .exportMeta { color:#71717a; font-size:10px; flex-wrap:wrap; }
+.exportStop { width:100%; margin-top:10px; }
+.exportProgress small { display:block; margin-top:8px; color:#a1a1aa; }
 
 .projectLibrary { display:flex; flex-direction:column; gap:16px; }
 .libraryHero { padding:28px; display:flex; justify-content:space-between; gap:24px; align-items:flex-end; }
@@ -102,6 +105,9 @@ textarea:focus { border-color:#71717a; }
 .modalBackdrop { position:fixed; inset:0; z-index:20; display:grid; place-items:center; padding:20px; background:rgba(0,0,0,.72); }
 .sceneModal { width:min(680px,100%); max-height:calc(100vh - 40px); overflow:auto; padding:20px; border:1px solid #3f3f46; border-radius:16px; background:#18181b; box-shadow:0 24px 80px rgba(0,0,0,.55); }
 .sceneModal > .muted { margin:0 0 14px; line-height:1.5; }
+.previewModal { width:min(920px,100%); }
+.previewModal video { display:block; width:100%; max-height:72vh; object-fit:contain; border-radius:12px; background:#000; }
+.previewModal > .muted { margin:12px 0 0; }
 .sceneModal label { display:flex; flex-direction:column; gap:7px; color:#a1a1aa; font-size:11px; }
 .modalActions { justify-content:flex-end; margin-top:16px; }
 
