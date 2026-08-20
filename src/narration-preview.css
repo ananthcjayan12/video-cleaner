@@ -1,0 +1,130 @@
+.narrationPreview {
+  margin: -2px 0 16px;
+  padding: 14px;
+  border: 1px solid #303038;
+  border-radius: 14px;
+  background: rgba(9, 9, 11, .58);
+}
+.narrationPreviewHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 12px;
+}
+.narrationPreviewHead strong {
+  display: block;
+  margin-top: 4px;
+  font-size: 14px;
+}
+.narrationTime {
+  color: #a1a1aa;
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.narrationControls {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.narrationControls button {
+  padding: 8px 11px;
+  font-size: 12px;
+}
+.narrationSpeed {
+  width: 95px;
+  display: grid;
+  gap: 4px;
+  color: #a1a1aa;
+  font-size: 10px;
+  letter-spacing: .04em;
+}
+.narrationSpeed select {
+  padding: 7px 8px;
+  font-size: 12px;
+}
+.narrationFollow {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 0 6px;
+  color: #d4d4d8;
+  font-size: 12px;
+}
+.narrationFollow input {
+  width: auto;
+  margin: 0;
+}
+.narrationNow {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px;
+  align-items: baseline;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #111114;
+  border: 1px solid #27272a;
+}
+.narrationNow > span {
+  color: #71717a;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .12em;
+  font-weight: 700;
+}
+.narrationNow strong {
+  min-width: 0;
+  font-size: 14px;
+  line-height: 1.55;
+  font-weight: 550;
+}
+.currentNarrationWord {
+  color: #09090b;
+  background: #f4f4f5;
+  border-radius: 5px;
+  padding: 2px 4px;
+  margin: 0 1px;
+}
+.removedNarrationWord {
+  color: #71717a;
+  text-decoration: line-through;
+  text-decoration-color: #fb7185;
+}
+.narrationHint {
+  margin: 10px 0 0;
+  color: #71717a;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.transcriptCard .transcript {
+  position: relative;
+  max-height: 430px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scroll-behavior: smooth;
+  padding: 8px 8px 18px 2px;
+  scrollbar-gutter: stable;
+}
+.transcriptCard .word {
+  transition: background .12s ease, color .12s ease, box-shadow .12s ease, transform .12s ease;
+}
+.transcriptCard .word.narrationActive,
+.transcriptCard .word.narrationActive:hover {
+  color: #09090b;
+  background: #f4f4f5;
+  text-decoration: none;
+  box-shadow: 0 0 0 2px rgba(244, 244, 245, .22);
+  transform: translateY(-1px);
+}
+@media (max-width: 700px) {
+  .narrationPreviewHead { flex-direction: column; gap: 6px; }
+  .narrationControls { align-items: stretch; }
+  .narrationControls button { flex: 1 1 auto; }
+  .narrationSpeed { width: 88px; }
+  .narrationNow { grid-template-columns: 1fr; gap: 5px; }
+  .transcriptCard .transcript { max-height: 360px; }
+}

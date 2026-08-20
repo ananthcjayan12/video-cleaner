@@ -10,7 +10,10 @@ export type PresenterMatteStatus = {
   stale: boolean;
   maskPath?: string;
   generatedAt?: string;
-  analysisSource?: 'proxy' | 'generated-proxy';
+  analysisSource?: 'scene-windows' | 'full-segment';
+  processedSeconds?: number;
+  sourceSeconds?: number;
+  fps?: number;
 };
 
 export type MattingSystemStatus = {
@@ -22,9 +25,21 @@ export type MattingSystemStatus = {
 };
 
 type RunOptions = { cwd?: string; env?: NodeJS.ProcessEnv };
+type MatteWindow = { start: number; end: number; duration: number };
+type MatteSpec = {
+  fps: number;
+  sourceDuration: number;
+  width: number;
+  height: number;
+  windows: MatteWindow[];
+  fingerprint: string;
+};
 
 const SELFIE_MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite';
 const SELFIE_MODEL_SHA256 = '191ac9529ae506ee0beefa6b2c945a172dab9d07d1e802a290a4e4038226658b';
+const MATTE_PIPELINE_VERSION = 3;
+const MATTE_PREROLL_SECONDS = 0.35;
+const MATTE_POSTROLL_SECONDS = 0.20;
 
 async function run(command: string, args: string[], timeoutMs = 0, options?: RunOptions) {
   return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
@@ -66,7 +81,7 @@ export async function mattingSystemStatus(ffmpegBin: string): Promise<MattingSys
       pythonInstalled: true,
       dependenciesInstalled: true,
       pythonPath: pythonBin,
-      detail: ffmpegBin ? 'MediaPipe presenter cutout ready' : 'FFmpeg is required for presenter cutout',
+      detail: ffmpegBin ? 'MediaPipe presenter cutout ready · scene-window HQ matte' : 'FFmpeg is required for presenter cutout',
     };
   } catch {
     return {
@@ -116,8 +131,9 @@ async function resolveSelfieModel(pythonBin: string) {
 }
 
 function matteDir(workDir: string) { return path.join(workDir, 'presenter'); }
-export function presenterMaskPath(workDir: string) { return path.join(matteDir(workDir), 'presenter-mask.mp4'); }
+export function presenterMaskPath(workDir: string) { return path.join(matteDir(workDir), 'presenter-mask.mkv'); }
 function matteMetaPath(workDir: string) { return path.join(matteDir(workDir), 'presenter-matte.json'); }
+function windowCacheDir(workDir: string) { return path.join(matteDir(workDir), 'window-cache'); }
 
 async function fileSignature(filePath: string) {
   const stat = await fs.stat(filePath);
@@ -128,45 +144,152 @@ async function readMeta(workDir: string): Promise<any | null> {
   try { return JSON.parse(await fs.readFile(matteMetaPath(workDir), 'utf8')); } catch { return null; }
 }
 
+function normalFps(value: unknown) {
+  const fps = Number(value);
+  if (!Number.isFinite(fps) || fps < 1) return 30;
+  // Social/iPhone masters are normally 24/25/30/50/60. Preserve native timing up to 60fps;
+  // very high-frame-rate capture is capped because the talking-head output is not intended as slow motion.
+  return Math.min(60, fps);
+}
+
+function even(value: number) { const rounded = Math.max(2, Math.round(value)); return rounded % 2 === 0 ? rounded : rounded - 1; }
+function segmentationSize(width?: number, height?: number) {
+  const w = Math.max(1, width || 1080); const h = Math.max(1, height || 1920); const shortEdge = Math.min(w, h);
+  const scale = Math.min(1, 1080 / shortEdge);
+  return { width: even(w * scale), height: even(h * scale) };
+}
+
+function templateNeedsPresenter(template: unknown) {
+  return template === 'top-card-presenter' || template === 'presenter-overlay' || template === 'stacked-cards-cutout';
+}
+
+function snapDown(value: number, fps: number) { return Math.max(0, Math.floor(value * fps + 1e-7) / fps); }
+function snapUp(value: number, fps: number) { return Math.max(0, Math.ceil(value * fps - 1e-7) / fps); }
+
+function mergeWindows(raw: Array<{ start: number; end: number }>, fps: number, sourceDuration: number) {
+  const padded = raw.map((range) => ({
+    start: snapDown(Math.max(0, range.start - MATTE_PREROLL_SECONDS), fps),
+    end: snapUp(Math.min(sourceDuration, range.end + MATTE_POSTROLL_SECONDS), fps),
+  })).filter((range) => range.end - range.start >= 1 / fps).sort((a, b) => a.start - b.start);
+  const merged: MatteWindow[] = [];
+  for (const range of padded) {
+    const previous = merged.at(-1);
+    if (previous && range.start <= previous.end + 1 / fps) {
+      previous.end = Math.max(previous.end, range.end); previous.duration = previous.end - previous.start;
+    } else merged.push({ ...range, duration: range.end - range.start });
+  }
+  return merged;
+}
+
+async function projectMatteSpec(workDir: string): Promise<MatteSpec | null> {
+  try {
+    const [project, plan] = await Promise.all([
+      fs.readFile(path.join(workDir, 'project.json'), 'utf8').then((value) => JSON.parse(value)),
+      fs.readFile(path.join(workDir, 'broll-plan.json'), 'utf8').then((value) => JSON.parse(value)),
+    ]);
+    const fps = normalFps(project?.media?.frameRate); const sourceDuration = Math.max(0, Number(project?.media?.duration) || 0); const width = Math.max(2, Number(project?.media?.width) || 1080); const height = Math.max(2, Number(project?.media?.height) || 1920);
+    if (!sourceDuration) return null;
+    const defaultTemplate = plan?.settings?.displayTemplate || 'full-frame';
+    const scenes = (Array.isArray(plan?.scenes) ? plan.scenes : []).filter((scene: any) => scene?.enabled && (scene?.imageFile || scene?.videoFile) && templateNeedsPresenter(scene?.displayTemplate || defaultTemplate));
+    if (!scenes.length) return null;
+    const windows = mergeWindows(scenes.map((scene: any) => ({ start: Number(scene.sourceStart) || 0, end: Number(scene.sourceEnd) || 0 })), fps, sourceDuration);
+    const sceneSignature = scenes.map((scene: any) => ({ id: String(scene.id), start: Number(scene.sourceStart), end: Number(scene.sourceEnd), template: scene.displayTemplate || defaultTemplate }));
+    const fingerprint = createHash('sha256').update(JSON.stringify({ pipeline: MATTE_PIPELINE_VERSION, fps, sourceDuration, width, height, sceneSignature, windows })).digest('hex').slice(0, 24);
+    return { fps, sourceDuration, width, height, windows, fingerprint };
+  } catch { return null; }
+}
+
 export async function presenterMatteStatus(workDir: string, sourcePath: string): Promise<PresenterMatteStatus> {
   const maskPath = presenterMaskPath(workDir);
-  const [maskStat, meta, sourceStat] = await Promise.all([
+  const [maskStat, meta, sourceStat, spec] = await Promise.all([
     fs.stat(maskPath).catch(() => null),
     readMeta(workDir),
     fs.stat(sourcePath).catch(() => null),
+    projectMatteSpec(workDir),
   ]);
   if (!maskStat?.isFile() || maskStat.size < 10_000 || !meta || !sourceStat?.isFile()) return { ready: false, stale: false };
   const signature = meta.sourceSignature ?? {};
-  const stale = signature.path !== sourcePath || Number(signature.size) !== sourceStat.size || Number(signature.mtimeMs) !== Math.round(sourceStat.mtimeMs);
+  const sourceStale = signature.path !== sourcePath || Number(signature.size) !== sourceStat.size || Number(signature.mtimeMs) !== Math.round(sourceStat.mtimeMs);
+  const pipelineStale = Number(meta.version) !== MATTE_PIPELINE_VERSION;
+  const planStale = Boolean(spec && meta.fingerprint !== spec.fingerprint);
+  const stale = sourceStale || pipelineStale || planStale;
   return {
     ready: !stale,
     stale,
     maskPath: !stale ? maskPath : undefined,
     generatedAt: meta.generatedAt,
     analysisSource: meta.analysisSource,
+    processedSeconds: Number(meta.processedSeconds) || undefined,
+    sourceSeconds: Number(meta.sourceSeconds) || undefined,
+    fps: Number(meta.fps) || undefined,
   };
 }
 
-function even(value: number) { const rounded = Math.max(2, Math.round(value)); return rounded % 2 === 0 ? rounded : rounded - 1; }
-function segmentationSize(width?: number, height?: number) {
-  const w = Math.max(1, width || 1080); const h = Math.max(1, height || 1920); const longEdge = Math.min(1080, Math.max(w, h));
-  if (w >= h) return { width: even(longEdge), height: even(longEdge * h / w) };
-  return { width: even(longEdge * w / h), height: even(longEdge) };
+async function runMatteScript(options: { pythonBin: string; inputPath: string; outputPath: string; ffmpegBin: string; modelPath: string }) {
+  const scriptPath = path.resolve('server', 'presenter_matte.py');
+  await fs.rm(options.outputPath, { force: true });
+  await run(options.pythonBin, [
+    scriptPath,
+    '--input', options.inputPath,
+    '--output', options.outputPath,
+    '--ffmpeg', options.ffmpegBin,
+    ...(options.modelPath ? ['--model', options.modelPath] : []),
+    '--feather', '3',
+    '--choke', '1.0',
+    '--temporal', '0.10',
+  ], 7_200_000, { cwd: path.resolve('.') });
+  const stat = await fs.stat(options.outputPath).catch(() => null);
+  if (!stat?.isFile() || stat.size < 10_000) throw new Error('Presenter matte generation finished without a usable mask video');
+  await run(options.ffmpegBin, ['-v', 'error', '-i', options.outputPath, '-f', 'null', '-'], 120000);
 }
 
-async function ensureAnalysisSource(options: { workDir: string; sourcePath: string; proxyPath?: string; width?: number; height?: number; ffmpegBin: string }) {
-  if (options.proxyPath) {
-    const stat = await fs.stat(options.proxyPath).catch(() => null);
-    if (stat?.isFile()) return { path: options.proxyPath, kind: 'proxy' as const };
-  }
-  const dir = matteDir(options.workDir); await fs.mkdir(dir, { recursive: true });
-  const analysisPath = path.join(dir, 'segmentation-input.mp4'); const size = segmentationSize(options.width, options.height);
+async function makeAnalysisWindow(options: { sourcePath: string; outputPath: string; start: number; duration: number; width: number; height: number; fps: number; ffmpegBin: string }) {
+  await fs.rm(options.outputPath, { force: true });
   await run(options.ffmpegBin, [
-    '-hide_banner', '-loglevel', 'error', '-y', '-i', options.sourcePath,
-    '-vf', `scale=${size.width}:${size.height}:flags=fast_bilinear,fps=30,format=yuv420p`,
-    '-an', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '24', '-movflags', '+faststart', analysisPath,
+    '-hide_banner', '-loglevel', 'error', '-y',
+    '-ss', options.start.toFixed(6), '-t', options.duration.toFixed(6), '-i', options.sourcePath,
+    '-vf', `scale=${options.width}:${options.height}:flags=lanczos,fps=${options.fps.toFixed(6)},format=yuv420p`,
+    '-an', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18', '-movflags', '+faststart', options.outputPath,
   ], 7_200_000);
-  return { path: analysisPath, kind: 'generated-proxy' as const };
+}
+
+async function assembleSparseMask(options: { workDir: string; windows: Array<MatteWindow & { maskPath: string }>; outputPath: string; width: number; height: number; fps: number; sourceDuration: number; ffmpegBin: string }) {
+  const args: string[] = ['-hide_banner', '-loglevel', 'error', '-y'];
+  for (const window of options.windows) args.push('-i', window.maskPath);
+  const parts: string[] = []; const labels: string[] = []; let cursor = 0; let gapIndex = 0;
+  const addGap = (duration: number) => {
+    if (duration < 0.5 / options.fps) return;
+    const label = `gap${gapIndex++}`; parts.push(`color=c=black:s=${options.width}x${options.height}:r=${options.fps.toFixed(6)}:d=${duration.toFixed(6)},format=gray[${label}]`); labels.push(label);
+  };
+  options.windows.forEach((window, index) => {
+    addGap(Math.max(0, window.start - cursor));
+    const label = `window${index}`; parts.push(`[${index}:v]fps=${options.fps.toFixed(6)},scale=${options.width}:${options.height}:flags=neighbor,format=gray,trim=duration=${window.duration.toFixed(6)},setpts=PTS-STARTPTS[${label}]`); labels.push(label); cursor = window.end;
+  });
+  addGap(Math.max(0, options.sourceDuration - cursor));
+  if (!labels.length) throw new Error('No presenter matte windows were produced');
+  if (labels.length === 1) parts.push(`[${labels[0]}]setpts=PTS-STARTPTS[maskout]`);
+  else parts.push(`${labels.map((label) => `[${label}]`).join('')}concat=n=${labels.length}:v=1:a=0,setpts=PTS-STARTPTS[maskout]`);
+  args.push('-filter_complex', parts.join(';'), '-map', '[maskout]', '-an', '-c:v', 'ffv1', '-level', '3', '-g', '1', '-pix_fmt', 'gray', options.outputPath);
+  await fs.rm(options.outputPath, { force: true }); await run(options.ffmpegBin, args, 7_200_000);
+}
+
+async function ensureSceneWindowMatte(options: { workDir: string; sourcePath: string; ffmpegBin: string; pythonBin: string; modelPath: string; spec: MatteSpec }) {
+  const size = segmentationSize(options.spec.width, options.spec.height); const cacheDir = windowCacheDir(options.workDir); await fs.mkdir(cacheDir, { recursive: true });
+  const processed: Array<MatteWindow & { maskPath: string }> = [];
+  for (const window of options.spec.windows) {
+    const frameStart = Math.round(window.start * options.spec.fps); const frameEnd = Math.round(window.end * options.spec.fps); const key = `${frameStart}-${frameEnd}-${size.width}x${size.height}-${options.spec.fps.toFixed(3).replace('.', '_')}`;
+    const maskPath = path.join(cacheDir, `mask-${key}.mkv`); const existing = await fs.stat(maskPath).catch(() => null);
+    if (!existing?.isFile() || existing.size < 10_000) {
+      const analysisPath = path.join(cacheDir, `analysis-${key}.mp4`);
+      await makeAnalysisWindow({ sourcePath: options.sourcePath, outputPath: analysisPath, start: window.start, duration: window.duration, width: size.width, height: size.height, fps: options.spec.fps, ffmpegBin: options.ffmpegBin });
+      try { await runMatteScript({ pythonBin: options.pythonBin, inputPath: analysisPath, outputPath: maskPath, ffmpegBin: options.ffmpegBin, modelPath: options.modelPath }); }
+      finally { await fs.rm(analysisPath, { force: true }); }
+    }
+    processed.push({ ...window, maskPath });
+  }
+  const finalMaskPath = presenterMaskPath(options.workDir);
+  await assembleSparseMask({ workDir: options.workDir, windows: processed, outputPath: finalMaskPath, width: size.width, height: size.height, fps: options.spec.fps, sourceDuration: options.spec.sourceDuration, ffmpegBin: options.ffmpegBin });
+  return { finalMaskPath, size, processed };
 }
 
 export async function ensurePresenterMatte(options: {
@@ -183,31 +306,35 @@ export async function ensurePresenterMatte(options: {
   if (!system.configured || !system.pythonPath) throw new Error(system.detail);
 
   const dir = matteDir(options.workDir); await fs.mkdir(dir, { recursive: true });
-  const analysis = await ensureAnalysisSource(options); const maskPath = presenterMaskPath(options.workDir); const modelPath = await resolveSelfieModel(system.pythonPath);
-  await fs.rm(maskPath, { force: true });
-  const scriptPath = path.resolve('server', 'presenter_matte.py');
-  await run(system.pythonPath, [
-    scriptPath,
-    '--input', analysis.path,
-    '--output', maskPath,
-    '--ffmpeg', options.ffmpegBin,
-    ...(modelPath ? ['--model', modelPath] : []),
-    '--feather', '4',
-    '--temporal', '0.12',
-  ], 7_200_000, { cwd: path.resolve('.') });
+  const modelPath = await resolveSelfieModel(system.pythonPath); const spec = await projectMatteSpec(options.workDir);
+  let maskPath: string; let analysisSource: PresenterMatteStatus['analysisSource']; let processedSeconds: number; let sourceSeconds: number; let fps: number; let fingerprint: string; let dimensions: { width: number; height: number };
+
+  if (spec?.windows.length) {
+    const result = await ensureSceneWindowMatte({ workDir: options.workDir, sourcePath: options.sourcePath, ffmpegBin: options.ffmpegBin, pythonBin: system.pythonPath, modelPath, spec });
+    maskPath = result.finalMaskPath; analysisSource = 'scene-windows'; processedSeconds = spec.windows.reduce((sum, window) => sum + window.duration, 0); sourceSeconds = spec.sourceDuration; fps = spec.fps; fingerprint = spec.fingerprint; dimensions = result.size;
+  } else {
+    // Scene preview calls pass a short already-trimmed source and have no project/plan manifest.
+    // Process that short clip directly rather than falling back to a low-resolution project proxy.
+    maskPath = presenterMaskPath(options.workDir); await runMatteScript({ pythonBin: system.pythonPath, inputPath: options.sourcePath, outputPath: maskPath, ffmpegBin: options.ffmpegBin, modelPath });
+    analysisSource = 'full-segment'; processedSeconds = 0; sourceSeconds = 0; fps = 0; fingerprint = 'full-segment'; dimensions = { width: options.width || 0, height: options.height || 0 };
+  }
 
   const stat = await fs.stat(maskPath).catch(() => null);
   if (!stat?.isFile() || stat.size < 10_000) throw new Error('Presenter matte generation finished without a usable mask video');
-  await run(options.ffmpegBin, ['-v', 'error', '-i', maskPath, '-f', 'null', '-'], 120000);
   const meta = {
-    version: 1,
+    version: MATTE_PIPELINE_VERSION,
     generatedAt: new Date().toISOString(),
     sourceSignature: await fileSignature(options.sourcePath),
-    analysisSource: analysis.kind,
-    analysisPath: analysis.path,
+    fingerprint,
+    analysisSource,
+    processedSeconds,
+    sourceSeconds,
+    fps,
+    dimensions,
     maskPath,
-    note: 'Alpha-only presenter mask. Final render applies this mask to the untouched source master.',
+    quality: { maxShortEdge: 1080, losslessMask: true, codec: 'ffv1', featherPx: 3, chokePx: 1.0, temporalBlend: 0.10, motionAwareTemporal: true, preRollSeconds: MATTE_PREROLL_SECONDS, postRollSeconds: MATTE_POSTROLL_SECONDS },
+    note: 'Scene-windowed lossless alpha-only presenter mask. Final render applies this mask to the untouched source master.',
   };
   await fs.writeFile(matteMetaPath(options.workDir), `${JSON.stringify(meta, null, 2)}\n`);
-  return { ready: true, stale: false, maskPath, generatedAt: meta.generatedAt, analysisSource: analysis.kind } satisfies PresenterMatteStatus;
+  return { ready: true, stale: false, maskPath, generatedAt: meta.generatedAt, analysisSource, processedSeconds: processedSeconds || undefined, sourceSeconds: sourceSeconds || undefined, fps: fps || undefined } satisfies PresenterMatteStatus;
 }
