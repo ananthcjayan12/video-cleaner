@@ -8,6 +8,26 @@ The browser is only the editor UI. The local Node service owns filesystem access
 
 Dialogue cleaning remains non-destructive: FFmpeg creates a tiny analysis-audio file and optional 30 fps proxy, ElevenLabs provides word timestamps, Codex returns a delete-only EDL, and final export reads the untouched master once.
 
+## Local resumable project library
+
+Project folders are the source of truth. On startup the local Node service scans `~/VideoCleaner/projects` (or `PROJECTS_DIR`) and rebuilds the project library from `project.json` plus the files already present in each project directory. Closing the browser, stopping the Node service or rebooting the computer does not discard the project.
+
+The home screen shows recent projects with local progress for proxy, transcript, cleaned EDL, B-roll images and B-roll videos. Opening a saved project restores the transcript, EDL, proxy URL, B-roll plan, stills and generated clips.
+
+Project actions include:
+
+- **Open / Resume**
+- **Rename**
+- **Delete project** — removes only the Video Cleaner project directory; the original master video is never deleted
+- **Relink source** — if the original video was moved, choose it again; duration and dimensions are checked before relinking
+- **Generate missing images / Create missing videos** — completed assets are reused after an interrupted generation run
+
+B-roll title, prompt, timing and enabled-state edits debounce-save locally after about 700 ms. Core JSON project writes use temporary files plus atomic rename so a normal save does not partially overwrite the project manifest.
+
+If a scene PNG/MP4 exists on disk but the app was closed before its metadata finished updating, project recovery reconciles the completed asset back into the B-roll plan when the project is opened again.
+
+No cloud project database is used. Provider calls still send only the media/prompt data required by the configured external provider; the project library itself remains on the user's computer.
+
 ## B-roll workflows
 
 ### 1. Cleaned video -> B-roll -> final video
