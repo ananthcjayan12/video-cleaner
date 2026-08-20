@@ -7,6 +7,7 @@ import process from 'node:process';
 import express from 'express';
 import dotenv from 'dotenv';
 import {
+  BROLL_DISPLAY_TEMPLATES,
   buildBrollOverlayFilter,
   createBrollPlan,
   createVideoPrompt,
@@ -15,11 +16,15 @@ import {
   generateBrollVideoWithGrokCli,
   importBrollImage,
   loadBrollPlan,
+  planNeedsPresenterMatte,
+  updateBrollPlanSettings,
   updateBrollScene,
+  type BrollDisplayTemplate,
   type BrollPlan,
   type BrollPlanSettings,
   type ImageProvider,
 } from './broll.js';
+import { ensurePresenterMatte, mattingSystemStatus, presenterMatteStatus } from './presenter.js';
 import {
   atomicWriteJson,
   loadProjectDirectory,
@@ -81,6 +86,10 @@ async function loadSettings() { try { localSettings = JSON.parse(await fs.readFi
 async function saveSettings() { await fs.mkdir(CONFIG_DIR, { recursive: true }); await fs.writeFile(CONFIG_PATH, JSON.stringify(localSettings, null, 2), { mode: 0o600 }); }
 async function detectBinary(name: string) { try { const { stdout } = await run(process.platform === 'win32' ? 'where' : 'which', [name], undefined, 3000); return stdout.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? ''; } catch { return ''; } }
 function providerValue(value: unknown): ImageProvider { return ['openai', 'gemini', 'grok-cli', 'codex-cli'].includes(String(value)) ? value as ImageProvider : 'gemini'; }
+function displayTemplateValue(value: unknown): BrollDisplayTemplate {
+  const candidate = String(value || 'full-frame') as BrollDisplayTemplate;
+  return BROLL_DISPLAY_TEMPLATES.some((template) => template.id === candidate) ? candidate : 'full-frame';
+}
 
 async function resolvedSettings() {
   const codexOverride = localSettings.codexBin || process.env.CODEX_BIN || '';
@@ -124,7 +133,11 @@ async function ffmpegCapabilities(ffmpegBin: string): Promise<FfmpegCapabilities
 async function systemStatus() {
   const settings = await resolvedSettings();
   const [codexInstalled, grokInstalled, ffmpegInstalled, ffprobeInstalled] = await Promise.all([canRun(settings.codexBin, ['--version']), canRun(settings.grokBin, ['version']), canRun(settings.ffmpegBin, ['-version']), canRun(settings.ffprobeBin, ['-version'])]);
-  const [codexAuthenticated, capabilities] = await Promise.all([codexInstalled ? canRun(settings.codexBin, ['login', 'status']) : Promise.resolve(false), ffmpegInstalled ? ffmpegCapabilities(settings.ffmpegBin) : Promise.resolve({ videoToolboxDecode: false, h264VideoToolbox: false, hevcVideoToolbox: false })]);
+  const [codexAuthenticated, capabilities, matting] = await Promise.all([
+    codexInstalled ? canRun(settings.codexBin, ['login', 'status']) : Promise.resolve(false),
+    ffmpegInstalled ? ffmpegCapabilities(settings.ffmpegBin) : Promise.resolve({ videoToolboxDecode: false, h264VideoToolbox: false, hevcVideoToolbox: false }),
+    mattingSystemStatus(ffmpegInstalled ? settings.ffmpegBin : ''),
+  ]);
   return {
     codex: { installed: codexInstalled, authenticated: codexAuthenticated, path: settings.codexBin || null },
     grok: { installed: grokInstalled, path: settings.grokBin || null, model: settings.grokModel || 'CLI default', videoModel: settings.grokVideoModel },
@@ -135,6 +148,7 @@ async function systemStatus() {
       grokCli: { configured: grokInstalled, model: settings.grokModel || 'CLI default', experimental: true }, codexCli: { configured: codexInstalled && codexAuthenticated, model: 'Codex CLI', experimental: true },
     },
     brollVideo: { configured: grokInstalled && codexInstalled && codexAuthenticated, provider: 'Grok CLI', model: settings.grokVideoModel, experimental: true },
+    matting,
     projectsDir: settings.projectsDir,
   };
 }
@@ -210,10 +224,7 @@ function defaultBitRate(media: MediaProfile, hevc: boolean) { const pixels = (me
 function exportBitRate(media: MediaProfile, hevc: boolean, mode: 'fast' | 'quality') { const baseline = media.bitRate || defaultBitRate(media, hevc); const floor = defaultBitRate(media, hevc); const desired = mode === 'quality' ? Math.max(floor, baseline * 1.05) : Math.max(floor * 0.75, baseline * 0.78); return Math.min(140_000_000, Math.round(desired)); }
 function formatBitRate(value: number) { return `${Math.max(1, Math.round(value / 1000))}k`; }
 function sourceBitDepth(pixelFormat?: string) { const match = String(pixelFormat ?? '').toLowerCase().match(/(9|10|12|14|16)(?:le|be)?$/); return match ? Number(match[1]) : 8; }
-function hevcOutputPixelFormat(media: MediaProfile) {
-  // VideoToolbox HEVC reliably accepts 8-bit 4:2:0 or Main 10. Normalize higher-chroma/high-bit-depth inputs to Main 10 instead of passing through unsupported formats such as yuv422p10le, yuv444p10le, p010, or 12-bit sources.
-  return media.hdr || sourceBitDepth(media.pixelFormat) > 8 ? 'yuv420p10le' : 'yuv420p';
-}
+function hevcOutputPixelFormat(media: MediaProfile) { return media.hdr || sourceBitDepth(media.pixelFormat) > 8 ? 'yuv420p10le' : 'yuv420p'; }
 function encodingArgs(project: Project, capabilities: FfmpegCapabilities, mode: 'fast' | 'quality') {
   const sourceCodec = String(project.media.videoCodec || '').toLowerCase(); const useHevc = project.media.hdr || sourceCodec === 'hevc' || sourceCodec === 'h265'; const hardware = useHevc ? capabilities.hevcVideoToolbox : capabilities.h264VideoToolbox; const targetBitRate = exportBitRate(project.media, useHevc, mode); const pixelFormat = hevcOutputPixelFormat(project.media); const main10 = pixelFormat === 'yuv420p10le';
   if (hardware) { const encoder = useHevc ? 'hevc_videotoolbox' : 'h264_videotoolbox'; return { encoder, hardware, targetBitRate, args: ['-c:v', encoder, '-realtime', '1', '-allow_sw', '1', ...(mode === 'fast' ? ['-prio_speed', '1'] : []), '-b:v', formatBitRate(targetBitRate), '-maxrate', formatBitRate(Math.round(targetBitRate * 1.2)), '-bufsize', formatBitRate(Math.round(targetBitRate * 2)), ...(useHevc ? ['-pix_fmt', pixelFormat, '-tag:v', 'hvc1', ...(main10 ? ['-profile:v', 'main10'] : [])] : [])] }; }
@@ -292,8 +303,24 @@ app.put('/api/projects/:id/edl', route(async (req, res) => { const project = get
 
 app.post('/api/projects/:id/broll/plan', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const settings = await resolvedSettings(); if (!settings.codexBin) throw new Error('Codex CLI was not found; it is required for B-roll scene planning.'); const transcript = await transcribeProject(project); const requested = (req.body?.settings ?? {}) as Partial<BrollPlanSettings>; const workflowMode = ['cleaned-video', 'raw-video', 'assets-only'].includes(String(requested.workflowMode)) ? requested.workflowMode : 'cleaned-video'; const keepRanges = workflowMode === 'cleaned-video' ? project.edl?.keepRanges : undefined; const orientation = (project.media.height || 0) > (project.media.width || 0) ? 'portrait' : 'landscape'; const plan = await createBrollPlan({ codexBin: settings.codexBin, workDir: project.workDir, words: transcript.words, keepRanges, orientation, settings: { ...requested, provider: requested.provider || settings.imageProvider } }); brollPlans.set(project.id, plan); await touchProject(project); res.json({ plan, transcript, edl: project.edl }); }));
 app.get('/api/projects/:id/broll', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const cached = brollPlans.get(project.id); if (cached) return void res.json(cached); const plan = await loadBrollPlan(project.workDir); if (!plan) return void res.status(404).json({ error: 'B-roll plan has not been created yet' }); brollPlans.set(project.id, plan); res.json(plan); }));
-app.put('/api/projects/:id/broll/scenes/:sceneId', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const sceneId = routeParam(req.params.sceneId); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet'); const scene = await updateBrollScene(project.workDir, plan, sceneId, { title: typeof req.body?.title === 'string' ? req.body.title : undefined, imagePrompt: typeof req.body?.imagePrompt === 'string' ? req.body.imagePrompt : undefined, videoPrompt: typeof req.body?.videoPrompt === 'string' ? req.body.videoPrompt : undefined, sourceStart: Number.isFinite(Number(req.body?.sourceStart)) ? Number(req.body.sourceStart) : undefined, sourceEnd: Number.isFinite(Number(req.body?.sourceEnd)) ? Number(req.body.sourceEnd) : undefined, enabled: typeof req.body?.enabled === 'boolean' ? req.body.enabled : undefined }); brollPlans.set(project.id, plan); await touchProject(project); res.json(scene); }));
+app.put('/api/projects/:id/broll/settings', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id)); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet');
+  const updated = await updateBrollPlanSettings(project.workDir, plan, { displayTemplate: displayTemplateValue(req.body?.displayTemplate) }); brollPlans.set(project.id, updated); await touchProject(project); res.json(updated);
+}));
+app.put('/api/projects/:id/broll/scenes/:sceneId', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id)); const sceneId = routeParam(req.params.sceneId); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet');
+  const displayTemplate = req.body?.displayTemplate === 'default' ? 'default' : typeof req.body?.displayTemplate === 'string' ? displayTemplateValue(req.body.displayTemplate) : undefined;
+  const scene = await updateBrollScene(project.workDir, plan, sceneId, { title: typeof req.body?.title === 'string' ? req.body.title : undefined, imagePrompt: typeof req.body?.imagePrompt === 'string' ? req.body.imagePrompt : undefined, videoPrompt: typeof req.body?.videoPrompt === 'string' ? req.body.videoPrompt : undefined, sourceStart: Number.isFinite(Number(req.body?.sourceStart)) ? Number(req.body.sourceStart) : undefined, sourceEnd: Number.isFinite(Number(req.body?.sourceEnd)) ? Number(req.body.sourceEnd) : undefined, enabled: typeof req.body?.enabled === 'boolean' ? req.body.enabled : undefined, displayTemplate }); brollPlans.set(project.id, plan); await touchProject(project); res.json(scene);
+}));
 app.delete('/api/projects/:id/broll/scenes/:sceneId', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet'); const updated = await deleteBrollScene(project.workDir, plan, routeParam(req.params.sceneId)); brollPlans.set(project.id, updated); await touchProject(project); res.json(updated); }));
+
+app.get('/api/projects/:id/presenter-matte', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id)); res.json(await presenterMatteStatus(project.workDir, project.sourcePath));
+}));
+app.post('/api/projects/:id/presenter-matte', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id)); await requireSource(project); const settings = await resolvedSettings(); if (!settings.ffmpegBin) throw new Error('FFmpeg was not found.');
+  const result = await ensurePresenterMatte({ workDir: project.workDir, sourcePath: project.sourcePath, proxyPath: project.proxyPath, width: project.media.width, height: project.media.height, ffmpegBin: settings.ffmpegBin }); await touchProject(project); res.json(result);
+}));
 
 app.post('/api/projects/:id/broll/scenes/:sceneId/generate', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id)); const sceneId = routeParam(req.params.sceneId); const settings = await resolvedSettings(); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet');
@@ -313,16 +340,26 @@ app.get('/api/projects/:id/broll/scenes/:sceneId/video', route(async (req, res) 
 
 app.post('/api/projects/:id/broll/export-assets', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id)); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet'); const selectedFolder = await pickFolderPath(); if (!selectedFolder) return void res.status(400).json({ error: 'Export cancelled' }); const destination = path.join(selectedFolder, `video-cleaner-broll-${project.id.slice(0, 8)}`); await fs.mkdir(destination, { recursive: true }); const scenes = [];
-  for (const scene of plan.scenes) { let imageFile: string | null = null; let videoFile: string | null = null; if (scene.imageFile) { imageFile = `${scene.id}.png`; await fs.copyFile(scene.imageFile, path.join(destination, imageFile)); } if (scene.videoFile) { videoFile = `${scene.id}.mp4`; await fs.copyFile(scene.videoFile, path.join(destination, videoFile)); } scenes.push({ id: scene.id, title: scene.title, enabled: scene.enabled, sourceStart: scene.sourceStart, sourceEnd: scene.sourceEnd, startWordId: scene.startWordId, endWordId: scene.endWordId, narration: scene.narration, visualIntent: scene.visualIntent, shotType: scene.shotType, imagePrompt: scene.imagePrompt, videoPrompt: scene.videoPrompt || null, provider: scene.provider || plan.settings.provider, model: scene.model || null, imageFile, videoFile, videoModel: scene.videoModel || null }); }
+  for (const scene of plan.scenes) { let imageFile: string | null = null; let videoFile: string | null = null; if (scene.imageFile) { imageFile = `${scene.id}.png`; await fs.copyFile(scene.imageFile, path.join(destination, imageFile)); } if (scene.videoFile) { videoFile = `${scene.id}.mp4`; await fs.copyFile(scene.videoFile, path.join(destination, videoFile)); } scenes.push({ id: scene.id, title: scene.title, enabled: scene.enabled, sourceStart: scene.sourceStart, sourceEnd: scene.sourceEnd, startWordId: scene.startWordId, endWordId: scene.endWordId, narration: scene.narration, visualIntent: scene.visualIntent, shotType: scene.shotType, imagePrompt: scene.imagePrompt, videoPrompt: scene.videoPrompt || null, displayTemplate: scene.displayTemplate || 'default', provider: scene.provider || plan.settings.provider, model: scene.model || null, imageFile, videoFile, videoModel: scene.videoModel || null }); }
   const timing = { version: 2, sourceName: project.sourceName, workflowMode: plan.settings.workflowMode, orientation: plan.orientation, settings: plan.settings, scenes }; await atomicWriteJson(path.join(destination, 'broll-timing.json'), timing); await fs.writeFile(path.join(destination, 'README.txt'), 'B-roll images/videos and editable timing data exported by Video Cleaner. Edit broll-timing.json or import the files into any editor.\n'); res.json({ destination, sceneCount: scenes.length });
 }));
 
 app.post('/api/projects/:id/broll/export-video', route(async (req, res) => {
-  const projectId = routeParam(req.params.id); const project = getProject(projectId); await requireSource(project); const settings = await resolvedSettings(); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet'); if (plan.settings.workflowMode === 'assets-only') throw new Error('Assets-only projects export files and timing JSON, not a rendered video'); if (!settings.ffmpegBin) throw new Error('FFmpeg was not found'); const active = exportJobs.get(projectId); if (active?.state === 'running') return void res.status(409).json({ error: 'An export is already running for this project' }); const outputPath = await pickExportPath('video-with-broll.mp4', 'Export video with B-roll'); if (!outputPath) return void res.status(400).json({ error: 'Export cancelled' }); const mode: 'fast' | 'quality' = req.body?.mode === 'fast' ? 'fast' : 'quality'; const fps = project.media.frameRate && project.media.frameRate > 0 ? project.media.frameRate : 30; const cleanedSegments = plan.settings.workflowMode === 'cleaned-video' ? rangesToSeconds(project) : undefined;
-  const { filter, activeScenes } = buildBrollOverlayFilter({ plan, width: project.media.width || 1920, height: project.media.height || 1080, fps, cleanedSegments }); const capabilities = await ffmpegCapabilities(settings.ffmpegBin); const encoding = encodingArgs(project, capabilities, mode); const inputAcceleration = capabilities.videoToolboxDecode ? ['-hwaccel', 'videotoolbox'] : [];
-  const brollInputs = activeScenes.flatMap((scene) => scene.videoFile ? ['-stream_loop', '-1', '-i', scene.videoFile] : ['-loop', '1', '-framerate', String(Math.min(30, fps)), '-i', scene.imageFile!]);
+  const projectId = routeParam(req.params.id); const project = getProject(projectId); await requireSource(project); const settings = await resolvedSettings(); const storedPlan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!storedPlan) throw new Error('B-roll plan has not been created yet'); if (storedPlan.settings.workflowMode === 'assets-only') throw new Error('Assets-only projects export files and timing JSON, not a rendered video'); if (!settings.ffmpegBin) throw new Error('FFmpeg was not found');
+  const active = exportJobs.get(projectId); if (active?.state === 'running') return void res.status(409).json({ error: 'An export is already running for this project' }); const outputPath = await pickExportPath('video-with-broll.mp4', 'Export video with B-roll'); if (!outputPath) return void res.status(400).json({ error: 'Export cancelled' });
+  const requestedTemplate = typeof req.body?.displayTemplate === 'string' ? displayTemplateValue(req.body.displayTemplate) : storedPlan.settings.displayTemplate; const plan: BrollPlan = { ...storedPlan, settings: { ...storedPlan.settings, displayTemplate: requestedTemplate } };
+  const mode: 'fast' | 'quality' = req.body?.mode === 'fast' ? 'fast' : 'quality'; const fps = project.media.frameRate && project.media.frameRate > 0 ? project.media.frameRate : 30; const cleanedSegments = plan.settings.workflowMode === 'cleaned-video' ? rangesToSeconds(project) : undefined;
+  const activeSceneCount = plan.scenes.filter((scene) => scene.enabled && (scene.videoFile || scene.imageFile)).length; let mattePath: string | undefined;
+  if (planNeedsPresenterMatte(plan)) {
+    const matte = await ensurePresenterMatte({ workDir: project.workDir, sourcePath: project.sourcePath, proxyPath: project.proxyPath, width: project.media.width, height: project.media.height, ffmpegBin: settings.ffmpegBin }); mattePath = matte.maskPath;
+    if (!mattePath) throw new Error('Presenter cutout was requested but its local alpha mask could not be prepared');
+  }
+  const { filter, activeScenes } = buildBrollOverlayFilter({ plan, width: project.media.width || 1920, height: project.media.height || 1080, fps, cleanedSegments, presenterInputIndex: mattePath ? activeSceneCount + 1 : undefined });
+  const capabilities = await ffmpegCapabilities(settings.ffmpegBin); const encoding = encodingArgs(project, capabilities, mode); const inputAcceleration = capabilities.videoToolboxDecode ? ['-hwaccel', 'videotoolbox'] : [];
+  const brollInputs = activeScenes.flatMap((scene) => scene.videoFile ? ['-stream_loop', '-1', '-i', scene.videoFile] : ['-loop', '1', '-framerate', String(Math.min(30, fps)), '-i', scene.imageFile!]); const presenterInput = mattePath ? ['-i', mattePath] : [];
   const outputDuration = cleanedSegments?.length ? cleanedSegments.reduce((sum, segment) => sum + Math.max(0, segment.end - segment.start), 0) : project.media.duration;
-  const args = [...inputAcceleration, '-i', project.sourcePath, ...brollInputs, '-filter_complex', filter, '-map', '[vout]', '-map', '[aout]', '-fps_mode', 'passthrough', ...encoding.args, ...colorArgs(project), '-c:a', 'aac', '-b:a', '256k', '-movflags', '+faststart', outputPath]; launchExport(projectId, settings.ffmpegBin, args, outputDuration, outputPath, encoding.encoder); res.status(202).json({ started: true, outputPath, encoder: encoding.encoder, hardware: encoding.hardware, targetBitRate: encoding.targetBitRate, brollScenes: activeScenes.length });
+  const args = [...inputAcceleration, '-i', project.sourcePath, ...brollInputs, ...presenterInput, '-filter_complex', filter, '-map', '[vout]', '-map', '[aout]', '-fps_mode', 'passthrough', ...encoding.args, ...colorArgs(project), '-c:a', 'aac', '-b:a', '256k', '-movflags', '+faststart', outputPath];
+  launchExport(projectId, settings.ffmpegBin, args, outputDuration, outputPath, encoding.encoder); res.status(202).json({ started: true, outputPath, encoder: encoding.encoder, hardware: encoding.hardware, targetBitRate: encoding.targetBitRate, brollScenes: activeScenes.length, displayTemplate: requestedTemplate, presenterMatte: Boolean(mattePath) });
 }));
 
 app.post('/api/projects/:id/export', route(async (req, res) => { const projectId = routeParam(req.params.id); const project = getProject(projectId); await requireSource(project); const settings = await resolvedSettings(); if (!project.transcript || !project.edl) throw new Error('Missing transcript or edit decision list'); if (!settings.ffmpegBin) throw new Error('FFmpeg was not found'); const active = exportJobs.get(projectId); if (active?.state === 'running') return void res.status(409).json({ error: 'An export is already running for this project' }); const outputPath = await pickExportPath(); if (!outputPath) return void res.status(400).json({ error: 'Export cancelled' }); const mode: 'fast' | 'quality' = req.body?.mode === 'fast' ? 'fast' : 'quality'; const segments = rangesToSeconds(project); const outputDuration = segments.reduce((sum, segment) => sum + Math.max(0, segment.end - segment.start), 0); const fps = project.media.frameRate && project.media.frameRate > 0 ? project.media.frameRate : 30; const capabilities = await ffmpegCapabilities(settings.ffmpegBin); const encoding = encodingArgs(project, capabilities, mode); const inputAcceleration = capabilities.videoToolboxDecode ? ['-hwaccel', 'videotoolbox'] : []; const args = [...inputAcceleration, '-i', project.sourcePath, '-filter_complex', buildTimelineFilter(segments, fps), '-map', '[vout]', '-map', '[aout]', '-fps_mode', 'passthrough', ...encoding.args, ...colorArgs(project), '-c:a', 'aac', '-b:a', '256k', '-movflags', '+faststart', outputPath]; launchExport(projectId, settings.ffmpegBin, args, outputDuration, outputPath, encoding.encoder); res.status(202).json({ started: true, outputPath, encoder: encoding.encoder, hardware: encoding.hardware, targetBitRate: encoding.targetBitRate }); }));
