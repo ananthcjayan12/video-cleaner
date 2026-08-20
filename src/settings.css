@@ -21,6 +21,39 @@
 .exportProgress.failed .progressTrack span { background:#fb7185; }
 .exportMeta { color:#71717a; font-size:10px; flex-wrap:wrap; }
 
+.projectLibrary { display:flex; flex-direction:column; gap:16px; }
+.libraryHero { padding:28px; display:flex; justify-content:space-between; gap:24px; align-items:flex-end; }
+.libraryHero h2 { margin:7px 0 8px; max-width:720px; }
+.libraryHero p { color:#a1a1aa; line-height:1.6; max-width:760px; margin:0; }
+.libraryHeroActions,.projectActions { display:flex; gap:8px; flex-wrap:wrap; }
+.libraryHeading { padding:2px 2px 0; }
+.libraryHeading h3 { margin:5px 0 0; }
+.libraryEmpty { padding:28px; }
+.libraryEmpty strong { display:block; margin-bottom:8px; }
+.libraryEmpty p { color:#a1a1aa; margin:0 0 16px; }
+.projectGrid { display:grid; grid-template-columns:repeat(auto-fit,minmax(330px,1fr)); gap:14px; }
+.projectCard { padding:17px; display:flex; flex-direction:column; gap:14px; }
+.projectCard.sourceMissing { border-color:#7f1d1d; }
+.projectCardHead { display:flex; justify-content:space-between; gap:16px; align-items:flex-start; }
+.projectCardHead h3 { margin:5px 0 3px; }
+.projectCardHead small { color:#71717a; word-break:break-all; }
+.sourceOk,.sourceBad { flex:0 0 auto; border:1px solid #27272a; border-radius:999px; padding:5px 8px; font-size:10px; }
+.sourceOk { color:#86efac; }
+.sourceBad { color:#fda4af; border-color:#7f1d1d; }
+.projectFacts,.projectProgress { display:flex; gap:7px; flex-wrap:wrap; }
+.projectFacts span { font-size:10px; color:#71717a; }
+.projectProgress span { font-size:10px; padding:5px 7px; border-radius:999px; border:1px solid #27272a; background:#111113; }
+.progressReady { color:#86efac; }
+.progressPending { color:#71717a; }
+.resumeHint { margin:0; color:#facc15; font-size:11px; line-height:1.45; }
+.projectActions { margin-top:auto; }
+.projectActions .primary { min-width:92px; }
+.sourceRight { display:flex; flex-direction:column; align-items:flex-end; gap:9px; }
+.missingSourcePanel { border-color:#7f1d1d; }
+.sourceWarning { margin-top:-8px; margin-bottom:18px; padding:12px 16px; display:flex; gap:10px; align-items:center; border-color:#7f1d1d; color:#d4d4d8; }
+.sourceWarning strong { color:#fda4af; white-space:nowrap; }
+.sourceWarning span { color:#a1a1aa; font-size:12px; }
+
 .brollPanel { padding:20px; overflow:hidden; margin-top:18px; }
 .brollTitle { align-items:flex-start; }
 .brollActions,.sceneButtons,.brollFooterActions,.assetActions { display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; }
@@ -69,9 +102,13 @@ textarea:focus { border-color:#71717a; }
   .systemGrid,.settingsGrid{grid-template-columns:1fr}
   .settingsGrid .wide{grid-column:auto}
   .brollGrid{grid-template-columns:1fr}
+  .libraryHero{align-items:flex-start;flex-direction:column}
 }
 @media (max-width:620px) {
   .brollCard{grid-template-columns:1fr}
   .brollImage.portrait{max-height:560px}
   .timingGrid{grid-template-columns:1fr}
+  .projectGrid{grid-template-columns:1fr}
+  .sourceRight{align-items:flex-start}
+  .sourceWarning{align-items:flex-start;flex-direction:column}
 }
