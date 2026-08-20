@@ -1,0 +1,5 @@
+# Optional local dependencies for presenter-cutout B-roll templates.
+# Install with: python3 -m pip install -r requirements-matting.txt
+numpy>=1.26,<3
+opencv-python-headless>=4.9,<5
+mediapipe>=0.10.14,<0.11
