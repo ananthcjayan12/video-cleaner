@@ -101,15 +101,15 @@ def refine_mask(
     return np.clip(alpha, 0.0, 1.0).astype(np.float32)
 
 
-def create_segmenter(mp):
+def create_segmenter(mp, requested_model_path: str = ""):
     if hasattr(mp, "solutions"):
         return mp.solutions.selfie_segmentation.SelfieSegmentation(model_selection=1), True
 
-    model_path = os.environ.get("MEDIAPIPE_SELFIE_MODEL", "").strip()
+    model_path = requested_model_path.strip() or os.environ.get("MEDIAPIPE_SELFIE_MODEL", "").strip()
     if not model_path or not Path(model_path).exists():
         raise RuntimeError(
-            "This MediaPipe wheel does not expose mp.solutions. Install the recommended requirements-matting.txt "
-            "environment, or set MEDIAPIPE_SELFIE_MODEL to a selfie_segmenter.tflite model path."
+            "This MediaPipe wheel uses the Tasks API and needs a model file. Run this through Video Cleaner so the "
+            "official model is provisioned automatically, or set MEDIAPIPE_SELFIE_MODEL to a selfie_segmenter.tflite path."
         )
     options = mp.tasks.vision.ImageSegmenterOptions(
         base_options=mp.tasks.BaseOptions(model_asset_path=model_path),
@@ -137,6 +137,7 @@ def main() -> int:
     parser.add_argument("--input", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--ffmpeg", required=True)
+    parser.add_argument("--model", default="")
     parser.add_argument("--feather", type=int, default=DEFAULT_FEATHER_PX)
     parser.add_argument("--temporal", type=float, default=DEFAULT_TEMPORAL_BLEND)
     args = parser.parse_args()
@@ -179,7 +180,7 @@ def main() -> int:
     temporal = max(0.0, min(float(args.temporal), 0.35))
 
     try:
-        segmenter, legacy = create_segmenter(mp)
+        segmenter, legacy = create_segmenter(mp, args.model)
         while True:
             ok, frame = capture.read()
             if not ok:

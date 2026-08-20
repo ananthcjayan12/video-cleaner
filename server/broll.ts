@@ -116,10 +116,6 @@ export async function loadBrollPlan(workDir: string): Promise<BrollPlan | null> 
     return raw;
   } catch { return null; }
 }
-export async function updateBrollPlanSettings(workDir: string, plan: BrollPlan, patch: { displayTemplate?: BrollDisplayTemplate }) {
-  if (patch.displayTemplate) plan.settings.displayTemplate = normalizeDisplayTemplate(patch.displayTemplate);
-  await saveBrollPlan(workDir, plan); return plan;
-}
 export async function updateBrollScene(workDir: string, plan: BrollPlan, sceneId: string, patch: { imagePrompt?: string; videoPrompt?: string; title?: string; sourceStart?: number; sourceEnd?: number; enabled?: boolean; displayTemplate?: BrollDisplayTemplate | 'default' }) {
   const scene = plan.scenes.find((candidate) => candidate.id === sceneId); if (!scene) throw new Error('B-roll scene not found');
   if (typeof patch.title === 'string' && patch.title.trim()) scene.title = patch.title.trim().slice(0, 100); if (typeof patch.imagePrompt === 'string' && patch.imagePrompt.trim()) scene.imagePrompt = patch.imagePrompt.trim(); if (typeof patch.videoPrompt === 'string') scene.videoPrompt = patch.videoPrompt.trim() || undefined; if (typeof patch.enabled === 'boolean') scene.enabled = patch.enabled;

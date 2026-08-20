@@ -89,6 +89,8 @@ button.danger:hover:not(:disabled) { background:rgba(127,29,29,.28); border-colo
 .sceneNarration { margin:0; color:#d4d4d8; font-size:12px; line-height:1.5; }
 .visualIntent { margin:0; color:#71717a; font-size:11px; line-height:1.5; }
 .brollBody label { display:flex; flex-direction:column; gap:6px; color:#a1a1aa; font-size:11px; }
+.sceneLayout { padding:9px; border:1px solid #27272a; border-radius:10px; background:#151517; }
+.sceneLayout small { color:#71717a; font-size:9px; line-height:1.4; }
 .toggleRow { flex-direction:row !important; align-items:center; gap:8px !important; }
 .toggleRow input { width:auto; }
 .timingGrid { display:grid; grid-template-columns:1fr 1fr; gap:8px; }

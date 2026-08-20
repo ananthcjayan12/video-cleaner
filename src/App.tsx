@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   api,
+  type BrollDisplayTemplate,
   type BrollPlan,
   type BrollPlanSettings,
   type BrollScene,
@@ -24,6 +25,15 @@ const DEFAULT_BROLL: BrollPlanSettings = {
   minSceneDuration: 3, maxSceneDuration: 8, aspectRatio: 'auto',
 };
 
+const BROLL_LAYOUTS: Array<{ value: BrollDisplayTemplate; label: string }> = [
+  { value: 'full-frame', label: 'Full screen' },
+  { value: 'top-card', label: 'Top card' },
+  { value: 'split-top', label: 'Top split' },
+  { value: 'picture-in-picture', label: 'Picture in picture' },
+  { value: 'top-card-presenter', label: 'Top card + presenter' },
+  { value: 'presenter-overlay', label: 'Presenter over B-roll' },
+];
+
 function App() {
   const [project, setProject] = useState<Project | null>(null);
   const [recentProjects, setRecentProjects] = useState<Project[]>([]);
@@ -34,6 +44,7 @@ function App() {
   const [brollSettings, setBrollSettings] = useState<BrollPlanSettings>(DEFAULT_BROLL);
   const [sceneDrafts, setSceneDrafts] = useState<Record<string, SceneDraft>>({});
   const [brollGenerating, setBrollGenerating] = useState<string | null>(null);
+  const [layoutSaving, setLayoutSaving] = useState<string | null>(null);
   const [generatingAll, setGeneratingAll] = useState(false);
   const [parallelRunning, setParallelRunning] = useState<string[]>([]);
   const [imageConcurrency, setImageConcurrency] = useState(0);
@@ -220,6 +231,17 @@ function App() {
     const updated = await api.updateBrollScene(project.id, scene.id, draftPatch(draft)); replaceScene(updated); setStatus('Saved locally ✓'); return updated;
   }
 
+  async function changeSceneLayout(scene: BrollScene, displayTemplate: BrollDisplayTemplate) {
+    if (!project || layoutSaving) return;
+    try {
+      setError(''); setLayoutSaving(scene.id); setStatus(`Saving layout for ${scene.title}…`);
+      const updated = await api.updateBrollScene(project.id, scene.id, { displayTemplate });
+      setBroll((current) => current ? { ...current, scenes: current.scenes.map((item) => item.id === updated.id ? updated : item) } : current);
+      setStatus(`Layout saved for ${updated.title} ✓`);
+    } catch (err) { setError(message(err)); }
+    finally { setLayoutSaving(null); }
+  }
+
   async function generateScene(scene: BrollScene, regenerationComment?: string) {
     if (!project || brollGenerating || generatingAll) return;
     try { setError(''); setBrollGenerating(scene.id); setStatus(`Generating ${scene.title} with ${providerLabel(broll?.settings.provider ?? brollSettings.provider)}…`); const saved = await saveScene(scene); const result = await api.generateBrollScene(project.id, saved.id, regenerationComment?.trim() || undefined); replaceScene(result.scene); setStatus(`Generated ${result.scene.title}. Saved locally ✓`); }
@@ -363,7 +385,7 @@ function App() {
         <section className="workflow"><aside className="panel controls"><h3>Dialogue flow</h3><button onClick={prepare} disabled={busy || exportRunning || !!proxyUrl || !system?.ffmpeg.installed || !project.sourceAvailable}>1. Create proxy + audio</button><button onClick={transcribe} disabled={busy || exportRunning || !system?.elevenLabs.configured || !!words.length}>2. Transcribe audio</button><label>Cleanup intensity<select value={intensity} onChange={(e) => setIntensity(e.target.value as typeof intensity)}><option value="light">Light</option><option value="balanced">Balanced</option><option value="aggressive">Aggressive</option></select></label><button onClick={clean} disabled={busy || exportRunning || !system?.codex.authenticated}>3. Clean with Codex</button><div className="divider" /><button onClick={() => exportBaseVideo('quality')} disabled={busy || exportRunning || !edl || !project.sourceAvailable}>Export cleaned video only</button>{exportJob && exportJob.state !== 'idle' && <ExportProgress job={exportJob} />}</aside>
           <section className="workspace"><div className="panel playerCard">{proxyUrl ? <video ref={videoRef} src={proxyUrl} controls onTimeUpdate={syncPreview} onSeeked={syncPreview} /> : <div className="emptyPlayer">Proxy is optional for standalone B-roll. Saved projects restore it automatically when available.</div>}</div><div className="panel transcriptCard"><div className="sectionTitle"><div><span className="label">EDIT DECISION LIST</span><h3>Transcript</h3></div><span className="legend"><i /> kept <i className="removedDot" /> removed</span></div>{words.length ? <div className="transcript">{words.map((word, i) => <button key={word.id} className={`word ${keepMask[i] ? 'kept' : 'removed'}`} title={`${word.start.toFixed(2)}s – ${word.end.toFixed(2)}s`} onClick={() => toggleWord(i)}>{word.text}</button>)}</div> : <p className="muted">No transcript yet. Raw/asset-only B-roll planning can create it automatically.</p>}</div></section>
         </section>
-        <BrollWorkspace project={project} system={system} plan={broll} settings={brollSettings} setSettings={setBrollSettings} drafts={sceneDrafts} changeDraft={changeDraft} planBroll={planBroll} generateScene={generateScene} importSceneImage={importSceneImage} deleteScene={deleteScene} rewriteVideoPrompt={rewriteVideoPrompt} createSceneVideo={createSceneVideo} generateAll={generateAllBroll} generateMissing={generateMissingBroll} generateAllVideoPrompts={generateAllVideoPrompts} generateAllVideos={generateAllVideos} generateMissingVideos={generateMissingVideos} saveScene={saveScene} generating={brollGenerating} parallelRunning={parallelRunning} generatingAll={generatingAll} busy={busy || exportRunning} exportAssets={exportAssets} exportVideo={() => exportBrollVideo('quality')} imageConcurrency={imageConcurrency} setImageConcurrency={setImageConcurrency} videoConcurrency={videoConcurrency} setVideoConcurrency={setVideoConcurrency} />
+        <BrollWorkspace project={project} system={system} plan={broll} settings={brollSettings} setSettings={setBrollSettings} drafts={sceneDrafts} changeDraft={changeDraft} changeSceneLayout={changeSceneLayout} planBroll={planBroll} generateScene={generateScene} importSceneImage={importSceneImage} deleteScene={deleteScene} rewriteVideoPrompt={rewriteVideoPrompt} createSceneVideo={createSceneVideo} generateAll={generateAllBroll} generateMissing={generateMissingBroll} generateAllVideoPrompts={generateAllVideoPrompts} generateAllVideos={generateAllVideos} generateMissingVideos={generateMissingVideos} saveScene={saveScene} generating={brollGenerating} layoutSaving={layoutSaving} parallelRunning={parallelRunning} generatingAll={generatingAll} busy={busy || exportRunning} exportAssets={exportAssets} exportVideo={() => exportBrollVideo('quality')} imageConcurrency={imageConcurrency} setImageConcurrency={setImageConcurrency} videoConcurrency={videoConcurrency} setVideoConcurrency={setVideoConcurrency} />
       </>}
       <footer className="statusbar"><span className={busy || exportRunning || generatingAll ? 'pulse' : ''}>{busy || exportRunning || generatingAll ? '●' : '○'}</span> {status}{error && <strong className="error">{error}</strong>}</footer>
     </main>
@@ -394,7 +416,7 @@ function SettingsPanel({ system, form, setForm, save, refresh, disabled, ffmpegD
   </section>;
 }
 
-function BrollWorkspace({ project, system, plan, settings, setSettings, drafts, changeDraft, planBroll, generateScene, importSceneImage, deleteScene, rewriteVideoPrompt, createSceneVideo, generateAll, generateMissing, generateAllVideoPrompts, generateAllVideos, generateMissingVideos, saveScene, generating, parallelRunning, generatingAll, busy, exportAssets, exportVideo, imageConcurrency, setImageConcurrency, videoConcurrency, setVideoConcurrency }: any) {
+function BrollWorkspace({ project, system, plan, settings, setSettings, drafts, changeDraft, changeSceneLayout, planBroll, generateScene, importSceneImage, deleteScene, rewriteVideoPrompt, createSceneVideo, generateAll, generateMissing, generateAllVideoPrompts, generateAllVideos, generateMissingVideos, saveScene, generating, layoutSaving, parallelRunning, generatingAll, busy, exportAssets, exportVideo, imageConcurrency, setImageConcurrency, videoConcurrency, setVideoConcurrency }: any) {
   const [dialog, setDialog] = useState<SceneDialog | null>(null);
   const providerIsReady = providerReady(system, settings.provider); const imageProfile = imageConcurrencyProfile(settings.provider); const imageConcurrencyValue = imageConcurrency === 0 ? 0 : Math.min(imageConcurrency, imageProfile.maxConcurrency); const videoConcurrencyValue = videoConcurrency === 0 ? 0 : Math.min(videoConcurrency, 3);
   const missingImages = plan?.scenes.filter((scene: BrollScene) => !scene.imageFile).length ?? 0; const missingVideos = plan?.scenes.filter((scene: BrollScene) => scene.imageFile && !scene.videoFile).length ?? 0; const imageScenes = plan?.scenes.filter((scene: BrollScene) => scene.imageFile).length ?? 0;
@@ -426,6 +448,7 @@ function BrollWorkspace({ project, system, plan, settings, setSettings, drafts, 
           <div className="brollBody">
             <div className="sceneMeta"><span>{scene.id}</span><span>{scene.shotType || 'shot'}</span>{scene.provider && <span>{providerLabel(scene.provider)}</span>}{isWorking && <span>WORKING</span>}{scene.videoFile && <span className="videoBadge">VIDEO</span>}{scene.videoModel && <span>{scene.videoModel}</span>}</div>
             <label className="toggleRow"><input type="checkbox" checked={draft.enabled} onChange={(e) => changeDraft(scene.id, { enabled: e.target.checked })} /> Use this B-roll scene</label>
+            <label className="sceneLayout">B-roll layout<select value={scene.displayTemplate ?? plan.settings.displayTemplate ?? 'full-frame'} onChange={(e) => void changeSceneLayout(scene, e.target.value as BrollDisplayTemplate)} disabled={busy || generatingAll || !!generating || !!layoutSaving}>{BROLL_LAYOUTS.map((layout) => <option key={layout.value} value={layout.value}>{layout.label}</option>)}</select><small>{layoutSaving === scene.id ? 'Saving layout…' : 'Applied only to this B-roll when the final video is rendered.'}</small></label>
             <label>Scene title<input value={draft.title} onChange={(e) => changeDraft(scene.id, { title: e.target.value })} /></label>
             <div className="timingGrid"><label>Start sec<input type="number" step="0.05" min="0" value={draft.sourceStart} onChange={(e) => changeDraft(scene.id, { sourceStart: e.target.value })} /></label><label>End sec<input type="number" step="0.05" min="0" value={draft.sourceEnd} onChange={(e) => changeDraft(scene.id, { sourceEnd: e.target.value })} /></label></div>
             <p className="sceneNarration">“{scene.narration}”</p><p className="visualIntent">{scene.visualIntent}</p>

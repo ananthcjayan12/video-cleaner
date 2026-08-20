@@ -1,5 +1,7 @@
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 
@@ -20,6 +22,9 @@ export type MattingSystemStatus = {
 };
 
 type RunOptions = { cwd?: string; env?: NodeJS.ProcessEnv };
+
+const SELFIE_MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite';
+const SELFIE_MODEL_SHA256 = '191ac9529ae506ee0beefa6b2c945a172dab9d07d1e802a290a4e4038226658b';
 
 async function run(command: string, args: string[], timeoutMs = 0, options?: RunOptions) {
   return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
@@ -55,7 +60,7 @@ export async function mattingSystemStatus(ffmpegBin: string): Promise<MattingSys
   const pythonBin = await resolvePythonBin();
   if (!pythonBin) return { configured: false, pythonInstalled: false, dependenciesInstalled: false, pythonPath: null, detail: 'Python 3 not detected' };
   try {
-    await run(pythonBin, ['-c', 'import cv2, numpy, mediapipe; print("ok")'], 10000);
+    await run(pythonBin, ['-c', 'import cv2, numpy, mediapipe; assert hasattr(mediapipe, "solutions") or hasattr(mediapipe, "tasks"); print("ok")'], 10000);
     return {
       configured: Boolean(ffmpegBin),
       pythonInstalled: true,
@@ -72,6 +77,42 @@ export async function mattingSystemStatus(ffmpegBin: string): Promise<MattingSys
       detail: 'Install: python3 -m pip install -r requirements-matting.txt',
     };
   }
+}
+
+async function validSelfieModel(modelPath: string) {
+  const contents = await fs.readFile(modelPath).catch(() => null);
+  return Boolean(contents && contents.byteLength > 100_000 && createHash('sha256').update(contents).digest('hex') === SELFIE_MODEL_SHA256);
+}
+
+async function usableModelFile(modelPath: string) {
+  const stat = await fs.stat(modelPath).catch(() => null);
+  return Boolean(stat?.isFile() && stat.size > 10_000);
+}
+
+async function resolveSelfieModel(pythonBin: string) {
+  const { stdout } = await run(pythonBin, ['-c', 'import mediapipe as mp; print("legacy" if hasattr(mp, "solutions") else "tasks")'], 10000);
+  if (stdout.trim() === 'legacy') return '';
+
+  const override = process.env.MEDIAPIPE_SELFIE_MODEL?.trim();
+  if (override) {
+    const resolved = path.resolve(override);
+    if (!await usableModelFile(resolved)) throw new Error(`MEDIAPIPE_SELFIE_MODEL is missing or invalid: ${resolved}`);
+    return resolved;
+  }
+
+  const modelDir = path.join(os.homedir(), '.video-cleaner', 'models');
+  const modelPath = path.join(modelDir, 'selfie_segmenter.tflite');
+  if (await validSelfieModel(modelPath)) return modelPath;
+
+  await fs.mkdir(modelDir, { recursive: true });
+  const response = await fetch(SELFIE_MODEL_URL);
+  if (!response.ok) throw new Error(`Could not download the MediaPipe selfie model (${response.status}). Set MEDIAPIPE_SELFIE_MODEL to a local selfie_segmenter.tflite file.`);
+  const contents = Buffer.from(await response.arrayBuffer());
+  if (createHash('sha256').update(contents).digest('hex') !== SELFIE_MODEL_SHA256) throw new Error('Downloaded MediaPipe selfie model failed its integrity check');
+  const temporaryPath = `${modelPath}.${process.pid}.download`;
+  await fs.writeFile(temporaryPath, contents);
+  await fs.rename(temporaryPath, modelPath);
+  return modelPath;
 }
 
 function matteDir(workDir: string) { return path.join(workDir, 'presenter'); }
@@ -142,7 +183,7 @@ export async function ensurePresenterMatte(options: {
   if (!system.configured || !system.pythonPath) throw new Error(system.detail);
 
   const dir = matteDir(options.workDir); await fs.mkdir(dir, { recursive: true });
-  const analysis = await ensureAnalysisSource(options); const maskPath = presenterMaskPath(options.workDir);
+  const analysis = await ensureAnalysisSource(options); const maskPath = presenterMaskPath(options.workDir); const modelPath = await resolveSelfieModel(system.pythonPath);
   await fs.rm(maskPath, { force: true });
   const scriptPath = path.resolve('server', 'presenter_matte.py');
   await run(system.pythonPath, [
@@ -150,6 +191,7 @@ export async function ensurePresenterMatte(options: {
     '--input', analysis.path,
     '--output', maskPath,
     '--ffmpeg', options.ffmpegBin,
+    ...(modelPath ? ['--model', modelPath] : []),
     '--feather', '4',
     '--temporal', '0.12',
   ], 7_200_000, { cwd: path.resolve('.') });
