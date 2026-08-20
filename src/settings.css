@@ -2,7 +2,7 @@
 .readyBadge { border:1px solid #3f3f46; color:#fca5a5; padding:7px 10px; border-radius:999px; font-size:11px; }
 .readyBadge.ready { color:#86efac; }
 .settingsPanel { padding:20px; margin-bottom:18px; }
-.systemGrid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin-bottom:18px; }
+.systemGrid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:10px; margin-bottom:18px; }
 .systemItem { border:1px solid #27272a; background:#0f0f11; border-radius:12px; padding:12px; display:flex; gap:10px; align-items:flex-start; min-width:0; }
 .systemItem strong,.systemItem small { display:block; }
 .systemItem small { margin-top:4px; color:#71717a; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -20,4 +20,101 @@
 .exportProgress.completed .progressTrack span { background:#86efac; }
 .exportProgress.failed .progressTrack span { background:#fb7185; }
 .exportMeta { color:#71717a; font-size:10px; flex-wrap:wrap; }
-@media (max-width:1000px) { .headerActions{flex-wrap:wrap;justify-content:flex-end}.systemGrid,.settingsGrid{grid-template-columns:1fr}.settingsGrid .wide{grid-column:auto} }
+
+.projectLibrary { display:flex; flex-direction:column; gap:16px; }
+.libraryHero { padding:28px; display:flex; justify-content:space-between; gap:24px; align-items:flex-end; }
+.libraryHero h2 { margin:7px 0 8px; max-width:720px; }
+.libraryHero p { color:#a1a1aa; line-height:1.6; max-width:760px; margin:0; }
+.libraryHeroActions,.projectActions { display:flex; gap:8px; flex-wrap:wrap; }
+.libraryHeading { padding:2px 2px 0; }
+.libraryHeading h3 { margin:5px 0 0; }
+.libraryEmpty { padding:28px; }
+.libraryEmpty strong { display:block; margin-bottom:8px; }
+.libraryEmpty p { color:#a1a1aa; margin:0 0 16px; }
+.projectGrid { display:grid; grid-template-columns:repeat(auto-fit,minmax(330px,1fr)); gap:14px; }
+.projectCard { padding:17px; display:flex; flex-direction:column; gap:14px; }
+.projectCard.sourceMissing { border-color:#7f1d1d; }
+.projectCardHead { display:flex; justify-content:space-between; gap:16px; align-items:flex-start; }
+.projectCardHead h3 { margin:5px 0 3px; }
+.projectCardHead small { color:#71717a; word-break:break-all; }
+.sourceOk,.sourceBad { flex:0 0 auto; border:1px solid #27272a; border-radius:999px; padding:5px 8px; font-size:10px; }
+.sourceOk { color:#86efac; }
+.sourceBad { color:#fda4af; border-color:#7f1d1d; }
+.projectFacts,.projectProgress { display:flex; gap:7px; flex-wrap:wrap; }
+.projectFacts span { font-size:10px; color:#71717a; }
+.projectProgress span { font-size:10px; padding:5px 7px; border-radius:999px; border:1px solid #27272a; background:#111113; }
+.progressReady { color:#86efac; }
+.progressPending { color:#71717a; }
+.resumeHint { margin:0; color:#facc15; font-size:11px; line-height:1.45; }
+.projectActions { margin-top:auto; }
+.projectActions .primary { min-width:92px; }
+.sourceRight { display:flex; flex-direction:column; align-items:flex-end; gap:9px; }
+.missingSourcePanel { border-color:#7f1d1d; }
+.sourceWarning { margin-top:-8px; margin-bottom:18px; padding:12px 16px; display:flex; gap:10px; align-items:center; border-color:#7f1d1d; color:#d4d4d8; }
+.sourceWarning strong { color:#fda4af; white-space:nowrap; }
+.sourceWarning span { color:#a1a1aa; font-size:12px; }
+
+.brollPanel { padding:20px; overflow:hidden; margin-top:18px; }
+.brollTitle { align-items:flex-start; }
+.brollActions,.sceneButtons,.brollFooterActions,.assetActions,.promptActions,.modalActions { display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; }
+.brollConfig { display:grid; grid-template-columns:repeat(auto-fit,minmax(175px,1fr)); gap:10px; padding:12px; border:1px solid #27272a; background:#0f0f11; border-radius:14px; margin-bottom:10px; }
+.brollConfig label,.timingGrid label { color:#a1a1aa; font-size:11px; display:flex; flex-direction:column; gap:6px; }
+.brollModeHelp { font-size:11px; line-height:1.55; margin:0 0 16px; }
+.brollModeHelp strong { color:#d4d4d8; }
+.brollEmpty { border:1px dashed #3f3f46; background:#0f0f11; border-radius:14px; padding:24px; }
+.brollEmpty strong { display:block; margin-bottom:8px; }
+.brollEmpty p { margin:0; max-width:900px; color:#a1a1aa; line-height:1.65; }
+.styleStrip { display:flex; flex-wrap:wrap; gap:8px; margin:-2px 0 16px; }
+.styleStrip span,.styleStrip strong { padding:6px 9px; border-radius:999px; background:#18181b; border:1px solid #27272a; color:#a1a1aa; font-size:10px; }
+.styleStrip strong { color:#86efac; }
+.brollGrid { display:grid; grid-template-columns:repeat(auto-fit,minmax(440px,1fr)); gap:16px; align-items:start; }
+.brollCard { display:grid; grid-template-columns:minmax(170px,230px) minmax(0,1fr); gap:14px; border:1px solid #27272a; background:#0f0f11; border-radius:16px; padding:12px; min-width:0; transition:opacity .2s ease; }
+.brollCard.disabledScene { opacity:.55; }
+.brollMediaColumn { min-width:0; display:flex; flex-direction:column; gap:8px; }
+.brollImage { width:100%; overflow:hidden; border-radius:12px; background:linear-gradient(145deg,#18181b,#09090b); border:1px solid #27272a; display:grid; place-items:center; }
+.brollImage.portrait { aspect-ratio:9/16; }
+.brollImage.landscape { aspect-ratio:16/9; max-height:320px; }
+.brollImage img,.brollImage video { width:100%; height:100%; object-fit:cover; display:block; background:#000; }
+.brollPlaceholder { height:100%; min-height:220px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px; text-align:center; padding:16px; color:#a1a1aa; }
+.brollPlaceholder span { font-weight:800; color:#d4d4d8; letter-spacing:.08em; font-size:11px; }
+.brollPlaceholder small { color:#52525b; }
+.assetActions { justify-content:flex-start; }
+.assetActions button { flex:1 1 100%; padding:8px 9px; font-size:10px; }
+button.danger { color:#fda4af; border-color:#7f1d1d; background:rgba(127,29,29,.12); }
+button.danger:hover:not(:disabled) { background:rgba(127,29,29,.28); border-color:#991b1b; }
+.brollBody { min-width:0; display:flex; flex-direction:column; gap:9px; }
+.sceneMeta { display:flex; gap:6px; flex-wrap:wrap; }
+.sceneMeta span { font-size:10px; color:#a1a1aa; background:#18181b; border-radius:999px; padding:5px 7px; }
+.sceneMeta .videoBadge { color:#93c5fd; border:1px solid #1e3a8a; background:rgba(30,58,138,.22); }
+.sceneNarration { margin:0; color:#d4d4d8; font-size:12px; line-height:1.5; }
+.visualIntent { margin:0; color:#71717a; font-size:11px; line-height:1.5; }
+.brollBody label { display:flex; flex-direction:column; gap:6px; color:#a1a1aa; font-size:11px; }
+.toggleRow { flex-direction:row !important; align-items:center; gap:8px !important; }
+.toggleRow input { width:auto; }
+.timingGrid { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+textarea { width:100%; border:1px solid #3f3f46; background:#09090b; color:#e4e4e7; border-radius:9px; padding:10px 11px; outline:none; resize:vertical; line-height:1.45; font:inherit; font-size:11px; }
+textarea:focus { border-color:#71717a; }
+.promptActions { justify-content:flex-start; }
+.sceneButtons { justify-content:flex-start; margin-top:auto; }
+.brollFooterActions { border-top:1px solid #27272a; padding-top:16px; margin-top:18px; }
+.modalBackdrop { position:fixed; inset:0; z-index:20; display:grid; place-items:center; padding:20px; background:rgba(0,0,0,.72); }
+.sceneModal { width:min(680px,100%); max-height:calc(100vh - 40px); overflow:auto; padding:20px; border:1px solid #3f3f46; border-radius:16px; background:#18181b; box-shadow:0 24px 80px rgba(0,0,0,.55); }
+.sceneModal > .muted { margin:0 0 14px; line-height:1.5; }
+.sceneModal label { display:flex; flex-direction:column; gap:7px; color:#a1a1aa; font-size:11px; }
+.modalActions { justify-content:flex-end; margin-top:16px; }
+
+@media (max-width:1000px) {
+  .headerActions{flex-wrap:wrap;justify-content:flex-end}
+  .systemGrid,.settingsGrid{grid-template-columns:1fr}
+  .settingsGrid .wide{grid-column:auto}
+  .brollGrid{grid-template-columns:1fr}
+  .libraryHero{align-items:flex-start;flex-direction:column}
+}
+@media (max-width:620px) {
+  .brollCard{grid-template-columns:1fr}
+  .brollImage.portrait{max-height:560px}
+  .timingGrid{grid-template-columns:1fr}
+  .projectGrid{grid-template-columns:1fr}
+  .sourceRight{align-items:flex-start}
+  .sourceWarning{align-items:flex-start;flex-direction:column}
+}
