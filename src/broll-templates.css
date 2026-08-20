@@ -1,0 +1,65 @@
+.brollTemplateDock { position:fixed; right:18px; bottom:18px; z-index:80; width:min(460px,calc(100vw - 28px)); font-family:inherit; color:#f4f4f5; filter:drop-shadow(0 18px 48px rgba(0,0,0,.38)); }
+.brollTemplateToggle { width:100%; display:grid; grid-template-columns:44px 1fr 24px; gap:10px; align-items:center; text-align:left; border:1px solid #3f3f46; background:rgba(9,9,11,.94); backdrop-filter:blur(18px); padding:9px 11px; border-radius:16px; color:#f4f4f5; }
+.brollTemplateToggle span:nth-child(2) { min-width:0; display:flex; flex-direction:column; gap:1px; }
+.brollTemplateToggle small { color:#71717a; font-size:9px; text-transform:uppercase; letter-spacing:.09em; }
+.brollTemplateToggle strong { font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.brollTemplateToggle b { color:#a1a1aa; font-size:16px; text-align:center; }
+.brollTemplatePanel { margin-top:8px; max-height:min(76vh,760px); overflow:auto; border:1px solid #3f3f46; background:rgba(9,9,11,.97); backdrop-filter:blur(22px); border-radius:18px; padding:15px; }
+.templatePanelHead { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; }
+.templatePanelHead h3 { margin:3px 0 0; font-size:17px; }
+.templateEyebrow { color:#71717a; font-size:9px; font-weight:800; letter-spacing:.12em; }
+.localOnly { color:#86efac; border:1px solid #14532d; background:rgba(20,83,45,.18); border-radius:999px; padding:5px 7px; font-size:8px; font-weight:800; letter-spacing:.09em; }
+.templateIntro,.templateFootnote,.templateNote { color:#71717a; font-size:10px; line-height:1.5; }
+.templateIntro { margin:8px 0 12px; }
+.templateGrid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+.templateCard { min-width:0; display:grid; grid-template-columns:68px minmax(0,1fr); gap:9px; align-items:center; text-align:left; background:#111114; border:1px solid #27272a; border-radius:13px; padding:8px; color:#e4e4e7; }
+.templateCard:hover { border-color:#52525b; background:#161619; }
+.templateCard.selected { border-color:#a1a1aa; box-shadow:inset 0 0 0 1px #71717a; background:#18181b; }
+.templateCardCopy { min-width:0; display:flex; flex-direction:column; gap:3px; }
+.templateCardCopy strong { font-size:10px; }
+.templateCardCopy small { font-size:8px; line-height:1.35; color:#71717a; }
+.templateCardCopy em { width:max-content; max-width:100%; color:#93c5fd; background:rgba(30,58,138,.2); border:1px solid #1e3a8a; padding:2px 5px; border-radius:999px; font-size:7px; font-style:normal; }
+.templateMini { position:relative; display:block; width:68px; height:108px; overflow:hidden; border-radius:10px; border:1px solid #3f3f46; background:linear-gradient(150deg,#4b5563,#27272a 56%,#18181b); }
+.templateMini i { position:absolute; display:block; }
+.miniRoom { inset:0; background:linear-gradient(145deg,rgba(255,255,255,.08),transparent 44%),linear-gradient(to top,#27272a 0 34%,transparent 34%); }
+.miniBroll { background:linear-gradient(135deg,#9ca3af,#52525b); box-shadow:0 2px 8px rgba(0,0,0,.38); }
+.miniPresenter { width:26px; height:47px; left:21px; bottom:5px; z-index:4; border-radius:48% 48% 32% 32%; background:#d4d4d8; box-shadow:0 0 0 1px rgba(0,0,0,.18); }
+.miniPresenter::before { content:""; position:absolute; width:17px; height:17px; border-radius:50%; left:4px; top:-10px; background:#e4e4e7; }
+.miniPresenter u { display:none; }
+.templateMini.full-frame .miniBroll,.templateMini.presenter-overlay .miniBroll { inset:0; }
+.templateMini.full-frame .miniPresenter { display:none; }
+.templateMini.top-card .miniBroll,.templateMini.top-card-presenter .miniBroll { left:4px; right:4px; top:4px; height:47px; border-radius:8px; }
+.templateMini.top-card .miniPresenter { bottom:4px; }
+.templateMini.top-card-presenter .miniPresenter { bottom:5px; height:53px; }
+.templateMini.split-top .miniBroll { left:0; right:0; top:0; height:51px; }
+.templateMini.split-top .miniPresenter { bottom:4px; }
+.templateMini.picture-in-picture .miniBroll { left:7px; right:7px; height:37px; top:55px; border-radius:7px; z-index:5; }
+.templateMini.picture-in-picture .miniPresenter { bottom:7px; left:22px; }
+.templateMini.presenter-overlay .miniPresenter { width:32px; height:60px; left:18px; bottom:3px; }
+.templateTiny { position:relative; width:38px; height:30px; overflow:hidden; display:block; border:1px solid #3f3f46; border-radius:7px; background:#27272a; }
+.templateTiny i { position:absolute; display:block; }
+.tinyPresenter { width:10px; height:17px; left:14px; bottom:2px; border-radius:50% 50% 30% 30%; background:#d4d4d8; z-index:3; }
+.tinyPresenter::before { content:""; position:absolute; width:7px; height:7px; left:2px; top:-4px; border-radius:50%; background:#e4e4e7; }
+.tinyBroll { background:#71717a; }
+.templateTiny.full-frame .tinyBroll,.templateTiny.presenter-overlay .tinyBroll { inset:0; }
+.templateTiny.full-frame .tinyPresenter { display:none; }
+.templateTiny.top-card .tinyBroll,.templateTiny.top-card-presenter .tinyBroll { left:2px; right:2px; top:2px; height:12px; border-radius:3px; }
+.templateTiny.split-top .tinyBroll { inset:0 0 50% 0; }
+.templateTiny.picture-in-picture .tinyBroll { left:4px; right:4px; top:15px; height:9px; border-radius:2px; z-index:4; }
+.cutoutStatus { margin-top:12px; border:1px solid #7c2d12; background:rgba(124,45,18,.12); border-radius:12px; padding:10px; display:flex; gap:10px; align-items:center; justify-content:space-between; }
+.cutoutStatus.ready { border-color:#14532d; background:rgba(20,83,45,.13); }
+.cutoutStatus div { min-width:0; display:flex; flex-direction:column; gap:3px; }
+.cutoutStatus strong { font-size:10px; }
+.cutoutStatus span { color:#a1a1aa; font-size:8px; line-height:1.4; }
+.cutoutStatus button { flex:none; font-size:9px; padding:7px 8px; }
+.templateNote { margin:9px 0 0; color:#d4d4d8; }
+.templateFootnote { margin:10px 0 0; padding-top:9px; border-top:1px solid #27272a; }
+@media (max-width:620px) {
+  .brollTemplateDock { right:10px; bottom:10px; width:calc(100vw - 20px); }
+  .brollTemplatePanel { max-height:72vh; }
+  .templateGrid { grid-template-columns:1fr; }
+  .templateCard { grid-template-columns:58px minmax(0,1fr); }
+  .templateMini { width:58px; height:92px; }
+  .miniPresenter { left:17px; }
+  .templateMini.presenter-overlay .miniPresenter { left:13px; }
+}
