@@ -7,6 +7,16 @@ export type BrollKeepRange = { startWordId: string; endWordId: string };
 export type ImageProvider = 'openai' | 'gemini' | 'grok-cli' | 'codex-cli';
 export type BrollWorkflowMode = 'cleaned-video' | 'raw-video' | 'assets-only';
 export type BrollCountMode = 'auto' | 'exact' | 'per-minute';
+export type BrollDisplayTemplate = 'full-frame' | 'top-card' | 'split-top' | 'picture-in-picture' | 'top-card-presenter' | 'presenter-overlay';
+
+export const BROLL_DISPLAY_TEMPLATES: Array<{ id: BrollDisplayTemplate; label: string; needsPresenterMatte: boolean }> = [
+  { id: 'full-frame', label: 'Full-screen B-roll', needsPresenterMatte: false },
+  { id: 'top-card', label: 'Top B-roll card', needsPresenterMatte: false },
+  { id: 'split-top', label: 'Top split', needsPresenterMatte: false },
+  { id: 'picture-in-picture', label: 'Picture in picture', needsPresenterMatte: false },
+  { id: 'top-card-presenter', label: 'Top card + presenter cutout', needsPresenterMatte: true },
+  { id: 'presenter-overlay', label: 'B-roll background + presenter cutout', needsPresenterMatte: true },
+];
 
 export type BrollPlanSettings = {
   workflowMode: BrollWorkflowMode;
@@ -17,6 +27,7 @@ export type BrollPlanSettings = {
   minSceneDuration: number;
   maxSceneDuration: number;
   aspectRatio: 'auto' | '9:16' | '16:9';
+  displayTemplate: BrollDisplayTemplate;
 };
 
 export type BrollScene = {
@@ -24,6 +35,7 @@ export type BrollScene = {
   narration: string; visualIntent: string; shotType: string; imagePrompt: string; videoPrompt?: string; enabled: boolean;
   imageFile?: string; generatedAt?: string; provider?: ImageProvider | 'manual'; model?: string;
   videoFile?: string; videoGeneratedAt?: string; videoModel?: string;
+  displayTemplate?: BrollDisplayTemplate;
 };
 
 export type BrollPlan = { version: 2; orientation: 'portrait' | 'landscape'; stylePreset: string; settings: BrollPlanSettings; scenes: BrollScene[]; notes: string[] };
@@ -64,12 +76,16 @@ function targetSceneCount(words: BrollWord[], ranges: BrollKeepRange[] | undefin
   const { kept } = keptWordIndexes(words, ranges); const keptWords = words.filter((_word, index) => kept.has(index)); if (!keptWords.length) return 0; const duration = Math.max(1, keptWords.at(-1)!.end - keptWords[0].start); return Math.max(1, Math.min(40, Math.round(duration / 60 * Math.max(0.5, settings.imagesPerMinute || 4))));
 }
 function planSchema(exactCount = 0) { return { type: 'object', additionalProperties: false, required: ['scenes', 'notes'], properties: { scenes: { type: 'array', ...(exactCount ? { minItems: exactCount, maxItems: exactCount } : {}), items: { type: 'object', additionalProperties: false, required: ['id', 'title', 'startWordId', 'endWordId', 'narration', 'visualIntent', 'shotType', 'imagePrompt'], properties: { id: { type: 'string' }, title: { type: 'string' }, startWordId: { type: 'string' }, endWordId: { type: 'string' }, narration: { type: 'string' }, visualIntent: { type: 'string' }, shotType: { type: 'string' }, imagePrompt: { type: 'string' } } } }, notes: { type: 'array', items: { type: 'string' } } } }; }
+function normalizeDisplayTemplate(value: unknown): BrollDisplayTemplate {
+  const candidate = String(value || 'full-frame') as BrollDisplayTemplate;
+  return BROLL_DISPLAY_TEMPLATES.some((template) => template.id === candidate) ? candidate : 'full-frame';
+}
 function normalizeSettings(raw: Partial<BrollPlanSettings> | undefined): BrollPlanSettings {
   const workflowMode: BrollWorkflowMode = ['cleaned-video', 'raw-video', 'assets-only'].includes(String(raw?.workflowMode)) ? raw!.workflowMode as BrollWorkflowMode : 'cleaned-video';
   const provider: ImageProvider = ['openai', 'gemini', 'grok-cli', 'codex-cli'].includes(String(raw?.provider)) ? raw!.provider as ImageProvider : 'gemini';
   const countMode: BrollCountMode = ['auto', 'exact', 'per-minute'].includes(String(raw?.countMode)) ? raw!.countMode as BrollCountMode : 'auto';
   const aspectRatio = ['auto', '9:16', '16:9'].includes(String(raw?.aspectRatio)) ? raw!.aspectRatio as BrollPlanSettings['aspectRatio'] : 'auto';
-  return { workflowMode, provider, countMode, targetCount: Math.max(1, Math.min(40, Number(raw?.targetCount) || 6)), imagesPerMinute: Math.max(0.5, Math.min(20, Number(raw?.imagesPerMinute) || 5)), minSceneDuration: Math.max(1, Math.min(20, Number(raw?.minSceneDuration) || 3)), maxSceneDuration: Math.max(2, Math.min(30, Number(raw?.maxSceneDuration) || 8)), aspectRatio };
+  return { workflowMode, provider, countMode, targetCount: Math.max(1, Math.min(40, Number(raw?.targetCount) || 6)), imagesPerMinute: Math.max(0.5, Math.min(20, Number(raw?.imagesPerMinute) || 5)), minSceneDuration: Math.max(1, Math.min(20, Number(raw?.minSceneDuration) || 3)), maxSceneDuration: Math.max(2, Math.min(30, Number(raw?.maxSceneDuration) || 8)), aspectRatio, displayTemplate: normalizeDisplayTemplate(raw?.displayTemplate) };
 }
 function validatePlan(words: BrollWord[], keepRanges: BrollKeepRange[] | undefined, raw: any, orientation: 'portrait' | 'landscape', settings: BrollPlanSettings): BrollPlan {
   const { index, kept } = keptWordIndexes(words, keepRanges); const scenes: BrollScene[] = []; let previousStart = -1;
@@ -91,13 +107,30 @@ export async function createBrollPlan(options: { codexBin: string; workDir: stri
 }
 
 export async function saveBrollPlan(workDir: string, plan: BrollPlan) { await fs.mkdir(path.join(workDir, 'broll'), { recursive: true }); await fs.writeFile(path.join(workDir, 'broll-plan.json'), JSON.stringify(plan, null, 2)); }
-export async function loadBrollPlan(workDir: string): Promise<BrollPlan | null> { try { const raw = JSON.parse(await fs.readFile(path.join(workDir, 'broll-plan.json'), 'utf8')) as BrollPlan; return raw.version === 2 ? raw : null; } catch { return null; } }
-export async function updateBrollScene(workDir: string, plan: BrollPlan, sceneId: string, patch: { imagePrompt?: string; videoPrompt?: string; title?: string; sourceStart?: number; sourceEnd?: number; enabled?: boolean }) {
+export async function loadBrollPlan(workDir: string): Promise<BrollPlan | null> {
+  try {
+    const raw = JSON.parse(await fs.readFile(path.join(workDir, 'broll-plan.json'), 'utf8')) as BrollPlan;
+    if (raw.version !== 2) return null;
+    raw.settings = normalizeSettings(raw.settings);
+    for (const scene of raw.scenes ?? []) if (scene.displayTemplate && !BROLL_DISPLAY_TEMPLATES.some((template) => template.id === scene.displayTemplate)) delete scene.displayTemplate;
+    return raw;
+  } catch { return null; }
+}
+export async function updateBrollPlanSettings(workDir: string, plan: BrollPlan, patch: { displayTemplate?: BrollDisplayTemplate }) {
+  if (patch.displayTemplate) plan.settings.displayTemplate = normalizeDisplayTemplate(patch.displayTemplate);
+  await saveBrollPlan(workDir, plan); return plan;
+}
+export async function updateBrollScene(workDir: string, plan: BrollPlan, sceneId: string, patch: { imagePrompt?: string; videoPrompt?: string; title?: string; sourceStart?: number; sourceEnd?: number; enabled?: boolean; displayTemplate?: BrollDisplayTemplate | 'default' }) {
   const scene = plan.scenes.find((candidate) => candidate.id === sceneId); if (!scene) throw new Error('B-roll scene not found');
   if (typeof patch.title === 'string' && patch.title.trim()) scene.title = patch.title.trim().slice(0, 100); if (typeof patch.imagePrompt === 'string' && patch.imagePrompt.trim()) scene.imagePrompt = patch.imagePrompt.trim(); if (typeof patch.videoPrompt === 'string') scene.videoPrompt = patch.videoPrompt.trim() || undefined; if (typeof patch.enabled === 'boolean') scene.enabled = patch.enabled;
+  if (patch.displayTemplate === 'default') delete scene.displayTemplate; else if (patch.displayTemplate) scene.displayTemplate = normalizeDisplayTemplate(patch.displayTemplate);
   const nextStart = Number.isFinite(patch.sourceStart) ? Math.max(0, Number(patch.sourceStart)) : scene.sourceStart; const nextEnd = Number.isFinite(patch.sourceEnd) ? Math.max(0, Number(patch.sourceEnd)) : scene.sourceEnd; if (nextEnd <= nextStart) throw new Error('B-roll end time must be after start time'); scene.sourceStart = nextStart; scene.sourceEnd = nextEnd; await saveBrollPlan(workDir, plan); return scene;
 }
 export async function deleteBrollScene(workDir: string, plan: BrollPlan, sceneId: string) { const index = plan.scenes.findIndex((scene) => scene.id === sceneId); if (index < 0) throw new Error('B-roll scene not found'); const [scene] = plan.scenes.splice(index, 1); await Promise.all([scene.imageFile ? fs.rm(scene.imageFile, { force: true }) : Promise.resolve(), scene.videoFile ? fs.rm(scene.videoFile, { force: true }) : Promise.resolve()]); await saveBrollPlan(workDir, plan); return plan; }
+
+export function resolveSceneDisplayTemplate(plan: BrollPlan, scene: BrollScene) { return scene.displayTemplate || plan.settings.displayTemplate || 'full-frame'; }
+export function displayTemplateNeedsPresenterMatte(template: BrollDisplayTemplate) { return template === 'top-card-presenter' || template === 'presenter-overlay'; }
+export function planNeedsPresenterMatte(plan: BrollPlan) { return plan.scenes.some((scene) => scene.enabled && displayTemplateNeedsPresenterMatte(resolveSceneDisplayTemplate(plan, scene))); }
 
 function targetAspect(plan: BrollPlan) { if (plan.settings.aspectRatio !== 'auto') return plan.settings.aspectRatio; return plan.orientation === 'portrait' ? '9:16' : '16:9'; }
 function generatedImagePrompt(scene: BrollScene, plan: BrollPlan, regenerationComment?: string) {
@@ -161,9 +194,60 @@ export async function generateBrollVideoWithGrokCli(options: { config: ImageProv
   const args = ['--no-auto-update', '--always-approve', '--cwd', options.workDir, '-p', agentPrompt, '--output-format', 'plain']; if (options.config.grokModel) args.splice(4, 0, '-m', options.config.grokModel); await run(options.config.grokBin, args, undefined, 900000); const stat = await fs.stat(outputPath).catch(() => null); if (!stat?.isFile() || stat.size < 50_000) throw new Error('Grok CLI completed without creating a usable MP4. The Grok CLI environment must have image-to-video capability/authentication.'); if (options.config.ffmpegBin) await run(options.config.ffmpegBin, ['-v', 'error', '-i', outputPath, '-f', 'null', '-'], undefined, 120000); scene.videoFile = outputPath; scene.videoGeneratedAt = new Date().toISOString(); scene.videoModel = videoModel; await saveBrollPlan(options.workDir, options.plan); return scene;
 }
 
-export function buildBrollOverlayFilter(options: { plan: BrollPlan; width: number; height: number; fps: number; cleanedSegments?: Array<{ start: number; end: number }> }) {
-  const active = options.plan.scenes.filter((scene) => scene.enabled && (scene.videoFile || scene.imageFile)); if (!active.length) throw new Error('Add at least one enabled B-roll image or video before exporting'); const parts: string[] = ['[0:v]setpts=PTS-STARTPTS[base0]']; let previous = 'base0';
-  active.forEach((scene, index) => { const input = index + 1; const mediaLabel = `broll${index}`; const output = `base${index + 1}`; const duration = Math.max(0.1, scene.sourceEnd - scene.sourceStart); parts.push(`[${input}:v]scale=${options.width}:${options.height}:force_original_aspect_ratio=increase:flags=lanczos,crop=${options.width}:${options.height},setsar=1,trim=duration=${duration.toFixed(6)},setpts=PTS-STARTPTS+${scene.sourceStart.toFixed(6)}/TB[${mediaLabel}]`); parts.push(`[${previous}][${mediaLabel}]overlay=0:0:eof_action=pass:enable='between(t,${scene.sourceStart.toFixed(6)},${scene.sourceEnd.toFixed(6)})'[${output}]`); previous = output; });
-  if (options.cleanedSegments?.length) { const expression = options.cleanedSegments.map((segment) => `between(t\\,${segment.start.toFixed(6)}\\,${segment.end.toFixed(6)})`).join('+'); parts.push(`[${previous}]select='${expression}',setpts=N/${options.fps.toFixed(6)}/TB[vout]`); parts.push(`[0:a]aselect='${expression}',asetpts=N/SR/TB[aout]`); } else { parts.push(`[${previous}]setpts=PTS-STARTPTS[vout]`); parts.push('[0:a]asetpts=PTS-STARTPTS[aout]'); }
-  return { filter: parts.join(';'), activeScenes: active };
+function even(value: number) { const rounded = Math.max(2, Math.round(value)); return rounded % 2 === 0 ? rounded : rounded - 1; }
+function layoutRect(template: BrollDisplayTemplate, width: number, height: number) {
+  if (template === 'top-card' || template === 'top-card-presenter') return { width: even(width * 0.92), height: even(height * 0.42), x: even(width * 0.04), y: even(height * 0.035) };
+  if (template === 'split-top') return { width: even(width), height: even(height * 0.47), x: 0, y: 0 };
+  if (template === 'picture-in-picture') {
+    if (height >= width) return { width: even(width * 0.86), height: even(height * 0.33), x: even(width * 0.07), y: even(height * 0.53) };
+    return { width: even(width * 0.42), height: even(height * 0.56), x: even(width * 0.54), y: even(height * 0.08) };
+  }
+  return { width: even(width), height: even(height), x: 0, y: 0 };
+}
+
+export function buildBrollOverlayFilter(options: { plan: BrollPlan; width: number; height: number; fps: number; cleanedSegments?: Array<{ start: number; end: number }>; presenterInputIndex?: number }) {
+  const active = options.plan.scenes.filter((scene) => scene.enabled && (scene.videoFile || scene.imageFile));
+  if (!active.length) throw new Error('Add at least one enabled B-roll image or video before exporting');
+  const presenterScenes = active.filter((scene) => displayTemplateNeedsPresenterMatte(resolveSceneDisplayTemplate(options.plan, scene)));
+  if (presenterScenes.length && options.presenterInputIndex === undefined) throw new Error('A presenter-cutout template is selected but the presenter matte input is missing');
+
+  const parts: string[] = [];
+  let presenterLabels: string[] = [];
+  if (presenterScenes.length) {
+    parts.push(`[0:v]setpts=PTS-STARTPTS,split=2[base0][presenterSource]`);
+    parts.push(`[${options.presenterInputIndex}:v]fps=${options.fps.toFixed(6)},scale=${options.width}:${options.height}:flags=bilinear,format=gray,setpts=PTS-STARTPTS[presenterMask]`);
+    parts.push('[presenterSource]format=rgba[presenterRgb]');
+    parts.push('[presenterRgb][presenterMask]alphamerge[presenterAlpha]');
+    if (presenterScenes.length === 1) presenterLabels = ['presenterAlpha'];
+    else {
+      presenterLabels = presenterScenes.map((_scene, index) => `presenter${index}`);
+      parts.push(`[presenterAlpha]split=${presenterLabels.length}${presenterLabels.map((label) => `[${label}]`).join('')}`);
+    }
+  } else {
+    parts.push('[0:v]setpts=PTS-STARTPTS[base0]');
+  }
+
+  let previous = 'base0'; let presenterCursor = 0;
+  active.forEach((scene, index) => {
+    const input = index + 1; const mediaLabel = `broll${index}`; const mediaOutput = `mediaBase${index}`; const output = `base${index + 1}`;
+    const duration = Math.max(0.1, scene.sourceEnd - scene.sourceStart); const template = resolveSceneDisplayTemplate(options.plan, scene); const rect = layoutRect(template, options.width, options.height);
+    parts.push(`[${input}:v]scale=${rect.width}:${rect.height}:force_original_aspect_ratio=increase:flags=lanczos,crop=${rect.width}:${rect.height},setsar=1,trim=duration=${duration.toFixed(6)},setpts=PTS-STARTPTS+${scene.sourceStart.toFixed(6)}/TB[${mediaLabel}]`);
+    parts.push(`[${previous}][${mediaLabel}]overlay=${rect.x}:${rect.y}:eof_action=pass:enable='between(t,${scene.sourceStart.toFixed(6)},${scene.sourceEnd.toFixed(6)})'[${mediaOutput}]`);
+    if (displayTemplateNeedsPresenterMatte(template)) {
+      const presenterLabel = presenterLabels[presenterCursor++];
+      parts.push(`[${mediaOutput}][${presenterLabel}]overlay=0:0:eof_action=pass:enable='between(t,${scene.sourceStart.toFixed(6)},${scene.sourceEnd.toFixed(6)})'[${output}]`);
+    } else {
+      parts.push(`[${mediaOutput}]null[${output}]`);
+    }
+    previous = output;
+  });
+
+  if (options.cleanedSegments?.length) {
+    const expression = options.cleanedSegments.map((segment) => `between(t\\,${segment.start.toFixed(6)}\\,${segment.end.toFixed(6)})`).join('+');
+    parts.push(`[${previous}]select='${expression}',setpts=N/${options.fps.toFixed(6)}/TB[vout]`);
+    parts.push(`[0:a]aselect='${expression}',asetpts=N/SR/TB[aout]`);
+  } else {
+    parts.push(`[${previous}]setpts=PTS-STARTPTS[vout]`); parts.push('[0:a]asetpts=PTS-STARTPTS[aout]');
+  }
+  return { filter: parts.join(';'), activeScenes: active, needsPresenterMatte: presenterScenes.length > 0 };
 }
