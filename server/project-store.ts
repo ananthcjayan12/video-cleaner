@@ -20,6 +20,17 @@ export type MediaProfile = {
   hdr: boolean;
 };
 
+export type ProjectClip = {
+  id: string;
+  sourcePath: string;
+  sourceName: string;
+  media: MediaProfile;
+  timelineStart: number;
+  timelineEnd: number;
+  proxyPath?: string;
+  audioPath?: string;
+};
+
 export type Project = {
   id: string;
   name: string;
@@ -28,6 +39,7 @@ export type Project = {
   sourcePath: string;
   workDir: string;
   sourceName: string;
+  clips?: ProjectClip[];
   proxyPath?: string;
   audioPath?: string;
   transcript?: { text: string; words: Word[] };
@@ -39,6 +51,7 @@ export type ProjectSummary = {
   id: string;
   name: string;
   sourceName: string;
+  clipCount: number;
   createdAt: string;
   updatedAt: string;
   media: MediaProfile;
@@ -66,6 +79,55 @@ async function statFile(filePath?: string) {
 }
 async function exists(filePath?: string) { return Boolean(await statFile(filePath)); }
 
+export function projectClips(project: Project): ProjectClip[] {
+  if (project.clips?.length) return project.clips;
+  return [{
+    id: 'clip-001', sourcePath: project.sourcePath, sourceName: project.sourceName, media: { ...project.media },
+    timelineStart: 0, timelineEnd: Math.max(0, project.media.duration || 0), proxyPath: project.proxyPath, audioPath: project.audioPath,
+  }];
+}
+
+export function syncProjectTimeline(project: Project) {
+  const clips = projectClips(project).map((clip, index) => ({ ...clip, id: clip.id || `clip-${String(index + 1).padStart(3, '0')}` }));
+  let cursor = 0;
+  for (const clip of clips) {
+    clip.timelineStart = cursor;
+    cursor += Math.max(0, Number(clip.media.duration) || 0);
+    clip.timelineEnd = cursor;
+  }
+  const first = clips[0];
+  if (first) {
+    project.sourcePath = first.sourcePath;
+    project.sourceName = first.sourceName;
+    project.media = {
+      ...first.media,
+      duration: cursor,
+      size: clips.reduce((sum, clip) => sum + Math.max(0, Number(clip.media.size) || 0), 0),
+      bitRate: undefined,
+    };
+  }
+  project.clips = clips;
+  return clips;
+}
+
+export function clipAtTimelineTime(project: Project, time: number) {
+  const clips = syncProjectTimeline(project);
+  const safe = Math.max(0, time);
+  return clips.find((clip, index) => safe >= clip.timelineStart && (safe < clip.timelineEnd || index === clips.length - 1)) ?? clips.at(-1);
+}
+
+export function splitTimelineRange(project: Project, start: number, end: number) {
+  const clips = syncProjectTimeline(project);
+  const pieces: Array<{ clip: ProjectClip; start: number; end: number; localStart: number; localEnd: number }> = [];
+  for (const clip of clips) {
+    const pieceStart = Math.max(start, clip.timelineStart);
+    const pieceEnd = Math.min(end, clip.timelineEnd);
+    if (pieceEnd - pieceStart <= 0.001) continue;
+    pieces.push({ clip, start: pieceStart, end: pieceEnd, localStart: pieceStart - clip.timelineStart, localEnd: pieceEnd - clip.timelineStart });
+  }
+  return pieces;
+}
+
 export async function atomicWriteJson(filePath: string, value: unknown) {
   const payload = `${JSON.stringify(value, null, 2)}\n`;
   const previous = projectWriteChains.get(filePath) ?? Promise.resolve();
@@ -84,6 +146,7 @@ export async function atomicWriteJson(filePath: string, value: unknown) {
 }
 
 export async function saveProject(project: Project, touch = true) {
+  syncProjectTimeline(project);
   if (touch) project.updatedAt = new Date().toISOString();
   await atomicWriteJson(path.join(project.workDir, 'project.json'), project);
 }
@@ -108,6 +171,16 @@ export async function loadProjectDirectory(workDir: string): Promise<Project | n
     updatedAt: raw.updatedAt || raw.createdAt || now,
     sourcePath: raw.sourcePath,
     sourceName: raw.sourceName || path.basename(raw.sourcePath),
+    clips: Array.isArray(raw.clips) ? raw.clips.map((clip, index) => ({
+      id: clip.id || `clip-${String(index + 1).padStart(3, '0')}`,
+      sourcePath: clip.sourcePath,
+      sourceName: clip.sourceName || path.basename(clip.sourcePath),
+      media: clip.media,
+      timelineStart: Number(clip.timelineStart) || 0,
+      timelineEnd: Number(clip.timelineEnd) || Number(clip.media?.duration) || 0,
+      proxyPath: clip.proxyPath,
+      audioPath: clip.audioPath,
+    })).filter((clip) => Boolean(clip.sourcePath && clip.media)) : undefined,
     workDir,
     proxyPath: raw.proxyPath,
     audioPath: raw.audioPath,
@@ -115,6 +188,7 @@ export async function loadProjectDirectory(workDir: string): Promise<Project | n
     edl: raw.edl,
     media: raw.media,
   };
+  syncProjectTimeline(project);
 
   const proxyCandidate = project.proxyPath || path.join(workDir, 'proxy.mp4');
   if (await exists(proxyCandidate)) project.proxyPath = proxyCandidate;
@@ -123,6 +197,14 @@ export async function loadProjectDirectory(workDir: string): Promise<Project | n
   const audioCandidate = project.audioPath || path.join(workDir, 'analysis.m4a');
   if (await exists(audioCandidate)) project.audioPath = audioCandidate;
   else project.audioPath = undefined;
+
+  for (const clip of project.clips ?? []) {
+    const clipDir = path.join(workDir, 'clips', clip.id);
+    const clipProxy = clip.proxyPath || path.join(clipDir, 'proxy.mp4');
+    const clipAudio = clip.audioPath || path.join(clipDir, 'analysis.m4a');
+    clip.proxyPath = await exists(clipProxy) ? clipProxy : undefined;
+    clip.audioPath = await exists(clipAudio) ? clipAudio : undefined;
+  }
 
   if (!project.transcript) project.transcript = await readJson(path.join(workDir, 'transcript.json'));
   if (!project.edl) project.edl = await readJson(path.join(workDir, 'edl.json'));
@@ -159,21 +241,30 @@ async function reconcileBrollFiles(project: Project, plan: BrollPlan | null) {
   return plan;
 }
 
+async function allSourcesAvailable(project: Project) {
+  const clips = syncProjectTimeline(project);
+  const results = await Promise.all(clips.map((clip) => exists(clip.sourcePath)));
+  return results.every(Boolean);
+}
+
 export async function summarizeProject(project: Project, brollPlan?: BrollPlan | null): Promise<ProjectSummary> {
+  const clips = syncProjectTimeline(project);
   const loadedPlan = brollPlan === undefined ? await loadBrollPlan(project.workDir) : brollPlan;
   const plan = await reconcileBrollFiles(project, loadedPlan ?? null);
   const scenes = plan?.scenes ?? [];
   const brollImages = scenes.filter((scene) => Boolean(scene.imageFile)).length;
   const brollVideos = scenes.filter((scene) => Boolean(scene.videoFile)).length;
   const videoEligible = scenes.filter((scene) => Boolean(scene.imageFile)).length;
+  const sourceName = clips.length > 1 ? `${clips.length} clips · ${clips[0].sourceName}${clips.length > 1 ? ` + ${clips.length - 1} more` : ''}` : project.sourceName;
   return {
     id: project.id,
     name: project.name,
-    sourceName: project.sourceName,
+    sourceName,
+    clipCount: clips.length,
     createdAt: project.createdAt,
     updatedAt: project.updatedAt,
     media: project.media,
-    sourceAvailable: await exists(project.sourcePath),
+    sourceAvailable: await allSourcesAvailable(project),
     proxyUrl: await exists(project.proxyPath) ? `/api/projects/${project.id}/proxy` : undefined,
     state: {
       proxyReady: await exists(project.proxyPath),
