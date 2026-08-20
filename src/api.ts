@@ -5,9 +5,27 @@ export type ImageProvider = 'openai' | 'gemini' | 'grok-cli' | 'codex-cli';
 export type BrollWorkflowMode = 'cleaned-video' | 'raw-video' | 'assets-only';
 export type BrollCountMode = 'auto' | 'exact' | 'per-minute';
 
+export type ProjectState = {
+  proxyReady: boolean;
+  transcriptReady: boolean;
+  cleaned: boolean;
+  brollPlanned: boolean;
+  brollScenes: number;
+  brollImages: number;
+  brollVideos: number;
+  missingImages: number;
+  missingVideos: number;
+};
+
 export type Project = {
   id: string;
+  name: string;
   sourceName: string;
+  createdAt: string;
+  updatedAt: string;
+  sourceAvailable: boolean;
+  proxyUrl?: string;
+  state: ProjectState;
   media: { duration: number; size: number; width?: number; height?: number; frameRate?: number; bitRate?: number; videoCodec?: string; audioCodec?: string; hdr: boolean };
 };
 
@@ -43,6 +61,13 @@ export type BrollScene = {
   videoFile?: string; videoGeneratedAt?: string; videoModel?: string;
 };
 export type BrollPlan = { version: 2; orientation: 'portrait' | 'landscape'; stylePreset: string; settings: BrollPlanSettings; scenes: BrollScene[]; notes: string[] };
+export type ProjectSnapshot = {
+  project: Project;
+  transcript: { text?: string; words: Word[] } | null;
+  edl: Edl | null;
+  broll: BrollPlan | null;
+  proxyUrl: string | null;
+};
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, { ...init, headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) } });
@@ -55,7 +80,14 @@ export const api = {
   status: () => request<SystemStatus>('/api/system/status'),
   settings: () => request<SystemStatus>('/api/settings'),
   saveSettings: (body: Record<string, string>) => request<SystemStatus>('/api/settings', { method: 'PUT', body: JSON.stringify(body) }),
+
+  listProjects: () => request<Project[]>('/api/projects'),
   selectProject: () => request<Project>('/api/projects/select', { method: 'POST' }),
+  openProject: (id: string) => request<ProjectSnapshot>(`/api/projects/${id}/open`, { method: 'POST' }),
+  renameProject: (id: string, name: string) => request<Project>(`/api/projects/${id}/meta`, { method: 'PUT', body: JSON.stringify({ name }) }),
+  deleteProject: (id: string) => request<{ deleted: boolean; id: string }>(`/api/projects/${id}`, { method: 'DELETE' }),
+  relinkProject: (id: string) => request<Project>(`/api/projects/${id}/relink`, { method: 'POST' }),
+
   prepare: (id: string) => request<{ proxyUrl: string; proxy: { width: number; height: number; fps: number; hardware: boolean } }>(`/api/projects/${id}/prepare`, { method: 'POST' }),
   transcribe: (id: string) => request<{ transcript: { text?: string; words: Word[] }; edl: Edl }>(`/api/projects/${id}/transcribe`, { method: 'POST' }),
   clean: (id: string, intensity: string) => request<Edl>(`/api/projects/${id}/clean`, { method: 'POST', body: JSON.stringify({ intensity }) }),
