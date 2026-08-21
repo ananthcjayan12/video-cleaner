@@ -3,8 +3,9 @@ export type KeepRange = { startWordId: string; endWordId: string; reason?: strin
 export type Edl = { keepRanges: KeepRange[]; notes?: string[] };
 export type ImageProvider = 'openai' | 'gemini' | 'grok-cli' | 'codex-cli';
 export type BrollWorkflowMode = 'cleaned-video' | 'raw-video' | 'assets-only';
+export type BrollAssetAspectRatio = 'auto' | '9:16' | '16:9';
 export type BrollCountMode = 'auto' | 'exact' | 'per-minute';
-export type BrollDisplayTemplate = 'full-frame' | 'top-card' | 'split-top' | 'picture-in-picture' | 'top-card-presenter' | 'presenter-overlay' | 'stacked-cards-cutout';
+export type BrollDisplayTemplate = 'full-frame' | 'top-card' | 'split-top' | 'picture-in-picture' | 'top-card-presenter' | 'presenter-overlay' | 'stacked-cards-cutout' | 'stacked-talking-top' | 'stacked-broll-top';
 
 export type ProjectState = {
   proxyReady: boolean;
@@ -22,6 +23,7 @@ export type Project = {
   id: string;
   name: string;
   sourceName: string;
+  clipCount?: number;
   createdAt: string;
   updatedAt: string;
   sourceAvailable: boolean;
@@ -61,7 +63,8 @@ export type BrollPlanSettings = {
 export type BrollScene = {
   id: string; title: string; startWordId: string; endWordId: string; sourceStart: number; sourceEnd: number; narration: string; visualIntent: string; shotType: string;
   imagePrompt: string; videoPrompt?: string; enabled: boolean; imageFile?: string; generatedAt?: string; provider?: ImageProvider | 'manual'; model?: string;
-  videoFile?: string; videoGeneratedAt?: string; videoModel?: string; displayTemplate?: BrollDisplayTemplate;
+  videoFile?: string; videoGeneratedAt?: string; videoModel?: string; displayTemplate?: BrollDisplayTemplate; assetAspectRatio?: BrollAssetAspectRatio;
+  generatedAspectRatio?: Exclude<BrollAssetAspectRatio, 'auto'>; orientationChanged?: boolean;
 };
 export type BrollPlan = { version: 2; orientation: 'portrait' | 'landscape'; stylePreset: string; settings: BrollPlanSettings; scenes: BrollScene[]; notes: string[] };
 export type ProjectSnapshot = {
@@ -97,7 +100,7 @@ export const api = {
   setEdl: (id: string, keepRanges: KeepRange[]) => request<Edl>(`/api/projects/${id}/edl`, { method: 'PUT', body: JSON.stringify({ keepRanges }) }),
   planBroll: (id: string, settings: Partial<BrollPlanSettings>) => request<{ plan: BrollPlan; transcript: { text?: string; words: Word[] }; edl: Edl }>(`/api/projects/${id}/broll/plan`, { method: 'POST', body: JSON.stringify({ settings: { ...settings, displayTemplate: undefined } }) }),
   getBroll: (id: string) => request<BrollPlan>(`/api/projects/${id}/broll`),
-  updateBrollScene: (id: string, sceneId: string, patch: { title?: string; imagePrompt?: string; videoPrompt?: string; sourceStart?: number; sourceEnd?: number; enabled?: boolean; displayTemplate?: BrollDisplayTemplate | 'default' }) => request<BrollScene>(`/api/projects/${id}/broll/scenes/${sceneId}`, { method: 'PUT', body: JSON.stringify(patch) }),
+  updateBrollScene: (id: string, sceneId: string, patch: { title?: string; imagePrompt?: string; videoPrompt?: string; sourceStart?: number; sourceEnd?: number; enabled?: boolean; displayTemplate?: BrollDisplayTemplate | 'default'; assetAspectRatio?: BrollAssetAspectRatio }) => request<BrollScene>(`/api/projects/${id}/broll/scenes/${sceneId}`, { method: 'PUT', body: JSON.stringify(patch) }),
   deleteBrollScene: (id: string, sceneId: string) => request<BrollPlan>(`/api/projects/${id}/broll/scenes/${sceneId}`, { method: 'DELETE' }),
   generateBrollScene: (id: string, sceneId: string, regenerationComment?: string) => request<{ scene: BrollScene; imageUrl: string }>(`/api/projects/${id}/broll/scenes/${sceneId}/generate`, { method: 'POST', body: JSON.stringify({ regenerationComment }) }),
   importBrollImage: (id: string, sceneId: string) => request<{ scene: BrollScene; imageUrl: string }>(`/api/projects/${id}/broll/scenes/${sceneId}/manual-image`, { method: 'POST' }),

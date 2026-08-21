@@ -12,6 +12,7 @@ import {
   createBrollPlan,
   createVideoPrompt,
   deleteBrollScene,
+  displayTemplateNeedsPresenterMatte,
   generateBrollImage,
   generateBrollVideoWithGrokCli,
   importBrollImage,
@@ -23,17 +24,22 @@ import {
   type BrollPlanSettings,
   type ImageProvider,
 } from './broll.js';
-import { ensurePresenterMatte, mattingSystemStatus, presenterMatteStatus } from './presenter.js';
+import { ensurePresenterMatte, mattingSystemStatus, presenterMatteStatus, type PresenterMatteSpecInput } from './presenter.js';
 import {
   atomicWriteJson,
+  clipAtTimelineTime,
   loadProjectDirectory,
   loadProjectSnapshot,
+  projectClips,
   saveProject,
   scanProjects,
+  splitTimelineRange,
   summarizeProject,
+  syncProjectTimeline,
   type KeepRange,
   type MediaProfile,
   type Project,
+  type ProjectClip,
   type Word,
 } from './project-store.js';
 
@@ -159,6 +165,18 @@ async function pickNativeFile(prompt = 'Choose a talking-head video') {
   const { stdout } = await run('zenity', ['--file-selection', `--title=${prompt}`, '--file-filter=Video | *.mov *.mp4 *.m4v *.webm']); return stdout.trim();
 }
 
+async function pickNativeFiles(prompt = 'Choose one or more talking-head clips') {
+  if (process.platform === 'darwin') {
+    const script = `set chosenFiles to choose file with prompt ${JSON.stringify(prompt)} with multiple selections allowed\nset output to ""\nrepeat with chosenFile in chosenFiles\nset output to output & POSIX path of chosenFile & linefeed\nend repeat\nreturn output`;
+    const { stdout } = await run('osascript', ['-e', script]); return stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+  }
+  if (process.platform === 'win32') {
+    const script = ['Add-Type -AssemblyName System.Windows.Forms;', '$d = New-Object System.Windows.Forms.OpenFileDialog;', '$d.Filter = "Video files|*.mov;*.mp4;*.m4v;*.webm|All files|*.*";', '$d.Multiselect = $true;', 'if ($d.ShowDialog() -eq "OK") { $d.FileNames | ForEach-Object { Write-Output $_ } }'].join(' ');
+    const { stdout } = await run('powershell', ['-NoProfile', '-Command', script]); return stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+  }
+  const { stdout } = await run('zenity', ['--file-selection', '--multiple', '--separator=\n', `--title=${prompt}`, '--file-filter=Video | *.mov *.mp4 *.m4v *.webm']); return stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+}
+
 async function pickNativeImageFile() {
   if (process.platform === 'darwin') { const { stdout } = await run('osascript', ['-e', 'POSIX path of (choose file with prompt "Choose a B-roll image")']); return stdout.trim(); }
   if (process.platform === 'win32') { const script = ['Add-Type -AssemblyName System.Windows.Forms;', '$d = New-Object System.Windows.Forms.OpenFileDialog;', '$d.Filter = "Image files|*.png;*.jpg;*.jpeg;*.webp;*.heic;*.heif|All files|*.*";', 'if ($d.ShowDialog() -eq "OK") { Write-Output $d.FileName }'].join(' '); const { stdout } = await run('powershell', ['-NoProfile', '-Command', script]); return stdout.trim(); }
@@ -186,10 +204,22 @@ async function probe(sourcePath: string): Promise<MediaProfile> {
   return { duration: Number(data.format?.duration ?? video.duration ?? 0), size: Number(data.format?.size ?? 0), width: swap ? height : width, height: swap ? width : height, frameRate: parseRate(video.avg_frame_rate || video.r_frame_rate), bitRate: Number(video.bit_rate ?? 0) || undefined, videoCodec: video.codec_name, audioCodec: audio.codec_name, pixelFormat: video.pix_fmt, colorTransfer: video.color_transfer, colorPrimaries: video.color_primaries, colorSpace: video.color_space, hdr: ['smpte2084', 'arib-std-b67'].includes(transfer) || primaries === 'bt2020' };
 }
 
+function assertCompatibleClips(items: Array<{ sourcePath: string; media: MediaProfile }>) {
+  const first = items[0]; if (!first) throw new Error('Choose at least one clip');
+  if (!first.media.audioCodec) throw new Error(`${path.basename(first.sourcePath)} has no audio track. Multi-clip talking-head projects currently require audio in every clip.`);
+  for (const item of items.slice(1)) {
+    const a = first.media; const b = item.media; const name = path.basename(item.sourcePath);
+    if (!b.audioCodec) throw new Error(`${name} has no audio track. Multi-clip talking-head projects currently require audio in every clip.`);
+    if (a.width !== b.width || a.height !== b.height) throw new Error(`${name} is ${b.width || '?'}×${b.height || '?'}. Multi-clip projects currently require the same frame dimensions as the first clip (${a.width || '?'}×${a.height || '?'}).`);
+    if (Math.abs((a.frameRate || 30) - (b.frameRate || 30)) > 0.75) throw new Error(`${name} uses ${(b.frameRate || 0).toFixed(2)} fps. Multi-clip projects currently require matching frame rates.`);
+    if (Boolean(a.hdr) !== Boolean(b.hdr)) throw new Error(`${name} does not match the first clip's HDR/SDR format. Keep all clips HDR or all clips SDR in one project.`);
+  }
+}
+
 function routeParam(value: string | string[]) { return Array.isArray(value) ? value[0] : value; }
 function getProject(id: string) { const project = projects.get(id); if (!project) throw new Error('Project not found in the local project library.'); return project; }
-async function sourceAvailable(project: Project) { const stat = await fs.stat(project.sourcePath).catch(() => null); return Boolean(stat?.isFile()); }
-async function requireSource(project: Project) { if (!await sourceAvailable(project)) throw new Error(`Original source video is missing. Relink ${project.sourceName} from the project library before this operation.`); }
+async function sourceAvailable(project: Project) { const results = await Promise.all(projectClips(project).map((clip) => fs.stat(clip.sourcePath).then((stat) => stat.isFile()).catch(() => false))); return results.every(Boolean); }
+async function requireSource(project: Project) { if (await sourceAvailable(project)) return; const missing: string[] = []; for (const clip of projectClips(project)) if (!await fs.stat(clip.sourcePath).then((stat) => stat.isFile()).catch(() => false)) missing.push(clip.sourceName); throw new Error(`Original source clip${missing.length === 1 ? '' : 's'} missing: ${missing.join(', ')}. Relink before this operation.`); }
 async function touchProject(project: Project) { await saveProject(project); }
 async function invalidateBroll(project: Project) { brollPlans.delete(project.id); await fs.rm(path.join(project.workDir, 'broll-plan.json'), { force: true }); await touchProject(project); }
 
@@ -204,18 +234,60 @@ function rangesToSeconds(project: Project) {
   const merged: { start: number; end: number }[] = []; for (const segment of seconds) { const previous = merged.at(-1); if (previous && segment.start - previous.end < 0.2) previous.end = Math.max(previous.end, segment.end); else merged.push({ ...segment }); } return merged;
 }
 function proxySize(media: MediaProfile, maxEdge = 720) { const width = media.width || 1280; const height = media.height || 720; const even = (v: number) => Math.max(2, Math.round(v / 2) * 2); if (width >= height) { const w = Math.min(maxEdge, width); return { width: even(w), height: even(height * w / width) }; } const h = Math.min(maxEdge, height); return { width: even(width * h / height), height: even(h) }; }
+function normalizedColorTag(value: string | undefined, fallback: string) { const tag = String(value || '').trim().toLowerCase(); if (!tag || tag === 'unknown' || tag === 'unspecified' || tag === 'reserved') return fallback; return tag === 'bt2020ncl' ? 'bt2020nc' : tag; }
+function sdrBt709VideoFilter(media: MediaProfile, leadingFilters: string[] = []) {
+  const filters = [...leadingFilters]; const transfer = normalizedColorTag(media.colorTransfer, media.hdr ? 'arib-std-b67' : 'bt709'); const primaries = normalizedColorTag(media.colorPrimaries, media.hdr ? 'bt2020' : 'bt709'); const matrix = normalizedColorTag(media.colorSpace, media.hdr ? 'bt2020nc' : 'bt709');
+  if (transfer === 'smpte2084' || transfer === 'arib-std-b67') {
+    filters.push(`zscale=pin=${primaries}:tin=${transfer}:min=${matrix}:t=linear:npl=100`, 'format=gbrpf32le', 'zscale=p=bt709', 'tonemap=mobius:desat=0', 'zscale=t=bt709:m=bt709:r=tv');
+  } else if (primaries !== 'bt709' || matrix !== 'bt709') {
+    filters.push(`zscale=pin=${primaries}:tin=${transfer}:min=${matrix}:p=bt709:t=bt709:m=bt709:r=tv`);
+  }
+  filters.push('format=yuv420p', 'setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709'); return filters.join(',');
+}
+function bt709ColorArgs() { return ['-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709']; }
+function hlgBt2020VideoFilter() { return 'format=yuv420p10le,setparams=color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc'; }
+function splitSegmentsAtClipBoundaries(project: Project, segments: Array<{ start: number; end: number }>) { return segments.flatMap((segment) => splitTimelineRange(project, segment.start, segment.end).map((piece) => ({ start: piece.start, end: piece.end }))); }
+
+function concatEntry(filePath: string) { return `file '${filePath.replaceAll("'", "'\\''")}'`; }
+async function concatPreparedFiles(ffmpegBin: string, inputs: string[], outputPath: string) {
+  if (inputs.length === 1) return inputs[0];
+  const listPath = `${outputPath}.concat.txt`; await fs.writeFile(listPath, `${inputs.map(concatEntry).join('\n')}\n`); await fs.rm(outputPath, { force: true });
+  try { await run(ffmpegBin, ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'concat', '-safe', '0', '-i', listPath, '-c', 'copy', '-movflags', '+faststart', outputPath], undefined, 600_000); }
+  finally { await fs.rm(listPath, { force: true }); }
+  return outputPath;
+}
+
+async function prepareProjectMedia(project: Project, includeProxy: boolean) {
+  await requireSource(project); const settings = await resolvedSettings(); if (!settings.ffmpegBin) throw new Error('FFmpeg was not found.'); const capabilities = await ffmpegCapabilities(settings.ffmpegBin); const clips = syncProjectTimeline(project); const dimensions = proxySize(project.media); const inputAcceleration = capabilities.videoToolboxDecode ? ['-hwaccel', 'videotoolbox'] : []; const proxyEncoder = capabilities.h264VideoToolbox ? ['-c:v', 'h264_videotoolbox', '-realtime', '1', '-prio_speed', '1', '-allow_sw', '1', '-b:v', '1500k', '-maxrate', '2500k', '-bufsize', '4M'] : ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '28'];
+  for (const clip of clips) {
+    const clipDir = path.join(project.workDir, 'clips', clip.id); await fs.mkdir(clipDir, { recursive: true }); const audioPath = path.join(clipDir, 'analysis.m4a'); const proxyPath = path.join(clipDir, 'proxy.mp4');
+    const audioReady = await fs.stat(audioPath).then((stat) => stat.isFile() && stat.size > 1000).catch(() => false); const proxyReady = await fs.stat(proxyPath).then((stat) => stat.isFile() && stat.size > 10_000).catch(() => false);
+    if (includeProxy && (!audioReady || !proxyReady)) {
+      await run(settings.ffmpegBin, ['-hide_banner', '-y', ...inputAcceleration, '-i', clip.sourcePath, '-map', '0:v:0', '-map', '0:a:0', '-vf', `scale=${dimensions.width}:${dimensions.height}:flags=fast_bilinear,fps=30,format=yuv420p`, ...proxyEncoder, '-c:a', 'aac', '-b:a', '96k', '-movflags', '+faststart', proxyPath, '-map', '0:a:0', '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'aac', '-b:a', '48k', audioPath], undefined, 7_200_000);
+    } else if (!audioReady) {
+      await run(settings.ffmpegBin, ['-hide_banner', '-loglevel', 'error', '-y', '-i', clip.sourcePath, '-map', '0:a:0', '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'aac', '-b:a', '48k', audioPath], undefined, 1_800_000);
+    }
+    clip.audioPath = audioPath; if (includeProxy) clip.proxyPath = proxyPath;
+  }
+  const combinedAudio = await concatPreparedFiles(settings.ffmpegBin, clips.map((clip) => clip.audioPath!), path.join(project.workDir, 'analysis.m4a')); project.audioPath = combinedAudio;
+  if (includeProxy) { const combinedProxy = await concatPreparedFiles(settings.ffmpegBin, clips.map((clip) => clip.proxyPath!), path.join(project.workDir, 'proxy.mp4')); project.proxyPath = combinedProxy; }
+  await touchProject(project); return { dimensions, hardware: capabilities.h264VideoToolbox };
+}
 
 async function renderBrollScenePreview(project: Project, plan: BrollPlan, sceneId: string, ffmpegBin: string) {
   const scene = plan.scenes.find((candidate) => candidate.id === sceneId); if (!scene) throw new Error('B-roll scene not found');
   const assetPath = scene.videoFile || scene.imageFile; if (!assetPath) throw new Error('Add or generate a B-roll image or video before previewing');
-  const sourcePath = project.proxyPath && await fs.stat(project.proxyPath).then((stat) => stat.isFile()).catch(() => false) ? project.proxyPath : project.sourcePath;
+  let sourcePath = project.proxyPath && await fs.stat(project.proxyPath).then((stat) => stat.isFile()).catch(() => false) ? project.proxyPath : '';
+  let sourceStart = scene.sourceStart;
+  if (!sourcePath) { const clip = clipAtTimelineTime(project, scene.sourceStart); if (!clip) throw new Error('No source clip covers this B-roll scene'); if (scene.sourceEnd > clip.timelineEnd + 0.001) throw new Error('This B-roll scene crosses a clip boundary. Create the combined proxy before previewing it.'); sourcePath = clip.sourcePath; sourceStart = scene.sourceStart - clip.timelineStart; }
   const [sourceStat, assetStat] = await Promise.all([fs.stat(sourcePath), fs.stat(assetPath)]); const dimensions = proxySize(project.media, 720); const fps = Math.min(30, Math.max(15, project.media.frameRate || 30)); const duration = Math.max(0.5, Math.min(12, scene.sourceEnd - scene.sourceStart)); const template = scene.displayTemplate || plan.settings.displayTemplate || 'full-frame';
-  const cacheKey = createHash('sha256').update(JSON.stringify({ previewPipeline: 2, sourcePath, sourceSize: sourceStat.size, sourceMtime: sourceStat.mtimeMs, assetPath, assetSize: assetStat.size, assetMtime: assetStat.mtimeMs, start: scene.sourceStart, duration, template, width: dimensions.width, height: dimensions.height, fps })).digest('hex').slice(0, 16);
+  const cacheKey = createHash('sha256').update(JSON.stringify({ previewPipeline: 4, sourcePath, sourceSize: sourceStat.size, sourceMtime: sourceStat.mtimeMs, start: sourceStart, assetPath, assetSize: assetStat.size, assetMtime: assetStat.mtimeMs, duration, template, width: dimensions.width, height: dimensions.height, fps })).digest('hex').slice(0, 16);
   const previewDir = path.join(project.workDir, 'previews', scene.id); const previewPath = path.join(previewDir, 'preview.mp4'); const segmentPath = path.join(previewDir, 'source-segment.mp4'); const metaPath = path.join(previewDir, 'preview.json'); await fs.mkdir(previewDir, { recursive: true });
   const [previewStat, cachedMeta] = await Promise.all([fs.stat(previewPath).catch(() => null), fs.readFile(metaPath, 'utf8').then((value) => JSON.parse(value)).catch(() => null)]);
   if (previewStat?.isFile() && previewStat.size > 10_000 && cachedMeta?.cacheKey === cacheKey) return { previewPath, cacheKey, duration, cached: true };
 
-  await run(ffmpegBin, ['-hide_banner', '-loglevel', 'error', '-y', '-ss', scene.sourceStart.toFixed(6), '-t', duration.toFixed(6), '-i', sourcePath, '-map', '0:v:0', '-map', '0:a:0?', '-vf', `scale=${dimensions.width}:${dimensions.height}:flags=fast_bilinear,fps=${fps.toFixed(6)},format=yuv420p`, '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '27', '-c:a', 'aac', '-b:a', '96k', '-movflags', '+faststart', segmentPath], undefined, 300_000);
+  const previewSourceFilter = sdrBt709VideoFilter(project.media, [`scale=${dimensions.width}:${dimensions.height}:flags=fast_bilinear`, `fps=${fps.toFixed(6)}`]);
+  await run(ffmpegBin, ['-hide_banner', '-loglevel', 'error', '-y', '-ss', sourceStart.toFixed(6), '-t', duration.toFixed(6), '-i', sourcePath, '-map', '0:v:0', '-map', '0:a:0?', '-vf', previewSourceFilter, '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '27', ...bt709ColorArgs(), '-c:a', 'aac', '-b:a', '96k', '-movflags', '+faststart', segmentPath], undefined, 300_000);
   const previewScene = { ...scene, sourceStart: 0, sourceEnd: duration, enabled: true }; const previewPlan: BrollPlan = { ...plan, orientation: dimensions.height >= dimensions.width ? 'portrait' : 'landscape', settings: { ...plan.settings, workflowMode: 'raw-video' }, scenes: [previewScene] };
   let mattePath: string | undefined;
   if (planNeedsPresenterMatte(previewPlan)) {
@@ -224,16 +296,14 @@ async function renderBrollScenePreview(project: Project, plan: BrollPlan, sceneI
   }
   const { filter, activeScenes } = buildBrollOverlayFilter({ plan: previewPlan, width: dimensions.width, height: dimensions.height, fps, presenterInputIndex: mattePath ? 2 : undefined });
   const brollInputs = activeScenes[0].videoFile ? ['-stream_loop', '-1', '-i', activeScenes[0].videoFile] : ['-loop', '1', '-framerate', String(fps), '-i', activeScenes[0].imageFile!]; const presenterInput = mattePath ? ['-i', mattePath] : [];
-  await run(ffmpegBin, ['-hide_banner', '-loglevel', 'error', '-y', '-i', segmentPath, ...brollInputs, ...presenterInput, '-filter_complex', filter, '-map', '[vout]', '-map', '[aout]', '-t', duration.toFixed(6), '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', previewPath], undefined, 600_000);
+  await run(ffmpegBin, ['-hide_banner', '-loglevel', 'error', '-y', '-i', segmentPath, ...brollInputs, ...presenterInput, '-filter_complex', filter, '-map', '[vout]', '-map', '[aout]', '-t', duration.toFixed(6), '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p', ...bt709ColorArgs(), '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', previewPath], undefined, 600_000);
   const resultStat = await fs.stat(previewPath).catch(() => null); if (!resultStat?.isFile() || resultStat.size < 10_000) throw new Error('Scene preview finished without creating a playable video');
   await atomicWriteJson(metaPath, { cacheKey, generatedAt: new Date().toISOString(), duration, template }); return { previewPath, cacheKey, duration, cached: false };
 }
 
 async function ensureAnalysisAudio(project: Project) {
   if (project.audioPath) { const exists = await fs.stat(project.audioPath).catch(() => null); if (exists?.isFile()) return project.audioPath; }
-  await requireSource(project);
-  const settings = await resolvedSettings(); if (!settings.ffmpegBin) throw new Error('FFmpeg was not found'); const audioPath = path.join(project.workDir, 'analysis.m4a');
-  await run(settings.ffmpegBin, ['-hide_banner', '-y', '-i', project.sourcePath, '-map', '0:a:0', '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'aac', '-b:a', '48k', audioPath]); project.audioPath = audioPath; await touchProject(project); return audioPath;
+  await prepareProjectMedia(project, false); if (!project.audioPath) throw new Error('Analysis audio was not created'); return project.audioPath;
 }
 async function transcribeProject(project: Project) {
   if (project.transcript?.words.length) return project.transcript; const settings = await resolvedSettings(); if (!settings.elevenLabsApiKey) throw new Error('ElevenLabs API key is not configured');
@@ -249,14 +319,13 @@ function exportBitRate(media: MediaProfile, hevc: boolean, mode: 'fast' | 'quali
 function formatBitRate(value: number) { return `${Math.max(1, Math.round(value / 1000))}k`; }
 function sourceBitDepth(pixelFormat?: string) { const match = String(pixelFormat ?? '').toLowerCase().match(/(9|10|12|14|16)(?:le|be)?$/); return match ? Number(match[1]) : 8; }
 function hevcOutputPixelFormat(media: MediaProfile) { return media.hdr || sourceBitDepth(media.pixelFormat) > 8 ? 'yuv420p10le' : 'yuv420p'; }
-function encodingArgs(project: Project, capabilities: FfmpegCapabilities, mode: 'fast' | 'quality') {
-  const sourceCodec = String(project.media.videoCodec || '').toLowerCase(); const useHevc = project.media.hdr || sourceCodec === 'hevc' || sourceCodec === 'h265'; const hardware = useHevc ? capabilities.hevcVideoToolbox : capabilities.h264VideoToolbox; const targetBitRate = exportBitRate(project.media, useHevc, mode); const pixelFormat = hevcOutputPixelFormat(project.media); const main10 = pixelFormat === 'yuv420p10le';
-  if (hardware) { const encoder = useHevc ? 'hevc_videotoolbox' : 'h264_videotoolbox'; return { encoder, hardware, targetBitRate, args: ['-c:v', encoder, '-realtime', '1', '-allow_sw', '1', ...(mode === 'fast' ? ['-prio_speed', '1'] : []), '-b:v', formatBitRate(targetBitRate), '-maxrate', formatBitRate(Math.round(targetBitRate * 1.2)), '-bufsize', formatBitRate(Math.round(targetBitRate * 2)), ...(useHevc ? ['-pix_fmt', pixelFormat, '-tag:v', 'hvc1', ...(main10 ? ['-profile:v', 'main10'] : [])] : [])] }; }
+function encodingArgs(project: Project, capabilities: FfmpegCapabilities, mode: 'fast' | 'quality', forceSdr = false) {
+  const sourceCodec = String(project.media.videoCodec || '').toLowerCase(); const useHevc = !forceSdr && (project.media.hdr || sourceCodec === 'hevc' || sourceCodec === 'h265'); const hardware = useHevc ? capabilities.hevcVideoToolbox : capabilities.h264VideoToolbox; const targetBitRate = exportBitRate(project.media, useHevc, mode); const pixelFormat = forceSdr ? 'yuv420p' : hevcOutputPixelFormat(project.media); const main10 = pixelFormat === 'yuv420p10le';
+  if (hardware) { const encoder = useHevc ? 'hevc_videotoolbox' : 'h264_videotoolbox'; return { encoder, hardware, targetBitRate, args: ['-c:v', encoder, '-allow_sw', '1', ...(mode === 'fast' ? ['-realtime', '1', '-prio_speed', '1'] : []), '-b:v', formatBitRate(targetBitRate), '-maxrate', formatBitRate(Math.round(targetBitRate * 1.2)), '-bufsize', formatBitRate(Math.round(targetBitRate * 2)), ...(useHevc ? ['-pix_fmt', pixelFormat, '-tag:v', 'hvc1', ...(main10 ? ['-profile:v', 'main10'] : [])] : forceSdr ? ['-pix_fmt', 'yuv420p'] : [])] }; }
   if (useHevc) return { encoder: 'libx265', hardware: false, targetBitRate, args: ['-c:v', 'libx265', '-preset', mode === 'fast' ? 'veryfast' : 'fast', '-crf', mode === 'fast' ? '19' : '16', '-pix_fmt', pixelFormat, '-tag:v', 'hvc1'] };
-  return { encoder: 'libx264', hardware: false, targetBitRate, args: ['-c:v', 'libx264', '-preset', mode === 'fast' ? 'superfast' : 'veryfast', '-crf', mode === 'fast' ? '19' : '17'] };
+  return { encoder: 'libx264', hardware: false, targetBitRate, args: ['-c:v', 'libx264', '-preset', mode === 'fast' ? 'superfast' : 'veryfast', '-crf', mode === 'fast' ? '19' : '17', ...(forceSdr ? ['-pix_fmt', 'yuv420p'] : [])] };
 }
 function colorArgs(project: Project) { const args: string[] = []; if (project.media.colorPrimaries) args.push('-color_primaries', project.media.colorPrimaries); if (project.media.colorTransfer) args.push('-color_trc', project.media.colorTransfer); if (project.media.colorSpace) args.push('-colorspace', project.media.colorSpace); return args; }
-function buildTimelineFilter(segments: Array<{ start: number; end: number }>, fps: number) { const expression = segments.map((segment) => `between(t\\,${segment.start.toFixed(6)}\\,${segment.end.toFixed(6)})`).join('+'); return `[0:v]select='${expression}',setpts=N/${fps.toFixed(6)}/TB[vout];[0:a]aselect='${expression}',asetpts=N/SR/TB[aout]`; }
 function parseFfmpegTime(value: string) { const parts = value.split(':').map(Number); if (parts.length !== 3 || parts.some((part) => !Number.isFinite(part))) return 0; return parts[0] * 3600 + parts[1] * 60 + parts[2]; }
 type CheckpointRange = { start: number; end: number; duration: number };
 function checkpointRanges(segments: Array<{ start: number; end: number }>, scenes: BrollPlan['scenes'], targetDuration = 12) {
@@ -277,9 +346,9 @@ function checkpointRanges(segments: Array<{ start: number; end: number }>, scene
   return ranges;
 }
 async function checkpointSignature(filePath: string) { const stat = await fs.stat(filePath); return { path: filePath, size: stat.size, mtimeMs: Math.round(stat.mtimeMs) }; }
-async function checkpointFingerprint(options: { project: Project; plan: BrollPlan; mattePath?: string; mode: 'fast' | 'quality'; segments: Array<{ start: number; end: number }>; encodingArgs: string[]; fps: number }) {
-  const activeScenes = options.plan.scenes.filter((scene) => scene.enabled && (scene.videoFile || scene.imageFile)); const files = [options.project.sourcePath, options.mattePath, ...activeScenes.map((scene) => scene.videoFile || scene.imageFile)].filter((value): value is string => Boolean(value)); const signatures = await Promise.all(files.map(checkpointSignature));
-  const payload = { pipeline: 1, signatures, mode: options.mode, segments: options.segments, encodingArgs: options.encodingArgs, fps: options.fps, width: options.project.media.width, height: options.project.media.height, color: [options.project.media.colorPrimaries, options.project.media.colorTransfer, options.project.media.colorSpace], scenes: activeScenes.map((scene) => ({ id: scene.id, start: scene.sourceStart, end: scene.sourceEnd, template: scene.displayTemplate || options.plan.settings.displayTemplate, file: scene.videoFile || scene.imageFile })) };
+async function checkpointFingerprint(options: { project: Project; plan?: BrollPlan; mattePaths?: string[]; mode: 'fast' | 'quality'; segments: Array<{ start: number; end: number }>; encodingArgs: string[]; fps: number }) {
+  const activeScenes = options.plan?.scenes.filter((scene) => scene.enabled && (scene.videoFile || scene.imageFile)) ?? []; const files = [...projectClips(options.project).map((clip) => clip.sourcePath), ...(options.mattePaths ?? []), ...activeScenes.map((scene) => scene.videoFile || scene.imageFile)].filter((value): value is string => Boolean(value)); const signatures = await Promise.all(files.map(checkpointSignature));
+  const payload = { pipeline: 5, signatures, mode: options.mode, segments: options.segments, encodingArgs: options.encodingArgs, fps: options.fps, width: options.project.media.width, height: options.project.media.height, color: [options.project.media.colorPrimaries, options.project.media.colorTransfer, options.project.media.colorSpace], scenes: activeScenes.map((scene) => ({ id: scene.id, start: scene.sourceStart, end: scene.sourceEnd, template: scene.displayTemplate || options.plan?.settings.displayTemplate, file: scene.videoFile || scene.imageFile })) };
   return createHash('sha256').update(JSON.stringify(payload)).digest('hex').slice(0, 24);
 }
 function runTrackedExportProcess(projectId: string, command: string, args: string[], onProgress?: (seconds: number, speed: string, frame: number) => void) {
@@ -320,14 +389,43 @@ function launchCheckpointExport(options: { projectId: string; command: string; s
     }
   })();
 }
-function launchExport(projectId: string, command: string, args: string[], outputDuration: number, outputPath: string, encoder: string) {
-  const existing = exportJobs.get(projectId); const job: ExportJob = existing?.state === 'running' ? existing : { state: 'running', progress: 0, outTime: '00:00:00.000000', speed: '', frame: 0, outputPath, encoder, startedAt: Date.now() };
-  Object.assign(job, { state: 'running', progress: 0, outTime: '00:00:00.000000', speed: 'Starting first frame', frame: 0, outputPath, encoder, startedAt: job.startedAt ?? Date.now(), error: undefined }); exportJobs.set(projectId, job);
-  const child = spawn(command, ['-hide_banner', '-y', '-nostats', '-progress', 'pipe:1', ...args], { shell: false, windowsHide: true }); exportProcesses.set(projectId, child); let stdoutBuffer = ''; let stderr = '';
-  const handleLine = (line: string) => { const equals = line.indexOf('='); if (equals < 0) return; const key = line.slice(0, equals); const value = line.slice(equals + 1); let seconds: number | undefined; if (key === 'out_time') { job.outTime = value; seconds = parseFfmpegTime(value); } else if (key === 'out_time_us' || key === 'out_time_ms') seconds = Number(value) / 1_000_000; if (seconds !== undefined && Number.isFinite(seconds)) job.progress = outputDuration > 0 ? Math.min(99.5, Math.max(0, seconds / outputDuration * 100)) : 0; else if (key === 'speed') job.speed = value; else if (key === 'frame') job.frame = Number(value) || job.frame; };
-  child.stdout.on('data', (chunk) => { stdoutBuffer += chunk.toString(); let newline = stdoutBuffer.indexOf('\n'); while (newline >= 0) { handleLine(stdoutBuffer.slice(0, newline).trim()); stdoutBuffer = stdoutBuffer.slice(newline + 1); newline = stdoutBuffer.indexOf('\n'); } }); child.stderr.on('data', (chunk) => { stderr = `${stderr}${chunk.toString()}`.slice(-12000); }); child.on('error', (error) => { job.state = 'failed'; job.error = error.message; }); child.on('close', (code) => { if (exportProcesses.get(projectId) === child) exportProcesses.delete(projectId); if (job.stopRequested) { job.state = 'stopped'; job.speed = 'Stopped'; } else if (code === 0) { job.state = 'completed'; job.progress = 100; } else if (job.state !== 'failed') { job.state = 'failed'; job.error = stderr || `FFmpeg exited with code ${code}`; } });
-}
 function route(handler: (req: express.Request, res: express.Response) => Promise<void>) { return (req: express.Request, res: express.Response) => { handler(req, res).catch((error) => res.status(500).json({ error: error instanceof Error ? error.message : String(error) })); }; }
+
+function clipForRange(project: Project, range: { start: number; end: number }) { const clip = clipAtTimelineTime(project, Math.min(range.end - 0.0001, range.start + 0.0001)); if (!clip || range.end > clip.timelineEnd + 0.001) throw new Error('Render range crosses a source clip boundary'); return clip; }
+function timelineAudioArgs(project: Project, segments: Array<{ start: number; end: number }>, outputPath: string) {
+  const pieces = segments.flatMap((segment) => splitTimelineRange(project, segment.start, segment.end)); if (!pieces.length) throw new Error('The audio timeline is empty');
+  const inputs = pieces.flatMap((piece) => ['-ss', piece.localStart.toFixed(6), '-t', (piece.localEnd - piece.localStart).toFixed(6), '-i', piece.clip.sourcePath]);
+  if (pieces.length === 1) return [...inputs, '-map', '0:a:0', '-vn', '-c:a', 'aac', '-b:a', '256k', outputPath];
+  const prepared = pieces.map((_piece, index) => `[${index}:a]asetpts=PTS-STARTPTS[a${index}]`).join(';'); const labels = pieces.map((_piece, index) => `[a${index}]`).join(''); const filter = `${prepared};${labels}concat=n=${pieces.length}:v=0:a=1[aout]`;
+  return [...inputs, '-filter_complex', filter, '-map', '[aout]', '-vn', '-c:a', 'aac', '-b:a', '256k', outputPath];
+}
+
+function localPlanForClip(plan: BrollPlan, clip: ProjectClip) {
+  const scenes = plan.scenes.filter((scene) => scene.enabled && scene.sourceEnd > clip.timelineStart && scene.sourceStart < clip.timelineEnd).map((scene) => ({ ...scene, sourceStart: Math.max(scene.sourceStart, clip.timelineStart) - clip.timelineStart, sourceEnd: Math.min(scene.sourceEnd, clip.timelineEnd) - clip.timelineStart }));
+  return { ...plan, settings: { ...plan.settings, workflowMode: 'raw-video' as const }, scenes };
+}
+function presenterMatteSpecForClip(plan: BrollPlan, clip: ProjectClip): PresenterMatteSpecInput {
+  const localPlan = localPlanForClip(plan, clip);
+  const defaultTemplate = localPlan.settings.displayTemplate || 'full-frame';
+  const windows = localPlan.scenes
+    .filter((scene) => scene.enabled && (scene.imageFile || scene.videoFile) && displayTemplateNeedsPresenterMatte(scene.displayTemplate || defaultTemplate))
+    .map((scene) => ({ start: scene.sourceStart, end: scene.sourceEnd }));
+  return {
+    fps: clip.media.frameRate || 30,
+    sourceDuration: clip.media.duration,
+    width: clip.media.width || 1080,
+    height: clip.media.height || 1920,
+    windows,
+  };
+}
+async function ensureProjectPresenterMattes(project: Project, plan: BrollPlan, ffmpegBin: string, onProgress?: (completed: number, total: number, clip: ProjectClip) => void) {
+  const result = new Map<string, string>();
+  const clips = projectClips(project).filter((clip) => planNeedsPresenterMatte(localPlanForClip(plan, clip)));
+  for (let index = 0; index < clips.length; index += 1) {
+    const clip = clips[index]; onProgress?.(index, clips.length, clip); const clipDir = path.join(project.workDir, 'clips', clip.id); const matte = await ensurePresenterMatte({ workDir: clipDir, sourcePath: clip.sourcePath, proxyPath: clip.proxyPath, width: clip.media.width, height: clip.media.height, ffmpegBin, spec: presenterMatteSpecForClip(plan, clip) }); if (!matte.maskPath) throw new Error(`Presenter matte was not created for ${clip.sourceName}`); result.set(clip.id, matte.maskPath); onProgress?.(index + 1, clips.length, clip);
+  }
+  return result;
+}
 
 app.get('/api/system/status', route(async (_req, res) => { res.json(await systemStatus()); }));
 app.get('/api/settings', route(async (_req, res) => { const status = await systemStatus(); res.json({ ...status, overrides: { codexBin: localSettings.codexBin ?? '', grokBin: localSettings.grokBin ?? '', ffmpegBin: localSettings.ffmpegBin ?? '', ffprobeBin: localSettings.ffprobeBin ?? '', projectsDir: localSettings.projectsDir ?? '', imageProvider: localSettings.imageProvider ?? '', openAiImageModel: localSettings.openAiImageModel ?? '', geminiImageModel: localSettings.geminiImageModel ?? '', grokModel: localSettings.grokModel ?? '', grokVideoModel: localSettings.grokVideoModel ?? '' } }); }));
@@ -346,9 +444,10 @@ app.get('/api/projects', route(async (_req, res) => {
 }));
 
 app.post('/api/projects/select', route(async (_req, res) => {
-  const sourcePath = await pickNativeFile(); if (!sourcePath) return void res.status(400).json({ error: 'No video selected' });
-  const settings = await resolvedSettings(); const id = randomUUID(); const workDir = path.join(settings.projectsDir, id); await fs.mkdir(workDir, { recursive: true }); const now = new Date().toISOString(); const sourceName = path.basename(sourcePath);
-  const project: Project = { id, name: sourceName.replace(/\.[^.]+$/, ''), createdAt: now, updatedAt: now, sourcePath, sourceName, workDir, media: await probe(sourcePath) };
+  const sourcePaths = await pickNativeFiles(); if (!sourcePaths.length) return void res.status(400).json({ error: 'No video clips selected' }); const probed = await Promise.all(sourcePaths.map(async (sourcePath) => ({ sourcePath, media: await probe(sourcePath) }))); assertCompatibleClips(probed);
+  const settings = await resolvedSettings(); const id = randomUUID(); const workDir = path.join(settings.projectsDir, id); await fs.mkdir(workDir, { recursive: true }); const now = new Date().toISOString(); const firstName = path.basename(sourcePaths[0]);
+  const clips: ProjectClip[] = probed.map((item, index) => ({ id: `clip-${String(index + 1).padStart(3, '0')}`, sourcePath: item.sourcePath, sourceName: path.basename(item.sourcePath), media: item.media, timelineStart: 0, timelineEnd: 0 }));
+  const project: Project = { id, name: firstName.replace(/\.[^.]+$/, ''), createdAt: now, updatedAt: now, sourcePath: sourcePaths[0], sourceName: firstName, clips, workDir, media: { ...probed[0].media } }; syncProjectTimeline(project);
   projects.set(id, project); await saveProject(project, false); res.json(await summarizeProject(project, null));
 }));
 
@@ -369,15 +468,15 @@ app.delete('/api/projects/:id', route(async (req, res) => {
 }));
 
 app.post('/api/projects/:id/relink', route(async (req, res) => {
-  const project = getProject(routeParam(req.params.id)); const sourcePath = await pickNativeFile(`Relink source for ${project.name}`); if (!sourcePath) return void res.status(400).json({ error: 'Relink cancelled' });
-  const media = await probe(sourcePath); const durationTolerance = Math.max(1.5, (project.media.duration || 0) * 0.02); const durationMismatch = Math.abs((media.duration || 0) - (project.media.duration || 0)) > durationTolerance; const dimensionsMismatch = Boolean(project.media.width && project.media.height && media.width && media.height && (project.media.width !== media.width || project.media.height !== media.height));
-  if (durationMismatch || dimensionsMismatch) return void res.status(409).json({ error: `Selected video does not match this project. Expected roughly ${project.media.width || '?'}×${project.media.height || '?'} and ${project.media.duration.toFixed(1)}s.` });
-  project.sourcePath = sourcePath; project.sourceName = path.basename(sourcePath); project.media = media; await touchProject(project); res.json(await summarizeProject(project, brollPlans.get(project.id)));
+  const project = getProject(routeParam(req.params.id)); const clips = projectClips(project); let target = clips[0];
+  for (const clip of clips) { const available = await fs.stat(clip.sourcePath).then((stat) => stat.isFile()).catch(() => false); if (!available) { target = clip; break; } }
+  const sourcePath = await pickNativeFile(`Relink ${target.sourceName}`); if (!sourcePath) return void res.status(400).json({ error: 'Relink cancelled' }); const media = await probe(sourcePath); const durationTolerance = Math.max(1.5, (target.media.duration || 0) * 0.02); const durationMismatch = Math.abs((media.duration || 0) - (target.media.duration || 0)) > durationTolerance; const dimensionsMismatch = Boolean(target.media.width && target.media.height && media.width && media.height && (target.media.width !== media.width || target.media.height !== media.height));
+  if (durationMismatch || dimensionsMismatch) return void res.status(409).json({ error: `Selected video does not match ${target.sourceName}. Expected roughly ${target.media.width || '?'}×${target.media.height || '?'} and ${target.media.duration.toFixed(1)}s.` });
+  target.sourcePath = sourcePath; target.sourceName = path.basename(sourcePath); target.media = { ...target.media, ...media }; syncProjectTimeline(project); await touchProject(project); res.json(await summarizeProject(project, brollPlans.get(project.id)));
 }));
 
 app.post('/api/projects/:id/prepare', route(async (req, res) => {
-  const project = getProject(routeParam(req.params.id)); await requireSource(project); const settings = await resolvedSettings(); if (!settings.ffmpegBin) throw new Error('FFmpeg was not found.'); const capabilities = await ffmpegCapabilities(settings.ffmpegBin); const audioPath = path.join(project.workDir, 'analysis.m4a'); const proxyPath = path.join(project.workDir, 'proxy.mp4'); const dimensions = proxySize(project.media); const inputAcceleration = capabilities.videoToolboxDecode ? ['-hwaccel', 'videotoolbox'] : []; const proxyEncoder = capabilities.h264VideoToolbox ? ['-c:v', 'h264_videotoolbox', '-realtime', '1', '-prio_speed', '1', '-allow_sw', '1', '-b:v', '1500k', '-maxrate', '2500k', '-bufsize', '4M'] : ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '28'];
-  await run(settings.ffmpegBin, ['-hide_banner', '-y', ...inputAcceleration, '-i', project.sourcePath, '-map', '0:v:0', '-map', '0:a:0', '-vf', `scale=${dimensions.width}:${dimensions.height}:flags=fast_bilinear,fps=30,format=yuv420p`, ...proxyEncoder, '-c:a', 'aac', '-b:a', '96k', '-movflags', '+faststart', proxyPath, '-map', '0:a:0', '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'aac', '-b:a', '48k', audioPath]); project.audioPath = audioPath; project.proxyPath = proxyPath; await touchProject(project); res.json({ proxyUrl: `/api/projects/${project.id}/proxy`, proxy: { width: dimensions.width, height: dimensions.height, fps: 30, hardware: capabilities.h264VideoToolbox } });
+  const project = getProject(routeParam(req.params.id)); const result = await prepareProjectMedia(project, true); res.json({ proxyUrl: `/api/projects/${project.id}/proxy`, proxy: { width: result.dimensions.width, height: result.dimensions.height, fps: 30, hardware: result.hardware } });
 }));
 app.get('/api/projects/:id/proxy', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); if (!project.proxyPath) throw new Error('Proxy has not been generated yet'); res.sendFile(project.proxyPath); }));
 app.post('/api/projects/:id/transcribe', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const transcript = await transcribeProject(project); res.json({ transcript, edl: project.edl }); }));
@@ -386,23 +485,25 @@ app.post('/api/projects/:id/clean', route(async (req, res) => {
   const schemaPath = path.join(project.workDir, 'edl.schema.json'); const outputPath = path.join(project.workDir, 'codex-edl.json'); await atomicWriteJson(schemaPath, EDL_SCHEMA); const transcript = project.transcript!.words.map((word) => `[${word.id} ${word.start.toFixed(3)}-${word.end.toFixed(3)}] ${word.text}`).join('\n'); const prompt = `You are a professional talking-head dialogue cleaning editor.\n\nThis is DELETE-ONLY editing. Never invent, paraphrase, replace, reorder, or combine spoken words. Keep source chronology. Return only ranges of ORIGINAL words to keep.\n\nCleanup intensity: ${intensity}.\nLight: remove clear fillers, abandoned false starts, duplicate takes, and excessive dead space only.\nBalanced: also remove low-value repetition and concise tangents while preserving natural speech.\nAggressive: optimize pacing strongly, but preserve meaning and grammatical continuity.\n\nPrefer natural cut points.\n\nSOURCE WORDS:\n${transcript}`;
   await run(settings.codexBin, ['exec', '--ephemeral', '--output-schema', schemaPath, '--output-last-message', outputPath, '-'], prompt); project.edl = validateEdl(project.transcript!.words, JSON.parse(await fs.readFile(outputPath, 'utf8'))); await invalidateBroll(project); await Promise.all([atomicWriteJson(path.join(project.workDir, 'edl.json'), project.edl), touchProject(project)]); res.json(project.edl);
 }));
-app.put('/api/projects/:id/edl', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); if (!project.transcript) throw new Error('Missing transcript'); project.edl = validateEdl(project.transcript.words, { keepRanges: req.body?.keepRanges, notes: ['Manually adjusted'] }); await invalidateBroll(project); await Promise.all([atomicWriteJson(path.join(project.workDir, 'edl.json'), project.edl), touchProject(project)]); res.json(project.edl); }));
+app.put('/api/projects/:id/edl', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); if (!project.transcript) throw new Error('Missing transcript'); project.edl = validateEdl(project.transcript.words, { keepRanges: req.body?.keepRanges, notes: ['Manually adjusted'] }); await Promise.all([atomicWriteJson(path.join(project.workDir, 'edl.json'), project.edl), touchProject(project)]); res.json(project.edl); }));
 
 app.post('/api/projects/:id/broll/plan', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const settings = await resolvedSettings(); if (!settings.codexBin) throw new Error('Codex CLI was not found; it is required for B-roll scene planning.'); const transcript = await transcribeProject(project); const requested = (req.body?.settings ?? {}) as Partial<BrollPlanSettings>; const workflowMode = ['cleaned-video', 'raw-video', 'assets-only'].includes(String(requested.workflowMode)) ? requested.workflowMode : 'cleaned-video'; const keepRanges = workflowMode === 'cleaned-video' ? project.edl?.keepRanges : undefined; const orientation = (project.media.height || 0) > (project.media.width || 0) ? 'portrait' : 'landscape'; const plan = await createBrollPlan({ codexBin: settings.codexBin, workDir: project.workDir, words: transcript.words, keepRanges, orientation, settings: { ...requested, provider: requested.provider || settings.imageProvider } }); brollPlans.set(project.id, plan); await touchProject(project); res.json({ plan, transcript, edl: project.edl }); }));
 app.get('/api/projects/:id/broll', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const cached = brollPlans.get(project.id); if (cached) return void res.json(cached); const plan = await loadBrollPlan(project.workDir); if (!plan) return void res.status(404).json({ error: 'B-roll plan has not been created yet' }); brollPlans.set(project.id, plan); res.json(plan); }));
 app.put('/api/projects/:id/broll/scenes/:sceneId', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id)); const sceneId = routeParam(req.params.sceneId); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet');
   const displayTemplate = req.body?.displayTemplate === 'default' ? 'default' : typeof req.body?.displayTemplate === 'string' ? displayTemplateValue(req.body.displayTemplate) : undefined;
-  const scene = await updateBrollScene(project.workDir, plan, sceneId, { title: typeof req.body?.title === 'string' ? req.body.title : undefined, imagePrompt: typeof req.body?.imagePrompt === 'string' ? req.body.imagePrompt : undefined, videoPrompt: typeof req.body?.videoPrompt === 'string' ? req.body.videoPrompt : undefined, sourceStart: Number.isFinite(Number(req.body?.sourceStart)) ? Number(req.body.sourceStart) : undefined, sourceEnd: Number.isFinite(Number(req.body?.sourceEnd)) ? Number(req.body.sourceEnd) : undefined, enabled: typeof req.body?.enabled === 'boolean' ? req.body.enabled : undefined, displayTemplate }); brollPlans.set(project.id, plan); await touchProject(project); res.json(scene);
+  const assetAspectRatio = ['auto', '9:16', '16:9'].includes(String(req.body?.assetAspectRatio)) ? req.body.assetAspectRatio as 'auto' | '9:16' | '16:9' : undefined;
+  const scene = await updateBrollScene(project.workDir, plan, sceneId, { title: typeof req.body?.title === 'string' ? req.body.title : undefined, imagePrompt: typeof req.body?.imagePrompt === 'string' ? req.body.imagePrompt : undefined, videoPrompt: typeof req.body?.videoPrompt === 'string' ? req.body.videoPrompt : undefined, sourceStart: Number.isFinite(Number(req.body?.sourceStart)) ? Number(req.body.sourceStart) : undefined, sourceEnd: Number.isFinite(Number(req.body?.sourceEnd)) ? Number(req.body.sourceEnd) : undefined, enabled: typeof req.body?.enabled === 'boolean' ? req.body.enabled : undefined, displayTemplate, assetAspectRatio }); brollPlans.set(project.id, plan); await touchProject(project); res.json(scene);
 }));
 app.delete('/api/projects/:id/broll/scenes/:sceneId', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet'); const updated = await deleteBrollScene(project.workDir, plan, routeParam(req.params.sceneId)); brollPlans.set(project.id, updated); await touchProject(project); res.json(updated); }));
 
 app.get('/api/projects/:id/presenter-matte', route(async (req, res) => {
-  const project = getProject(routeParam(req.params.id)); res.json(await presenterMatteStatus(project.workDir, project.sourcePath));
+  const project = getProject(routeParam(req.params.id)); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan || !planNeedsPresenterMatte(plan)) return void res.json({ ready: false, stale: false }); const statuses = [];
+  for (const clip of projectClips(project)) { const clipPlan = localPlanForClip(plan, clip); if (planNeedsPresenterMatte(clipPlan)) statuses.push(await presenterMatteStatus(path.join(project.workDir, 'clips', clip.id), clip.sourcePath, presenterMatteSpecForClip(plan, clip))); }
+  res.json({ ready: statuses.length > 0 && statuses.every((status) => status.ready), stale: statuses.some((status) => status.stale), generatedAt: statuses.map((status) => status.generatedAt).filter(Boolean).sort().at(-1) });
 }));
 app.post('/api/projects/:id/presenter-matte', route(async (req, res) => {
-  const project = getProject(routeParam(req.params.id)); await requireSource(project); const settings = await resolvedSettings(); if (!settings.ffmpegBin) throw new Error('FFmpeg was not found.');
-  const result = await ensurePresenterMatte({ workDir: project.workDir, sourcePath: project.sourcePath, proxyPath: project.proxyPath, width: project.media.width, height: project.media.height, ffmpegBin: settings.ffmpegBin }); await touchProject(project); res.json(result);
+  const project = getProject(routeParam(req.params.id)); await requireSource(project); const settings = await resolvedSettings(); if (!settings.ffmpegBin) throw new Error('FFmpeg was not found.'); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan || !planNeedsPresenterMatte(plan)) return void res.json({ ready: false, stale: false }); const mattes = await ensureProjectPresenterMattes(project, plan, settings.ffmpegBin); await touchProject(project); res.json({ ready: mattes.size > 0, stale: false, generatedAt: new Date().toISOString(), clips: mattes.size });
 }));
 
 app.post('/api/projects/:id/broll/scenes/:sceneId/generate', route(async (req, res) => {
@@ -430,36 +531,48 @@ app.get('/api/projects/:id/broll/scenes/:sceneId/preview', route(async (req, res
 
 app.post('/api/projects/:id/broll/export-assets', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id)); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet'); const selectedFolder = await pickFolderPath(); if (!selectedFolder) return void res.status(400).json({ error: 'Export cancelled' }); const destination = path.join(selectedFolder, `video-cleaner-broll-${project.id.slice(0, 8)}`); await fs.mkdir(destination, { recursive: true }); const scenes = [];
-  for (const scene of plan.scenes) { let imageFile: string | null = null; let videoFile: string | null = null; if (scene.imageFile) { imageFile = `${scene.id}.png`; await fs.copyFile(scene.imageFile, path.join(destination, imageFile)); } if (scene.videoFile) { videoFile = `${scene.id}.mp4`; await fs.copyFile(scene.videoFile, path.join(destination, videoFile)); } scenes.push({ id: scene.id, title: scene.title, enabled: scene.enabled, sourceStart: scene.sourceStart, sourceEnd: scene.sourceEnd, startWordId: scene.startWordId, endWordId: scene.endWordId, narration: scene.narration, visualIntent: scene.visualIntent, shotType: scene.shotType, imagePrompt: scene.imagePrompt, videoPrompt: scene.videoPrompt || null, displayTemplate: scene.displayTemplate || plan.settings.displayTemplate || 'full-frame', provider: scene.provider || plan.settings.provider, model: scene.model || null, imageFile, videoFile, videoModel: scene.videoModel || null }); }
-  const timing = { version: 2, sourceName: project.sourceName, workflowMode: plan.settings.workflowMode, orientation: plan.orientation, settings: plan.settings, scenes }; await atomicWriteJson(path.join(destination, 'broll-timing.json'), timing); await fs.writeFile(path.join(destination, 'README.txt'), 'B-roll images/videos and editable timing data exported by Video Cleaner. Edit broll-timing.json or import the files into any editor.\n'); res.json({ destination, sceneCount: scenes.length });
+  for (const scene of plan.scenes) { let imageFile: string | null = null; let videoFile: string | null = null; if (scene.imageFile) { imageFile = `${scene.id}.png`; await fs.copyFile(scene.imageFile, path.join(destination, imageFile)); } if (scene.videoFile) { videoFile = `${scene.id}.mp4`; await fs.copyFile(scene.videoFile, path.join(destination, videoFile)); } scenes.push({ id: scene.id, title: scene.title, enabled: scene.enabled, sourceStart: scene.sourceStart, sourceEnd: scene.sourceEnd, startWordId: scene.startWordId, endWordId: scene.endWordId, narration: scene.narration, visualIntent: scene.visualIntent, shotType: scene.shotType, imagePrompt: scene.imagePrompt, videoPrompt: scene.videoPrompt || null, displayTemplate: scene.displayTemplate || plan.settings.displayTemplate || 'full-frame', assetAspectRatio: scene.assetAspectRatio || 'auto', generatedAspectRatio: scene.generatedAspectRatio || null, orientationChanged: Boolean(scene.orientationChanged), provider: scene.provider || plan.settings.provider, model: scene.model || null, imageFile, videoFile, videoModel: scene.videoModel || null }); }
+  const timing = { version: 2, sourceName: project.sourceName, clips: projectClips(project).map((clip) => ({ id: clip.id, sourceName: clip.sourceName, timelineStart: clip.timelineStart, timelineEnd: clip.timelineEnd })), workflowMode: plan.settings.workflowMode, orientation: plan.orientation, settings: plan.settings, scenes }; await atomicWriteJson(path.join(destination, 'broll-timing.json'), timing); await fs.writeFile(path.join(destination, 'README.txt'), 'B-roll images/videos and editable timing data exported by Video Cleaner. Edit broll-timing.json or import the files into any editor.\n'); res.json({ destination, sceneCount: scenes.length });
 }));
 
 app.post('/api/projects/:id/broll/export-video', route(async (req, res) => {
   const projectId = routeParam(req.params.id); const project = getProject(projectId); await requireSource(project); const settings = await resolvedSettings(); const storedPlan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!storedPlan) throw new Error('B-roll plan has not been created yet'); if (storedPlan.settings.workflowMode === 'assets-only') throw new Error('Assets-only projects export files and timing JSON, not a rendered video'); if (!settings.ffmpegBin) throw new Error('FFmpeg was not found');
-  const active = exportJobs.get(projectId); if (active?.state === 'running') return void res.status(409).json({ error: 'An export is already running for this project' }); const outputPath = await pickExportPath('video-with-broll.mp4', 'Export video with B-roll'); if (!outputPath) return void res.status(400).json({ error: 'Export cancelled' });
-  const plan = storedPlan;
-  const mode: 'fast' | 'quality' = req.body?.mode === 'fast' ? 'fast' : 'quality'; const fps = project.media.frameRate && project.media.frameRate > 0 ? project.media.frameRate : 30; const cleanedSegments = plan.settings.workflowMode === 'cleaned-video' ? rangesToSeconds(project) : undefined;
-  const activeSceneCount = plan.scenes.filter((scene) => scene.enabled && (scene.videoFile || scene.imageFile)).length; let mattePath: string | undefined;
-  if (planNeedsPresenterMatte(plan)) {
-    const matte = await ensurePresenterMatte({ workDir: project.workDir, sourcePath: project.sourcePath, proxyPath: project.proxyPath, width: project.media.width, height: project.media.height, ffmpegBin: settings.ffmpegBin });
-    mattePath = matte.maskPath;
-    if (!mattePath) throw new Error('Presenter matte generation did not produce a mask video');
-  }
-  const capabilities = await ffmpegCapabilities(settings.ffmpegBin); const encoding = encodingArgs(project, capabilities, mode); const inputAcceleration = capabilities.videoToolboxDecode ? ['-hwaccel', 'videotoolbox'] : [];
-  const sourceSegments = cleanedSegments?.length ? cleanedSegments : [{ start: 0, end: project.media.duration }]; const activeScenes = plan.scenes.filter((scene) => scene.enabled && (scene.videoFile || scene.imageFile)); const ranges = checkpointRanges(sourceSegments, activeScenes); if (!ranges.length) throw new Error('The export timeline is empty');
-  const fingerprint = await checkpointFingerprint({ project, plan, mattePath, mode, segments: sourceSegments, encodingArgs: encoding.args, fps }); const checkpointRoot = path.join(project.workDir, 'render-checkpoints'); const sessionDir = path.join(checkpointRoot, fingerprint); await fs.mkdir(checkpointRoot, { recursive: true });
-  for (const entry of await fs.readdir(checkpointRoot, { withFileTypes: true })) if (entry.isDirectory() && entry.name !== fingerprint) await fs.rm(path.join(checkpointRoot, entry.name), { recursive: true, force: true }); await fs.mkdir(sessionDir, { recursive: true });
-  const buildPartArgs = (range: CheckpointRange, partOutputPath: string) => {
-    const prepared = activeScenes.filter((scene) => scene.sourceEnd > range.start && scene.sourceStart < range.end).map((scene) => ({ original: scene, local: { ...scene, sourceStart: Math.max(scene.sourceStart, range.start) - range.start, sourceEnd: Math.min(scene.sourceEnd, range.end) - range.start } })); const chunkPlan: BrollPlan = { ...plan, settings: { ...plan.settings, workflowMode: 'raw-video' }, scenes: prepared.map((item) => item.local) }; const needsPresenter = planNeedsPresenterMatte(chunkPlan); const filter = prepared.length ? buildBrollOverlayFilter({ plan: chunkPlan, width: project.media.width || 1920, height: project.media.height || 1080, fps, presenterInputIndex: needsPresenter ? prepared.length + 1 : undefined, includeAudio: false }).filter : '[0:v]setpts=PTS-STARTPTS[vout]';
-    const brollInputs = prepared.flatMap(({ original }) => { const offset = Math.max(0, range.start - original.sourceStart); return original.videoFile ? ['-stream_loop', '-1', ...(offset > 0.001 ? ['-ss', offset.toFixed(6)] : []), ...inputAcceleration, '-i', original.videoFile] : ['-loop', '1', '-framerate', String(Math.min(30, fps)), '-i', original.imageFile!]; }); const presenterInput = needsPresenter && mattePath ? ['-ss', range.start.toFixed(6), '-t', range.duration.toFixed(6), ...inputAcceleration, '-i', mattePath] : [];
-    return ['-ss', range.start.toFixed(6), '-t', range.duration.toFixed(6), ...inputAcceleration, '-i', project.sourcePath, ...brollInputs, ...presenterInput, '-filter_complex', filter, '-map', '[vout]', '-an', '-t', range.duration.toFixed(6), '-fps_mode', 'passthrough', ...encoding.args, ...colorArgs(project), '-movflags', '+faststart', partOutputPath];
-  };
-  const audioArgs = (audioOutputPath: string) => { const expression = sourceSegments.map((segment) => `between(t\\,${segment.start.toFixed(6)}\\,${segment.end.toFixed(6)})`).join('+'); return ['-i', project.sourcePath, '-filter_complex', `[0:a]aselect='${expression}',asetpts=N/SR/TB[aout]`, '-map', '[aout]', '-vn', '-c:a', 'aac', '-b:a', '256k', audioOutputPath]; };
-  launchCheckpointExport({ projectId, command: settings.ffmpegBin, sessionDir, fingerprint, outputPath, encoder: encoding.encoder, ranges, buildPartArgs, audioArgs });
-  res.status(202).json({ started: true, outputPath, encoder: encoding.encoder, hardware: encoding.hardware, targetBitRate: encoding.targetBitRate, brollScenes: activeScenes.length, presenterMatte: Boolean(mattePath), checkpoints: ranges.length });
+  const active = exportJobs.get(projectId); if (active?.state === 'running') return void res.status(409).json({ error: 'An export is already running for this project' }); const outputPath = await pickExportPath('video-with-broll.mp4', 'Export video with B-roll'); if (!outputPath) return void res.status(400).json({ error: 'Export cancelled' }); const plan = storedPlan;
+  const mode: 'fast' | 'quality' = req.body?.mode === 'fast' ? 'fast' : 'quality'; const fps = project.media.frameRate && project.media.frameRate > 0 ? project.media.frameRate : 30; const cleanedSegments = plan.settings.workflowMode === 'cleaned-video' ? rangesToSeconds(project) : undefined; const rawSegments = cleanedSegments?.length ? cleanedSegments : [{ start: 0, end: project.media.duration }]; const sourceSegments = splitSegmentsAtClipBoundaries(project, rawSegments);
+  const activeScenes = plan.scenes.filter((scene) => scene.enabled && (scene.videoFile || scene.imageFile)); const needsPresenterMatte = planNeedsPresenterMatte(plan);
+  const capabilities = await ffmpegCapabilities(settings.ffmpegBin); const outputHdr = project.media.hdr; const encoding = encodingArgs(project, capabilities, mode, !outputHdr); const inputAcceleration = capabilities.videoToolboxDecode ? ['-hwaccel', 'videotoolbox'] : []; const ranges = checkpointRanges(sourceSegments, activeScenes); if (!ranges.length) throw new Error('The export timeline is empty');
+  const preparingJob: ExportJob = { state: 'running', progress: 0, outTime: '00:00:00.000000', speed: needsPresenterMatte ? 'Preparing presenter cutouts…' : 'Preparing render checkpoints…', frame: 0, outputPath, encoder: encoding.encoder, checkpointCompleted: 0, checkpointTotal: ranges.length, resumable: false, startedAt: Date.now() }; exportJobs.set(projectId, preparingJob);
+
+  void (async () => {
+    try {
+      const mattePaths = needsPresenterMatte ? await ensureProjectPresenterMattes(project, plan, settings.ffmpegBin!, (completed, total, clip) => {
+        preparingJob.speed = `Preparing presenter cutouts ${Math.min(completed + 1, total)}/${total} · ${clip.sourceName}`;
+      }) : new Map<string, string>();
+      preparingJob.speed = 'Preparing render checkpoints…';
+      const fingerprint = await checkpointFingerprint({ project, plan, mattePaths: [...mattePaths.values()], mode, segments: sourceSegments, encodingArgs: encoding.args, fps }); const checkpointRoot = path.join(project.workDir, 'render-checkpoints'); const sessionDir = path.join(checkpointRoot, fingerprint); await fs.mkdir(checkpointRoot, { recursive: true });
+      for (const entry of await fs.readdir(checkpointRoot, { withFileTypes: true })) if (entry.isDirectory() && entry.name !== fingerprint) await fs.rm(path.join(checkpointRoot, entry.name), { recursive: true, force: true }); await fs.mkdir(sessionDir, { recursive: true });
+      const buildPartArgs = (range: CheckpointRange, partOutputPath: string) => {
+        const clip = clipForRange(project, range); const localStart = range.start - clip.timelineStart; const prepared = activeScenes.filter((scene) => scene.sourceEnd > range.start && scene.sourceStart < range.end).map((scene) => ({ original: scene, local: { ...scene, sourceStart: Math.max(scene.sourceStart, range.start) - range.start, sourceEnd: Math.min(scene.sourceEnd, range.end) - range.start } })); const chunkPlan: BrollPlan = { ...plan, settings: { ...plan.settings, workflowMode: 'raw-video' }, scenes: prepared.map((item) => item.local) }; const needsPresenter = planNeedsPresenterMatte(chunkPlan); const baseVideoFilter = outputHdr ? hlgBt2020VideoFilter() : sdrBt709VideoFilter(clip.media); const filter = prepared.length ? buildBrollOverlayFilter({ plan: chunkPlan, width: project.media.width || 1920, height: project.media.height || 1080, fps, presenterInputIndex: needsPresenter ? prepared.length + 1 : undefined, includeAudio: false, baseVideoFilter, outputHdr }).filter : `[0:v]${baseVideoFilter},setpts=PTS-STARTPTS[vout]`;
+        const brollInputs = prepared.flatMap(({ original }) => { const offset = Math.max(0, range.start - original.sourceStart); return original.videoFile ? ['-stream_loop', '-1', ...(offset > 0.001 ? ['-ss', offset.toFixed(6)] : []), ...inputAcceleration, '-i', original.videoFile] : ['-loop', '1', '-framerate', String(Math.min(30, fps)), '-i', original.imageFile!]; }); const mattePath = mattePaths.get(clip.id); const presenterInput = needsPresenter && mattePath ? ['-ss', localStart.toFixed(6), '-t', range.duration.toFixed(6), ...inputAcceleration, '-i', mattePath] : [];
+        return ['-ss', localStart.toFixed(6), '-t', range.duration.toFixed(6), ...inputAcceleration, '-i', clip.sourcePath, ...brollInputs, ...presenterInput, '-filter_complex', filter, '-map', '[vout]', '-an', '-t', range.duration.toFixed(6), '-fps_mode', 'passthrough', ...encoding.args, ...(outputHdr ? colorArgs(project) : bt709ColorArgs()), '-movflags', '+faststart', partOutputPath];
+      };
+      const audioArgs = (audioOutputPath: string) => timelineAudioArgs(project, sourceSegments, audioOutputPath);
+      launchCheckpointExport({ projectId, command: settings.ffmpegBin!, sessionDir, fingerprint, outputPath, encoder: encoding.encoder, ranges, buildPartArgs, audioArgs });
+    } catch (error) {
+      preparingJob.state = 'failed'; preparingJob.speed = ''; preparingJob.error = error instanceof Error ? error.message : String(error);
+    }
+  })();
+  res.status(202).json({ started: true, outputPath, encoder: encoding.encoder, hardware: encoding.hardware, targetBitRate: encoding.targetBitRate, brollScenes: activeScenes.length, presenterMatte: needsPresenterMatte, checkpoints: ranges.length, clips: projectClips(project).length });
 }));
 
-app.post('/api/projects/:id/export', route(async (req, res) => { const projectId = routeParam(req.params.id); const project = getProject(projectId); await requireSource(project); const settings = await resolvedSettings(); if (!project.transcript || !project.edl) throw new Error('Missing transcript or edit decision list'); if (!settings.ffmpegBin) throw new Error('FFmpeg was not found'); const active = exportJobs.get(projectId); if (active?.state === 'running') return void res.status(409).json({ error: 'An export is already running for this project' }); const outputPath = await pickExportPath(); if (!outputPath) return void res.status(400).json({ error: 'Export cancelled' }); const mode: 'fast' | 'quality' = req.body?.mode === 'fast' ? 'fast' : 'quality'; const segments = rangesToSeconds(project); const outputDuration = segments.reduce((sum, segment) => sum + Math.max(0, segment.end - segment.start), 0); const fps = project.media.frameRate && project.media.frameRate > 0 ? project.media.frameRate : 30; const capabilities = await ffmpegCapabilities(settings.ffmpegBin); const encoding = encodingArgs(project, capabilities, mode); const inputAcceleration = capabilities.videoToolboxDecode ? ['-hwaccel', 'videotoolbox'] : []; const args = [...inputAcceleration, '-i', project.sourcePath, '-filter_complex', buildTimelineFilter(segments, fps), '-map', '[vout]', '-map', '[aout]', '-fps_mode', 'passthrough', ...encoding.args, ...colorArgs(project), '-c:a', 'aac', '-b:a', '256k', '-movflags', '+faststart', outputPath]; launchExport(projectId, settings.ffmpegBin, args, outputDuration, outputPath, encoding.encoder); res.status(202).json({ started: true, outputPath, encoder: encoding.encoder, hardware: encoding.hardware, targetBitRate: encoding.targetBitRate }); }));
+app.post('/api/projects/:id/export', route(async (req, res) => {
+  const projectId = routeParam(req.params.id); const project = getProject(projectId); await requireSource(project); const settings = await resolvedSettings(); if (!project.transcript || !project.edl) throw new Error('Missing transcript or edit decision list'); if (!settings.ffmpegBin) throw new Error('FFmpeg was not found'); const active = exportJobs.get(projectId); if (active?.state === 'running') return void res.status(409).json({ error: 'An export is already running for this project' }); const outputPath = await pickExportPath(); if (!outputPath) return void res.status(400).json({ error: 'Export cancelled' });
+  const mode: 'fast' | 'quality' = req.body?.mode === 'fast' ? 'fast' : 'quality'; const fps = project.media.frameRate && project.media.frameRate > 0 ? project.media.frameRate : 30; const sourceSegments = splitSegmentsAtClipBoundaries(project, rangesToSeconds(project)); const capabilities = await ffmpegCapabilities(settings.ffmpegBin); const encoding = encodingArgs(project, capabilities, mode); const inputAcceleration = capabilities.videoToolboxDecode ? ['-hwaccel', 'videotoolbox'] : []; const ranges = checkpointRanges(sourceSegments, []); if (!ranges.length) throw new Error('The export timeline is empty'); const fingerprint = await checkpointFingerprint({ project, mode, segments: sourceSegments, encodingArgs: encoding.args, fps }); const checkpointRoot = path.join(project.workDir, 'render-checkpoints'); const sessionDir = path.join(checkpointRoot, fingerprint); await fs.mkdir(checkpointRoot, { recursive: true });
+  for (const entry of await fs.readdir(checkpointRoot, { withFileTypes: true })) if (entry.isDirectory() && entry.name !== fingerprint) await fs.rm(path.join(checkpointRoot, entry.name), { recursive: true, force: true }); await fs.mkdir(sessionDir, { recursive: true });
+  const buildPartArgs = (range: CheckpointRange, partOutputPath: string) => { const clip = clipForRange(project, range); const localStart = range.start - clip.timelineStart; return ['-ss', localStart.toFixed(6), '-t', range.duration.toFixed(6), ...inputAcceleration, '-i', clip.sourcePath, '-map', '0:v:0', '-an', '-t', range.duration.toFixed(6), '-fps_mode', 'passthrough', ...encoding.args, ...colorArgs(project), '-movflags', '+faststart', partOutputPath]; };
+  launchCheckpointExport({ projectId, command: settings.ffmpegBin, sessionDir, fingerprint, outputPath, encoder: encoding.encoder, ranges, buildPartArgs, audioArgs: (audioOutputPath) => timelineAudioArgs(project, sourceSegments, audioOutputPath) });
+  res.status(202).json({ started: true, outputPath, encoder: encoding.encoder, hardware: encoding.hardware, targetBitRate: encoding.targetBitRate, checkpoints: ranges.length, clips: projectClips(project).length });
+}));
 app.get('/api/projects/:id/export-status', route(async (req, res) => { res.json(exportJobs.get(routeParam(req.params.id)) ?? { state: 'idle', progress: 0, outTime: '00:00:00.000000', speed: '', frame: 0 }); }));
 app.post('/api/projects/:id/export-stop', route(async (req, res) => { const projectId = routeParam(req.params.id); const job = exportJobs.get(projectId); if (!job || job.state !== 'running') return void res.status(409).json({ error: 'No export is currently running' }); job.stopRequested = true; job.speed = job.resumable ? 'Stopping after preserving checkpoints…' : 'Stopping…'; const child = exportProcesses.get(projectId); if (child) child.kill('SIGTERM'); res.status(202).json({ stopping: true, resumable: Boolean(job.resumable) }); }));
 

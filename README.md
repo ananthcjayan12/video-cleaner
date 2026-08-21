@@ -8,6 +8,12 @@ The browser is only the editor UI. The local Node service owns filesystem access
 
 Dialogue cleaning remains non-destructive: FFmpeg creates a tiny analysis-audio file and optional 30 fps proxy, ElevenLabs provides word timestamps, Codex returns a delete-only EDL, and final export reads the untouched master once.
 
+## Live narration transcript preview
+
+When a proxy and word-timestamp transcript are available, the transcript becomes a karaoke-style narration preview. The currently spoken word is highlighted from the existing ElevenLabs timestamps and the transcript auto-follows playback inside its own scroll area. Removed words remain visibly struck through and cleaned preview playback continues to skip removed EDL sections. In multi-clip projects the combined proxy and global word timestamps make highlighting continue across clip boundaries.
+
+The preview toolbar provides play/pause, restart, 0.75×–2× speed and an auto-follow toggle. Normal clicks still keep/remove words; Cmd-click on macOS or Ctrl-click on Windows/Linux seeks playback to that word without toggling its edit state. No extra transcription or model call is required.
+
 ## Local resumable project library
 
 Project folders are the source of truth. On startup the local Node service scans `~/VideoCleaner/projects` (or `PROJECTS_DIR`) and rebuilds the project library from `project.json` plus the files already present in each project directory. Closing the browser, stopping the Node service or rebooting the computer does not discard the project.
