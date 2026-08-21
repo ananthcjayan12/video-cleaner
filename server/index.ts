@@ -12,6 +12,7 @@ import {
   createBrollPlan,
   createVideoPrompt,
   deleteBrollScene,
+  displayTemplateNeedsPresenterMatte,
   generateBrollImage,
   generateBrollVideoWithGrokCli,
   importBrollImage,
@@ -23,7 +24,7 @@ import {
   type BrollPlanSettings,
   type ImageProvider,
 } from './broll.js';
-import { ensurePresenterMatte, mattingSystemStatus, presenterMatteStatus } from './presenter.js';
+import { ensurePresenterMatte, mattingSystemStatus, presenterMatteStatus, type PresenterMatteSpecInput } from './presenter.js';
 import {
   atomicWriteJson,
   clipAtTimelineTime,
@@ -390,10 +391,25 @@ function localPlanForClip(plan: BrollPlan, clip: ProjectClip) {
   const scenes = plan.scenes.filter((scene) => scene.enabled && scene.sourceEnd > clip.timelineStart && scene.sourceStart < clip.timelineEnd).map((scene) => ({ ...scene, sourceStart: Math.max(scene.sourceStart, clip.timelineStart) - clip.timelineStart, sourceEnd: Math.min(scene.sourceEnd, clip.timelineEnd) - clip.timelineStart }));
   return { ...plan, settings: { ...plan.settings, workflowMode: 'raw-video' as const }, scenes };
 }
-async function ensureProjectPresenterMattes(project: Project, plan: BrollPlan, ffmpegBin: string) {
+function presenterMatteSpecForClip(plan: BrollPlan, clip: ProjectClip): PresenterMatteSpecInput {
+  const localPlan = localPlanForClip(plan, clip);
+  const defaultTemplate = localPlan.settings.displayTemplate || 'full-frame';
+  const windows = localPlan.scenes
+    .filter((scene) => scene.enabled && (scene.imageFile || scene.videoFile) && displayTemplateNeedsPresenterMatte(scene.displayTemplate || defaultTemplate))
+    .map((scene) => ({ start: scene.sourceStart, end: scene.sourceEnd }));
+  return {
+    fps: clip.media.frameRate || 30,
+    sourceDuration: clip.media.duration,
+    width: clip.media.width || 1080,
+    height: clip.media.height || 1920,
+    windows,
+  };
+}
+async function ensureProjectPresenterMattes(project: Project, plan: BrollPlan, ffmpegBin: string, onProgress?: (completed: number, total: number, clip: ProjectClip) => void) {
   const result = new Map<string, string>();
-  for (const clip of projectClips(project)) {
-    const clipPlan = localPlanForClip(plan, clip); if (!clipPlan.scenes.length || !planNeedsPresenterMatte(clipPlan)) continue; const clipDir = path.join(project.workDir, 'clips', clip.id); const matte = await ensurePresenterMatte({ workDir: clipDir, sourcePath: clip.sourcePath, proxyPath: clip.proxyPath, width: clip.media.width, height: clip.media.height, ffmpegBin }); if (!matte.maskPath) throw new Error(`Presenter matte was not created for ${clip.sourceName}`); result.set(clip.id, matte.maskPath);
+  const clips = projectClips(project).filter((clip) => planNeedsPresenterMatte(localPlanForClip(plan, clip)));
+  for (let index = 0; index < clips.length; index += 1) {
+    const clip = clips[index]; onProgress?.(index, clips.length, clip); const clipDir = path.join(project.workDir, 'clips', clip.id); const matte = await ensurePresenterMatte({ workDir: clipDir, sourcePath: clip.sourcePath, proxyPath: clip.proxyPath, width: clip.media.width, height: clip.media.height, ffmpegBin, spec: presenterMatteSpecForClip(plan, clip) }); if (!matte.maskPath) throw new Error(`Presenter matte was not created for ${clip.sourceName}`); result.set(clip.id, matte.maskPath); onProgress?.(index + 1, clips.length, clip);
   }
   return result;
 }
@@ -456,7 +472,7 @@ app.post('/api/projects/:id/clean', route(async (req, res) => {
   const schemaPath = path.join(project.workDir, 'edl.schema.json'); const outputPath = path.join(project.workDir, 'codex-edl.json'); await atomicWriteJson(schemaPath, EDL_SCHEMA); const transcript = project.transcript!.words.map((word) => `[${word.id} ${word.start.toFixed(3)}-${word.end.toFixed(3)}] ${word.text}`).join('\n'); const prompt = `You are a professional talking-head dialogue cleaning editor.\n\nThis is DELETE-ONLY editing. Never invent, paraphrase, replace, reorder, or combine spoken words. Keep source chronology. Return only ranges of ORIGINAL words to keep.\n\nCleanup intensity: ${intensity}.\nLight: remove clear fillers, abandoned false starts, duplicate takes, and excessive dead space only.\nBalanced: also remove low-value repetition and concise tangents while preserving natural speech.\nAggressive: optimize pacing strongly, but preserve meaning and grammatical continuity.\n\nPrefer natural cut points.\n\nSOURCE WORDS:\n${transcript}`;
   await run(settings.codexBin, ['exec', '--ephemeral', '--output-schema', schemaPath, '--output-last-message', outputPath, '-'], prompt); project.edl = validateEdl(project.transcript!.words, JSON.parse(await fs.readFile(outputPath, 'utf8'))); await invalidateBroll(project); await Promise.all([atomicWriteJson(path.join(project.workDir, 'edl.json'), project.edl), touchProject(project)]); res.json(project.edl);
 }));
-app.put('/api/projects/:id/edl', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); if (!project.transcript) throw new Error('Missing transcript'); project.edl = validateEdl(project.transcript.words, { keepRanges: req.body?.keepRanges, notes: ['Manually adjusted'] }); await invalidateBroll(project); await Promise.all([atomicWriteJson(path.join(project.workDir, 'edl.json'), project.edl), touchProject(project)]); res.json(project.edl); }));
+app.put('/api/projects/:id/edl', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); if (!project.transcript) throw new Error('Missing transcript'); project.edl = validateEdl(project.transcript.words, { keepRanges: req.body?.keepRanges, notes: ['Manually adjusted'] }); await Promise.all([atomicWriteJson(path.join(project.workDir, 'edl.json'), project.edl), touchProject(project)]); res.json(project.edl); }));
 
 app.post('/api/projects/:id/broll/plan', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const settings = await resolvedSettings(); if (!settings.codexBin) throw new Error('Codex CLI was not found; it is required for B-roll scene planning.'); const transcript = await transcribeProject(project); const requested = (req.body?.settings ?? {}) as Partial<BrollPlanSettings>; const workflowMode = ['cleaned-video', 'raw-video', 'assets-only'].includes(String(requested.workflowMode)) ? requested.workflowMode : 'cleaned-video'; const keepRanges = workflowMode === 'cleaned-video' ? project.edl?.keepRanges : undefined; const orientation = (project.media.height || 0) > (project.media.width || 0) ? 'portrait' : 'landscape'; const plan = await createBrollPlan({ codexBin: settings.codexBin, workDir: project.workDir, words: transcript.words, keepRanges, orientation, settings: { ...requested, provider: requested.provider || settings.imageProvider } }); brollPlans.set(project.id, plan); await touchProject(project); res.json({ plan, transcript, edl: project.edl }); }));
 app.get('/api/projects/:id/broll', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const cached = brollPlans.get(project.id); if (cached) return void res.json(cached); const plan = await loadBrollPlan(project.workDir); if (!plan) return void res.status(404).json({ error: 'B-roll plan has not been created yet' }); brollPlans.set(project.id, plan); res.json(plan); }));
@@ -469,7 +485,7 @@ app.delete('/api/projects/:id/broll/scenes/:sceneId', route(async (req, res) => 
 
 app.get('/api/projects/:id/presenter-matte', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id)); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan || !planNeedsPresenterMatte(plan)) return void res.json({ ready: false, stale: false }); const statuses = [];
-  for (const clip of projectClips(project)) { const clipPlan = localPlanForClip(plan, clip); if (planNeedsPresenterMatte(clipPlan)) statuses.push(await presenterMatteStatus(path.join(project.workDir, 'clips', clip.id), clip.sourcePath)); }
+  for (const clip of projectClips(project)) { const clipPlan = localPlanForClip(plan, clip); if (planNeedsPresenterMatte(clipPlan)) statuses.push(await presenterMatteStatus(path.join(project.workDir, 'clips', clip.id), clip.sourcePath, presenterMatteSpecForClip(plan, clip))); }
   res.json({ ready: statuses.length > 0 && statuses.every((status) => status.ready), stale: statuses.some((status) => status.stale), generatedAt: statuses.map((status) => status.generatedAt).filter(Boolean).sort().at(-1) });
 }));
 app.post('/api/projects/:id/presenter-matte', route(async (req, res) => {
@@ -509,18 +525,30 @@ app.post('/api/projects/:id/broll/export-video', route(async (req, res) => {
   const projectId = routeParam(req.params.id); const project = getProject(projectId); await requireSource(project); const settings = await resolvedSettings(); const storedPlan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!storedPlan) throw new Error('B-roll plan has not been created yet'); if (storedPlan.settings.workflowMode === 'assets-only') throw new Error('Assets-only projects export files and timing JSON, not a rendered video'); if (!settings.ffmpegBin) throw new Error('FFmpeg was not found');
   const active = exportJobs.get(projectId); if (active?.state === 'running') return void res.status(409).json({ error: 'An export is already running for this project' }); const outputPath = await pickExportPath('video-with-broll.mp4', 'Export video with B-roll'); if (!outputPath) return void res.status(400).json({ error: 'Export cancelled' }); const plan = storedPlan;
   const mode: 'fast' | 'quality' = req.body?.mode === 'fast' ? 'fast' : 'quality'; const fps = project.media.frameRate && project.media.frameRate > 0 ? project.media.frameRate : 30; const cleanedSegments = plan.settings.workflowMode === 'cleaned-video' ? rangesToSeconds(project) : undefined; const rawSegments = cleanedSegments?.length ? cleanedSegments : [{ start: 0, end: project.media.duration }]; const sourceSegments = splitSegmentsAtClipBoundaries(project, rawSegments);
-  const activeScenes = plan.scenes.filter((scene) => scene.enabled && (scene.videoFile || scene.imageFile)); const mattePaths = planNeedsPresenterMatte(plan) ? await ensureProjectPresenterMattes(project, plan, settings.ffmpegBin) : new Map<string, string>();
+  const activeScenes = plan.scenes.filter((scene) => scene.enabled && (scene.videoFile || scene.imageFile)); const needsPresenterMatte = planNeedsPresenterMatte(plan);
   const capabilities = await ffmpegCapabilities(settings.ffmpegBin); const encoding = encodingArgs(project, capabilities, mode); const inputAcceleration = capabilities.videoToolboxDecode ? ['-hwaccel', 'videotoolbox'] : []; const ranges = checkpointRanges(sourceSegments, activeScenes); if (!ranges.length) throw new Error('The export timeline is empty');
-  const fingerprint = await checkpointFingerprint({ project, plan, mattePaths: [...mattePaths.values()], mode, segments: sourceSegments, encodingArgs: encoding.args, fps }); const checkpointRoot = path.join(project.workDir, 'render-checkpoints'); const sessionDir = path.join(checkpointRoot, fingerprint); await fs.mkdir(checkpointRoot, { recursive: true });
-  for (const entry of await fs.readdir(checkpointRoot, { withFileTypes: true })) if (entry.isDirectory() && entry.name !== fingerprint) await fs.rm(path.join(checkpointRoot, entry.name), { recursive: true, force: true }); await fs.mkdir(sessionDir, { recursive: true });
-  const buildPartArgs = (range: CheckpointRange, partOutputPath: string) => {
-    const clip = clipForRange(project, range); const localStart = range.start - clip.timelineStart; const prepared = activeScenes.filter((scene) => scene.sourceEnd > range.start && scene.sourceStart < range.end).map((scene) => ({ original: scene, local: { ...scene, sourceStart: Math.max(scene.sourceStart, range.start) - range.start, sourceEnd: Math.min(scene.sourceEnd, range.end) - range.start } })); const chunkPlan: BrollPlan = { ...plan, settings: { ...plan.settings, workflowMode: 'raw-video' }, scenes: prepared.map((item) => item.local) }; const needsPresenter = planNeedsPresenterMatte(chunkPlan); const filter = prepared.length ? buildBrollOverlayFilter({ plan: chunkPlan, width: project.media.width || 1920, height: project.media.height || 1080, fps, presenterInputIndex: needsPresenter ? prepared.length + 1 : undefined, includeAudio: false }).filter : '[0:v]setpts=PTS-STARTPTS[vout]';
-    const brollInputs = prepared.flatMap(({ original }) => { const offset = Math.max(0, range.start - original.sourceStart); return original.videoFile ? ['-stream_loop', '-1', ...(offset > 0.001 ? ['-ss', offset.toFixed(6)] : []), ...inputAcceleration, '-i', original.videoFile] : ['-loop', '1', '-framerate', String(Math.min(30, fps)), '-i', original.imageFile!]; }); const mattePath = mattePaths.get(clip.id); const presenterInput = needsPresenter && mattePath ? ['-ss', localStart.toFixed(6), '-t', range.duration.toFixed(6), ...inputAcceleration, '-i', mattePath] : [];
-    return ['-ss', localStart.toFixed(6), '-t', range.duration.toFixed(6), ...inputAcceleration, '-i', clip.sourcePath, ...brollInputs, ...presenterInput, '-filter_complex', filter, '-map', '[vout]', '-an', '-t', range.duration.toFixed(6), '-fps_mode', 'passthrough', ...encoding.args, ...colorArgs(project), '-movflags', '+faststart', partOutputPath];
-  };
-  const audioArgs = (audioOutputPath: string) => timelineAudioArgs(project, sourceSegments, audioOutputPath);
-  launchCheckpointExport({ projectId, command: settings.ffmpegBin, sessionDir, fingerprint, outputPath, encoder: encoding.encoder, ranges, buildPartArgs, audioArgs });
-  res.status(202).json({ started: true, outputPath, encoder: encoding.encoder, hardware: encoding.hardware, targetBitRate: encoding.targetBitRate, brollScenes: activeScenes.length, presenterMatte: mattePaths.size > 0, checkpoints: ranges.length, clips: projectClips(project).length });
+  const preparingJob: ExportJob = { state: 'running', progress: 0, outTime: '00:00:00.000000', speed: needsPresenterMatte ? 'Preparing presenter cutouts…' : 'Preparing render checkpoints…', frame: 0, outputPath, encoder: encoding.encoder, checkpointCompleted: 0, checkpointTotal: ranges.length, resumable: false, startedAt: Date.now() }; exportJobs.set(projectId, preparingJob);
+
+  void (async () => {
+    try {
+      const mattePaths = needsPresenterMatte ? await ensureProjectPresenterMattes(project, plan, settings.ffmpegBin!, (completed, total, clip) => {
+        preparingJob.speed = `Preparing presenter cutouts ${Math.min(completed + 1, total)}/${total} · ${clip.sourceName}`;
+      }) : new Map<string, string>();
+      preparingJob.speed = 'Preparing render checkpoints…';
+      const fingerprint = await checkpointFingerprint({ project, plan, mattePaths: [...mattePaths.values()], mode, segments: sourceSegments, encodingArgs: encoding.args, fps }); const checkpointRoot = path.join(project.workDir, 'render-checkpoints'); const sessionDir = path.join(checkpointRoot, fingerprint); await fs.mkdir(checkpointRoot, { recursive: true });
+      for (const entry of await fs.readdir(checkpointRoot, { withFileTypes: true })) if (entry.isDirectory() && entry.name !== fingerprint) await fs.rm(path.join(checkpointRoot, entry.name), { recursive: true, force: true }); await fs.mkdir(sessionDir, { recursive: true });
+      const buildPartArgs = (range: CheckpointRange, partOutputPath: string) => {
+        const clip = clipForRange(project, range); const localStart = range.start - clip.timelineStart; const prepared = activeScenes.filter((scene) => scene.sourceEnd > range.start && scene.sourceStart < range.end).map((scene) => ({ original: scene, local: { ...scene, sourceStart: Math.max(scene.sourceStart, range.start) - range.start, sourceEnd: Math.min(scene.sourceEnd, range.end) - range.start } })); const chunkPlan: BrollPlan = { ...plan, settings: { ...plan.settings, workflowMode: 'raw-video' }, scenes: prepared.map((item) => item.local) }; const needsPresenter = planNeedsPresenterMatte(chunkPlan); const filter = prepared.length ? buildBrollOverlayFilter({ plan: chunkPlan, width: project.media.width || 1920, height: project.media.height || 1080, fps, presenterInputIndex: needsPresenter ? prepared.length + 1 : undefined, includeAudio: false }).filter : '[0:v]setpts=PTS-STARTPTS[vout]';
+        const brollInputs = prepared.flatMap(({ original }) => { const offset = Math.max(0, range.start - original.sourceStart); return original.videoFile ? ['-stream_loop', '-1', ...(offset > 0.001 ? ['-ss', offset.toFixed(6)] : []), ...inputAcceleration, '-i', original.videoFile] : ['-loop', '1', '-framerate', String(Math.min(30, fps)), '-i', original.imageFile!]; }); const mattePath = mattePaths.get(clip.id); const presenterInput = needsPresenter && mattePath ? ['-ss', localStart.toFixed(6), '-t', range.duration.toFixed(6), ...inputAcceleration, '-i', mattePath] : [];
+        return ['-ss', localStart.toFixed(6), '-t', range.duration.toFixed(6), ...inputAcceleration, '-i', clip.sourcePath, ...brollInputs, ...presenterInput, '-filter_complex', filter, '-map', '[vout]', '-an', '-t', range.duration.toFixed(6), '-fps_mode', 'passthrough', ...encoding.args, ...colorArgs(project), '-movflags', '+faststart', partOutputPath];
+      };
+      const audioArgs = (audioOutputPath: string) => timelineAudioArgs(project, sourceSegments, audioOutputPath);
+      launchCheckpointExport({ projectId, command: settings.ffmpegBin!, sessionDir, fingerprint, outputPath, encoder: encoding.encoder, ranges, buildPartArgs, audioArgs });
+    } catch (error) {
+      preparingJob.state = 'failed'; preparingJob.speed = ''; preparingJob.error = error instanceof Error ? error.message : String(error);
+    }
+  })();
+  res.status(202).json({ started: true, outputPath, encoder: encoding.encoder, hardware: encoding.hardware, targetBitRate: encoding.targetBitRate, brollScenes: activeScenes.length, presenterMatte: needsPresenterMatte, checkpoints: ranges.length, clips: projectClips(project).length });
 }));
 
 app.post('/api/projects/:id/export', route(async (req, res) => {

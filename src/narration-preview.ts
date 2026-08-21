@@ -262,7 +262,16 @@ export function installNarrationPreview() {
     update();
   };
 
-  const observer = new MutationObserver(() => bind());
+  const observer = new MutationObserver((mutations) => {
+    // update() rewrites the toolbar's time/current-word content. Observing those
+    // writes and calling bind() again creates an endless MutationObserver loop.
+    // Only rebind for React-owned changes outside the preview toolbar.
+    if (mutations.every((mutation) =>
+      mutation.target instanceof Element
+      && Boolean(mutation.target.closest('[data-narration-preview]'))
+    )) return;
+    bind();
+  });
   observer.observe(document.getElementById('root') ?? document.body, { childList: true, subtree: true });
   bind();
 

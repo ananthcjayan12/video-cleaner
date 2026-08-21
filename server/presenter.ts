@@ -26,6 +26,13 @@ export type MattingSystemStatus = {
 
 type RunOptions = { cwd?: string; env?: NodeJS.ProcessEnv };
 type MatteWindow = { start: number; end: number; duration: number };
+export type PresenterMatteSpecInput = {
+  fps: number;
+  sourceDuration: number;
+  width: number;
+  height: number;
+  windows: Array<{ start: number; end: number }>;
+};
 type MatteSpec = {
   fps: number;
   sourceDuration: number;
@@ -181,6 +188,24 @@ function mergeWindows(raw: Array<{ start: number; end: number }>, fps: number, s
   return merged;
 }
 
+function explicitMatteSpec(input: PresenterMatteSpecInput): MatteSpec {
+  const fps = normalFps(input.fps);
+  const sourceDuration = Math.max(0, Number(input.sourceDuration) || 0);
+  const width = Math.max(2, Number(input.width) || 1080);
+  const height = Math.max(2, Number(input.height) || 1920);
+  const windows = mergeWindows(input.windows, fps, sourceDuration);
+  const fingerprint = createHash('sha256').update(JSON.stringify({
+    pipeline: MATTE_PIPELINE_VERSION,
+    mode: 'explicit-scene-windows',
+    fps,
+    sourceDuration,
+    width,
+    height,
+    windows,
+  })).digest('hex').slice(0, 24);
+  return { fps, sourceDuration, width, height, windows, fingerprint };
+}
+
 async function projectMatteSpec(workDir: string): Promise<MatteSpec | null> {
   try {
     const [project, plan] = await Promise.all([
@@ -199,13 +224,13 @@ async function projectMatteSpec(workDir: string): Promise<MatteSpec | null> {
   } catch { return null; }
 }
 
-export async function presenterMatteStatus(workDir: string, sourcePath: string): Promise<PresenterMatteStatus> {
+export async function presenterMatteStatus(workDir: string, sourcePath: string, specInput?: PresenterMatteSpecInput): Promise<PresenterMatteStatus> {
   const maskPath = presenterMaskPath(workDir);
   const [maskStat, meta, sourceStat, spec] = await Promise.all([
     fs.stat(maskPath).catch(() => null),
     readMeta(workDir),
     fs.stat(sourcePath).catch(() => null),
-    projectMatteSpec(workDir),
+    specInput ? Promise.resolve(explicitMatteSpec(specInput)) : projectMatteSpec(workDir),
   ]);
   if (!maskStat?.isFile() || maskStat.size < 10_000 || !meta || !sourceStat?.isFile()) return { ready: false, stale: false };
   const signature = meta.sourceSignature ?? {};
@@ -299,14 +324,15 @@ export async function ensurePresenterMatte(options: {
   width?: number;
   height?: number;
   ffmpegBin: string;
+  spec?: PresenterMatteSpecInput;
 }) {
-  const existing = await presenterMatteStatus(options.workDir, options.sourcePath);
+  const existing = await presenterMatteStatus(options.workDir, options.sourcePath, options.spec);
   if (existing.ready && existing.maskPath) return existing;
   const system = await mattingSystemStatus(options.ffmpegBin);
   if (!system.configured || !system.pythonPath) throw new Error(system.detail);
 
   const dir = matteDir(options.workDir); await fs.mkdir(dir, { recursive: true });
-  const modelPath = await resolveSelfieModel(system.pythonPath); const spec = await projectMatteSpec(options.workDir);
+  const modelPath = await resolveSelfieModel(system.pythonPath); const spec = options.spec ? explicitMatteSpec(options.spec) : await projectMatteSpec(options.workDir);
   let maskPath: string; let analysisSource: PresenterMatteStatus['analysisSource']; let processedSeconds: number; let sourceSeconds: number; let fps: number; let fingerprint: string; let dimensions: { width: number; height: number };
 
   if (spec?.windows.length) {
