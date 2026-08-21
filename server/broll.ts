@@ -196,6 +196,7 @@ function roundedAlpha(radius: number) {
   return `if(lte(hypot(max(${radius}-X,0)+max(X-(W-${radius}),0),max(${radius}-Y,0)+max(Y-(H-${radius}),0)),${radius}),255,0)`;
 }
 function roundedRgba(radius: number) { return `format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='${roundedAlpha(radius)}'`; }
+function bt709Media() { return 'format=yuv420p,setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709'; }
 function layoutRect(template: BrollDisplayTemplate, width: number, height: number) {
   if (template === 'top-card' || template === 'top-card-presenter') return { width: even(width * 0.92), height: even(height * 0.42), x: even(width * 0.04), y: even(height * 0.035) };
   if (template === 'split-top') return { width: even(width), height: even(height * 0.47), x: 0, y: 0 };
@@ -206,7 +207,7 @@ function layoutRect(template: BrollDisplayTemplate, width: number, height: numbe
   return { width: even(width), height: even(height), x: 0, y: 0 };
 }
 
-export function buildBrollOverlayFilter(options: { plan: BrollPlan; width: number; height: number; fps: number; cleanedSegments?: Array<{ start: number; end: number }>; presenterInputIndex?: number; includeAudio?: boolean }) {
+export function buildBrollOverlayFilter(options: { plan: BrollPlan; width: number; height: number; fps: number; cleanedSegments?: Array<{ start: number; end: number }>; presenterInputIndex?: number; includeAudio?: boolean; baseVideoFilter?: string }) {
   const active = options.plan.scenes.filter((scene) => scene.enabled && (scene.videoFile || scene.imageFile));
   if (!active.length) throw new Error('Add at least one enabled B-roll image or video before exporting');
   const presenterScenes = active.filter((scene) => displayTemplateNeedsPresenterMatte(resolveSceneDisplayTemplate(options.plan, scene)));
@@ -214,10 +215,11 @@ export function buildBrollOverlayFilter(options: { plan: BrollPlan; width: numbe
   if (presenterScenes.length && options.presenterInputIndex === undefined) throw new Error('A presenter-cutout template is selected but the presenter matte input is missing');
 
   const parts: string[] = [];
+  const basePrefix = options.baseVideoFilter?.trim() ? `${options.baseVideoFilter.trim()},` : '';
   let presenterLabels: string[] = [];
   if (presenterScenes.length) {
     const sourceLabels = ['base0', 'presenterSource', ...stackedScenes.map((_scene, index) => `stackedSource${index}`)];
-    parts.push(`[0:v]setpts=PTS-STARTPTS,split=${sourceLabels.length}${sourceLabels.map((label) => `[${label}]`).join('')}`);
+    parts.push(`[0:v]${basePrefix}setpts=PTS-STARTPTS,split=${sourceLabels.length}${sourceLabels.map((label) => `[${label}]`).join('')}`);
     parts.push(`[${options.presenterInputIndex}:v]fps=${options.fps.toFixed(6)},scale=${options.width}:${options.height}:flags=bilinear,gblur=sigma=0.45:steps=1,format=gray,setpts=PTS-STARTPTS[presenterMask]`);
     parts.push('[presenterSource]format=rgba[presenterRgb]');
     parts.push('[presenterRgb][presenterMask]alphamerge[presenterAlpha]');
@@ -227,7 +229,7 @@ export function buildBrollOverlayFilter(options: { plan: BrollPlan; width: numbe
       parts.push(`[presenterAlpha]split=${presenterLabels.length}${presenterLabels.map((label) => `[${label}]`).join('')}`);
     }
   } else {
-    parts.push('[0:v]setpts=PTS-STARTPTS[base0]');
+    parts.push(`[0:v]${basePrefix}setpts=PTS-STARTPTS[base0]`);
   }
 
   let previous = 'base0'; let presenterCursor = 0; let stackedCursor = 0;
@@ -237,18 +239,20 @@ export function buildBrollOverlayFilter(options: { plan: BrollPlan; width: numbe
     const between = `between(t,${scene.sourceStart.toFixed(6)},${scene.sourceEnd.toFixed(6)})`;
     if (template === 'stacked-cards-cutout') {
       const margin = even(options.width * 0.035); const topY = even(options.height * 0.025); const cardWidth = even(options.width - margin * 2); const topHeight = even(options.height * 0.43); const lowerY = even(options.height * 0.50); const lowerHeight = even(options.height * 0.475); const radius = even(Math.min(cardWidth, topHeight) * 0.065);
-      const presenterWidth = cardWidth; const presenterY = even(options.height * (options.height >= options.width ? 0.16 : 0.32)); const presenterLocalY = presenterY - lowerY; const stackedSource = `stackedSource${stackedCursor++}`; const presenterLabel = presenterLabels[presenterCursor++];
-      parts.push(`[${input}:v]scale=${cardWidth}:${topHeight}:force_original_aspect_ratio=increase:flags=lanczos,crop=${cardWidth}:${topHeight},setsar=1,${roundedRgba(radius)},trim=duration=${duration.toFixed(6)},setpts=PTS-STARTPTS+${scene.sourceStart.toFixed(6)}/TB[${mediaLabel}]`);
-      parts.push(`[${stackedSource}]scale=${cardWidth}:${lowerHeight}:force_original_aspect_ratio=increase:flags=lanczos,crop=${cardWidth}:${lowerHeight},setsar=1,boxblur=luma_radius=12:luma_power=1:chroma_radius=6:chroma_power=1[stackedRoomBase${index}]`);
-      parts.push(`[${presenterLabel}]scale=${presenterWidth}:-2:flags=lanczos[stackedPresenter${index}]`);
-      parts.push(`[stackedRoomBase${index}][stackedPresenter${index}]overlay=0:${presenterLocalY}:eof_action=pass,${roundedRgba(radius)}[stackedCard${index}]`);
+      const presenterWidth = even(cardWidth * 0.94); const presenterX = margin + even((cardWidth - presenterWidth) / 2); const presenterY = even(options.height * (options.height >= options.width ? 0.16 : 0.30)); const shadowY = presenterY + even(options.height * 0.008); const stackedSource = `stackedSource${stackedCursor++}`; const presenterLabel = presenterLabels[presenterCursor++];
+      parts.push(`[${input}:v]scale=${cardWidth}:${topHeight}:force_original_aspect_ratio=increase:flags=lanczos,crop=${cardWidth}:${topHeight},setsar=1,${bt709Media()},${roundedRgba(radius)},trim=duration=${duration.toFixed(6)},setpts=PTS-STARTPTS+${scene.sourceStart.toFixed(6)}/TB[${mediaLabel}]`);
+      parts.push(`[${stackedSource}]scale=${cardWidth}:${lowerHeight}:force_original_aspect_ratio=increase:flags=lanczos,crop=${cardWidth}:${lowerHeight},setsar=1,boxblur=luma_radius=12:luma_power=1:chroma_radius=6:chroma_power=1,${roundedRgba(radius)}[stackedRoom${index}]`);
+      parts.push(`[${presenterLabel}]scale=${presenterWidth}:-2:flags=lanczos,format=rgba,split=2[stackedPresenter${index}][stackedShadowSeed${index}]`);
+      parts.push(`[stackedShadowSeed${index}]colorchannelmixer=rr=0:gg=0:bb=0:aa=0.20,gblur=sigma=8:steps=2[stackedShadow${index}]`);
       parts.push(`[${previous}]drawbox=x=0:y=0:w=iw:h=ih:color=black:t=fill:enable='${between}'[stackedBg${index}]`);
       parts.push(`[stackedBg${index}][${mediaLabel}]overlay=${margin}:${topY}:eof_action=pass:enable='${between}'[stackedTop${index}]`);
-      parts.push(`[stackedTop${index}][stackedCard${index}]overlay=${margin}:${lowerY}:eof_action=pass:enable='${between}'[${output}]`);
+      parts.push(`[stackedTop${index}][stackedRoom${index}]overlay=${margin}:${lowerY}:eof_action=pass:enable='${between}'[stackedLower${index}]`);
+      parts.push(`[stackedLower${index}][stackedShadow${index}]overlay=${presenterX}:${shadowY}:eof_action=pass:enable='${between}'[stackedShadowed${index}]`);
+      parts.push(`[stackedShadowed${index}][stackedPresenter${index}]overlay=${presenterX}:${presenterY}:eof_action=pass:enable='${between}'[${output}]`);
       previous = output;
       return;
     }
-    parts.push(`[${input}:v]scale=${rect.width}:${rect.height}:force_original_aspect_ratio=increase:flags=lanczos,crop=${rect.width}:${rect.height},setsar=1,trim=duration=${duration.toFixed(6)},setpts=PTS-STARTPTS+${scene.sourceStart.toFixed(6)}/TB[${mediaLabel}]`);
+    parts.push(`[${input}:v]scale=${rect.width}:${rect.height}:force_original_aspect_ratio=increase:flags=lanczos,crop=${rect.width}:${rect.height},setsar=1,${bt709Media()},trim=duration=${duration.toFixed(6)},setpts=PTS-STARTPTS+${scene.sourceStart.toFixed(6)}/TB[${mediaLabel}]`);
     parts.push(`[${previous}][${mediaLabel}]overlay=${rect.x}:${rect.y}:eof_action=pass:enable='${between}'[${mediaOutput}]`);
     if (displayTemplateNeedsPresenterMatte(template)) {
       const presenterLabel = presenterLabels[presenterCursor++];
