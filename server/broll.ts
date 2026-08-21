@@ -218,7 +218,7 @@ export function buildBrollOverlayFilter(options: { plan: BrollPlan; width: numbe
   if (presenterScenes.length) {
     const sourceLabels = ['base0', 'presenterSource', ...stackedScenes.map((_scene, index) => `stackedSource${index}`)];
     parts.push(`[0:v]setpts=PTS-STARTPTS,split=${sourceLabels.length}${sourceLabels.map((label) => `[${label}]`).join('')}`);
-    parts.push(`[${options.presenterInputIndex}:v]fps=${options.fps.toFixed(6)},scale=${options.width}:${options.height}:flags=bilinear,format=gray,setpts=PTS-STARTPTS[presenterMask]`);
+    parts.push(`[${options.presenterInputIndex}:v]fps=${options.fps.toFixed(6)},scale=${options.width}:${options.height}:flags=bilinear,gblur=sigma=0.45:steps=1,format=gray,setpts=PTS-STARTPTS[presenterMask]`);
     parts.push('[presenterSource]format=rgba[presenterRgb]');
     parts.push('[presenterRgb][presenterMask]alphamerge[presenterAlpha]');
     if (presenterScenes.length === 1) presenterLabels = ['presenterAlpha'];
@@ -237,14 +237,14 @@ export function buildBrollOverlayFilter(options: { plan: BrollPlan; width: numbe
     const between = `between(t,${scene.sourceStart.toFixed(6)},${scene.sourceEnd.toFixed(6)})`;
     if (template === 'stacked-cards-cutout') {
       const margin = even(options.width * 0.035); const topY = even(options.height * 0.025); const cardWidth = even(options.width - margin * 2); const topHeight = even(options.height * 0.43); const lowerY = even(options.height * 0.50); const lowerHeight = even(options.height * 0.475); const radius = even(Math.min(cardWidth, topHeight) * 0.065);
-      const presenterWidth = cardWidth; const presenterY = even(options.height * (options.height >= options.width ? 0.16 : 0.32)); const stackedSource = `stackedSource${stackedCursor++}`; const presenterLabel = presenterLabels[presenterCursor++];
+      const presenterWidth = cardWidth; const presenterY = even(options.height * (options.height >= options.width ? 0.16 : 0.32)); const presenterLocalY = presenterY - lowerY; const stackedSource = `stackedSource${stackedCursor++}`; const presenterLabel = presenterLabels[presenterCursor++];
       parts.push(`[${input}:v]scale=${cardWidth}:${topHeight}:force_original_aspect_ratio=increase:flags=lanczos,crop=${cardWidth}:${topHeight},setsar=1,${roundedRgba(radius)},trim=duration=${duration.toFixed(6)},setpts=PTS-STARTPTS+${scene.sourceStart.toFixed(6)}/TB[${mediaLabel}]`);
-      parts.push(`[${stackedSource}]scale=${cardWidth}:${lowerHeight}:force_original_aspect_ratio=increase:flags=lanczos,crop=${cardWidth}:${lowerHeight},boxblur=luma_radius=12:luma_power=1:chroma_radius=6:chroma_power=1,${roundedRgba(radius)}[stackedRoom${index}]`);
+      parts.push(`[${stackedSource}]scale=${cardWidth}:${lowerHeight}:force_original_aspect_ratio=increase:flags=lanczos,crop=${cardWidth}:${lowerHeight},setsar=1,boxblur=luma_radius=12:luma_power=1:chroma_radius=6:chroma_power=1[stackedRoomBase${index}]`);
       parts.push(`[${presenterLabel}]scale=${presenterWidth}:-2:flags=lanczos[stackedPresenter${index}]`);
+      parts.push(`[stackedRoomBase${index}][stackedPresenter${index}]overlay=0:${presenterLocalY}:eof_action=pass,${roundedRgba(radius)}[stackedCard${index}]`);
       parts.push(`[${previous}]drawbox=x=0:y=0:w=iw:h=ih:color=black:t=fill:enable='${between}'[stackedBg${index}]`);
       parts.push(`[stackedBg${index}][${mediaLabel}]overlay=${margin}:${topY}:eof_action=pass:enable='${between}'[stackedTop${index}]`);
-      parts.push(`[stackedTop${index}][stackedRoom${index}]overlay=${margin}:${lowerY}:eof_action=pass:enable='${between}'[stackedLower${index}]`);
-      parts.push(`[stackedLower${index}][stackedPresenter${index}]overlay=${margin}:${presenterY}:eof_action=pass:enable='${between}'[${output}]`);
+      parts.push(`[stackedTop${index}][stackedCard${index}]overlay=${margin}:${lowerY}:eof_action=pass:enable='${between}'[${output}]`);
       previous = output;
       return;
     }
