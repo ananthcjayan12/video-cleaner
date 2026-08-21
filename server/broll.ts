@@ -7,7 +7,8 @@ export type BrollKeepRange = { startWordId: string; endWordId: string };
 export type ImageProvider = 'openai' | 'gemini' | 'grok-cli' | 'codex-cli';
 export type BrollWorkflowMode = 'cleaned-video' | 'raw-video' | 'assets-only';
 export type BrollCountMode = 'auto' | 'exact' | 'per-minute';
-export type BrollDisplayTemplate = 'full-frame' | 'top-card' | 'split-top' | 'picture-in-picture' | 'top-card-presenter' | 'presenter-overlay' | 'stacked-cards-cutout';
+export type BrollAssetAspectRatio = 'auto' | '9:16' | '16:9';
+export type BrollDisplayTemplate = 'full-frame' | 'top-card' | 'split-top' | 'picture-in-picture' | 'top-card-presenter' | 'presenter-overlay' | 'stacked-cards-cutout' | 'stacked-talking-top' | 'stacked-broll-top';
 
 export const BROLL_DISPLAY_TEMPLATES: Array<{ id: BrollDisplayTemplate; label: string; needsPresenterMatte: boolean }> = [
   { id: 'full-frame', label: 'Full-screen B-roll', needsPresenterMatte: false },
@@ -17,6 +18,8 @@ export const BROLL_DISPLAY_TEMPLATES: Array<{ id: BrollDisplayTemplate; label: s
   { id: 'top-card-presenter', label: 'Top card + presenter cutout', needsPresenterMatte: true },
   { id: 'presenter-overlay', label: 'B-roll background + presenter cutout', needsPresenterMatte: true },
   { id: 'stacked-cards-cutout', label: 'Stacked reel cards + presenter cutout', needsPresenterMatte: true },
+  { id: 'stacked-talking-top', label: 'Talking head top + B-roll bottom', needsPresenterMatte: false },
+  { id: 'stacked-broll-top', label: 'B-roll top + talking head bottom', needsPresenterMatte: false },
 ];
 
 export type BrollPlanSettings = {
@@ -37,6 +40,9 @@ export type BrollScene = {
   imageFile?: string; generatedAt?: string; provider?: ImageProvider | 'manual'; model?: string;
   videoFile?: string; videoGeneratedAt?: string; videoModel?: string;
   displayTemplate?: BrollDisplayTemplate;
+  assetAspectRatio?: BrollAssetAspectRatio;
+  generatedAspectRatio?: Exclude<BrollAssetAspectRatio, 'auto'>;
+  orientationChanged?: boolean;
 };
 
 export type BrollPlan = { version: 2; orientation: 'portrait' | 'landscape'; stylePreset: string; settings: BrollPlanSettings; scenes: BrollScene[]; notes: string[] };
@@ -113,14 +119,23 @@ export async function loadBrollPlan(workDir: string): Promise<BrollPlan | null> 
     const raw = JSON.parse(await fs.readFile(path.join(workDir, 'broll-plan.json'), 'utf8')) as BrollPlan;
     if (raw.version !== 2) return null;
     raw.settings = normalizeSettings(raw.settings);
-    for (const scene of raw.scenes ?? []) if (scene.displayTemplate && !BROLL_DISPLAY_TEMPLATES.some((template) => template.id === scene.displayTemplate)) delete scene.displayTemplate;
+    for (const scene of raw.scenes ?? []) {
+      if (scene.displayTemplate && !BROLL_DISPLAY_TEMPLATES.some((template) => template.id === scene.displayTemplate)) delete scene.displayTemplate;
+      if (scene.assetAspectRatio && !['auto', '9:16', '16:9'].includes(scene.assetAspectRatio)) delete scene.assetAspectRatio;
+      if (scene.generatedAspectRatio && !['9:16', '16:9'].includes(scene.generatedAspectRatio)) delete scene.generatedAspectRatio;
+      if (scene.imageFile && !scene.generatedAspectRatio) scene.generatedAspectRatio = resolveSceneAssetAspect(raw, scene);
+      scene.orientationChanged = Boolean(scene.imageFile && scene.generatedAspectRatio !== resolveSceneAssetAspect(raw, scene));
+    }
     return raw;
   } catch { return null; }
 }
-export async function updateBrollScene(workDir: string, plan: BrollPlan, sceneId: string, patch: { imagePrompt?: string; videoPrompt?: string; title?: string; sourceStart?: number; sourceEnd?: number; enabled?: boolean; displayTemplate?: BrollDisplayTemplate | 'default' }) {
+export async function updateBrollScene(workDir: string, plan: BrollPlan, sceneId: string, patch: { imagePrompt?: string; videoPrompt?: string; title?: string; sourceStart?: number; sourceEnd?: number; enabled?: boolean; displayTemplate?: BrollDisplayTemplate | 'default'; assetAspectRatio?: BrollAssetAspectRatio }) {
   const scene = plan.scenes.find((candidate) => candidate.id === sceneId); if (!scene) throw new Error('B-roll scene not found');
+  const previousAspect = resolveSceneAssetAspect(plan, scene);
   if (typeof patch.title === 'string' && patch.title.trim()) scene.title = patch.title.trim().slice(0, 100); if (typeof patch.imagePrompt === 'string' && patch.imagePrompt.trim()) scene.imagePrompt = patch.imagePrompt.trim(); if (typeof patch.videoPrompt === 'string') scene.videoPrompt = patch.videoPrompt.trim() || undefined; if (typeof patch.enabled === 'boolean') scene.enabled = patch.enabled;
   if (patch.displayTemplate === 'default') delete scene.displayTemplate; else if (patch.displayTemplate) scene.displayTemplate = normalizeDisplayTemplate(patch.displayTemplate);
+  if (patch.assetAspectRatio && ['auto', '9:16', '16:9'].includes(patch.assetAspectRatio)) scene.assetAspectRatio = patch.assetAspectRatio;
+  if (scene.imageFile) { scene.generatedAspectRatio ??= previousAspect; scene.orientationChanged = scene.generatedAspectRatio !== resolveSceneAssetAspect(plan, scene); } else scene.orientationChanged = false;
   const nextStart = Number.isFinite(patch.sourceStart) ? Math.max(0, Number(patch.sourceStart)) : scene.sourceStart; const nextEnd = Number.isFinite(patch.sourceEnd) ? Math.max(0, Number(patch.sourceEnd)) : scene.sourceEnd; if (nextEnd <= nextStart) throw new Error('B-roll end time must be after start time'); scene.sourceStart = nextStart; scene.sourceEnd = nextEnd; await saveBrollPlan(workDir, plan); return scene;
 }
 export async function deleteBrollScene(workDir: string, plan: BrollPlan, sceneId: string) { const index = plan.scenes.findIndex((scene) => scene.id === sceneId); if (index < 0) throw new Error('B-roll scene not found'); const [scene] = plan.scenes.splice(index, 1); await Promise.all([scene.imageFile ? fs.rm(scene.imageFile, { force: true }) : Promise.resolve(), scene.videoFile ? fs.rm(scene.videoFile, { force: true }) : Promise.resolve()]); await saveBrollPlan(workDir, plan); return plan; }
@@ -128,11 +143,12 @@ export async function deleteBrollScene(workDir: string, plan: BrollPlan, sceneId
 export function resolveSceneDisplayTemplate(plan: BrollPlan, scene: BrollScene) { return scene.displayTemplate || plan.settings.displayTemplate || 'full-frame'; }
 export function displayTemplateNeedsPresenterMatte(template: BrollDisplayTemplate) { return template === 'top-card-presenter' || template === 'presenter-overlay' || template === 'stacked-cards-cutout'; }
 export function planNeedsPresenterMatte(plan: BrollPlan) { return plan.scenes.some((scene) => scene.enabled && displayTemplateNeedsPresenterMatte(resolveSceneDisplayTemplate(plan, scene))); }
+export function displayTemplateUsesHorizontalBroll(template: BrollDisplayTemplate) { return template !== 'full-frame' && template !== 'presenter-overlay'; }
 
-function targetAspect(plan: BrollPlan) { if (plan.settings.aspectRatio !== 'auto') return plan.settings.aspectRatio; return plan.orientation === 'portrait' ? '9:16' : '16:9'; }
+export function resolveSceneAssetAspect(plan: BrollPlan, scene: BrollScene) { if (scene.assetAspectRatio && scene.assetAspectRatio !== 'auto') return scene.assetAspectRatio; if (displayTemplateUsesHorizontalBroll(resolveSceneDisplayTemplate(plan, scene))) return '16:9'; if (plan.settings.aspectRatio !== 'auto') return plan.settings.aspectRatio; return plan.orientation === 'portrait' ? '9:16' : '16:9'; }
 function generatedImagePrompt(scene: BrollScene, plan: BrollPlan, regenerationComment?: string) {
   const requestedChange = regenerationComment?.trim() ? `\n\nUSER REQUEST FOR THIS REGENERATION:\n${regenerationComment.trim()}` : '';
-  return `${scene.imagePrompt}${requestedChange}\n\nFINAL QUALITY BAR: ${BROLL_STYLE_PRESET}\n\nDeliver exactly one hyper-realistic photographic still composed for a ${targetAspect(plan)} B-roll frame. It must look captured on a real premium camera. Keep the essential subject/action safely centered. Absolutely no text, captions, logos, watermark or graphic-design elements.`;
+  return `${scene.imagePrompt}${requestedChange}\n\nFINAL QUALITY BAR: ${BROLL_STYLE_PRESET}\n\nDeliver exactly one hyper-realistic photographic still composed for a ${resolveSceneAssetAspect(plan, scene)} B-roll frame. It must look captured on a real premium camera. Keep the essential subject/action safely centered. Absolutely no text, captions, logos, watermark or graphic-design elements.`;
 }
 function findBase64Image(value: any): string | undefined { if (!value) return undefined; if (typeof value === 'object') { if (typeof value.data === 'string' && (value.type === 'image' || value.mime_type?.startsWith?.('image/'))) return value.data; if (typeof value.b64_json === 'string') return value.b64_json; if (value.output_image) { const nested = findBase64Image(value.output_image); if (nested) return nested; } for (const child of Object.values(value)) { const nested = findBase64Image(child); if (nested) return nested; } } if (Array.isArray(value)) for (const child of value) { const nested = findBase64Image(child); if (nested) return nested; } return undefined; }
 async function generateOpenAi(prompt: string, aspect: '9:16' | '16:9', config: ImageProviderConfig, outputPath: string) { if (!config.openAiApiKey) throw new Error('OPENAI_API_KEY is not configured'); const model = config.openAiModel || 'gpt-image-2'; const size = aspect === '9:16' ? '1024x1536' : '1536x1024'; const response = await fetch('https://api.openai.com/v1/images/generations', { method: 'POST', headers: { Authorization: `Bearer ${config.openAiApiKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ model, prompt, size, quality: 'high' }) }); if (!response.ok) throw new Error(`OpenAI image generation failed: ${response.status} ${await response.text()}`); const encoded = (await response.json() as any).data?.[0]?.b64_json; if (!encoded) throw new Error('OpenAI image generation returned no image data'); await fs.writeFile(outputPath, Buffer.from(encoded, 'base64')); return model; }
@@ -172,31 +188,34 @@ async function normalizeImage(rawPath: string, outputPath: string, aspect: '9:16
 }
 export async function importBrollImage(options: { workDir: string; plan: BrollPlan; sceneId: string; sourcePath: string; ffmpegBin?: string }) {
   const scene = options.plan.scenes.find((candidate) => candidate.id === options.sceneId); if (!scene) throw new Error('B-roll scene not found'); const brollDir = path.join(options.workDir, 'broll'); await fs.mkdir(brollDir, { recursive: true }); const outputPath = path.join(brollDir, `${scene.id}.png`);
-  await normalizeImage(options.sourcePath, outputPath, targetAspect(options.plan), options.ffmpegBin, false); scene.imageFile = outputPath; scene.generatedAt = new Date().toISOString(); scene.provider = 'manual'; scene.model = 'manual-import'; if (scene.videoFile) { await fs.rm(scene.videoFile, { force: true }); scene.videoFile = undefined; scene.videoGeneratedAt = undefined; scene.videoModel = undefined; } await saveBrollPlan(options.workDir, options.plan); return scene;
+  const aspect = resolveSceneAssetAspect(options.plan, scene); await normalizeImage(options.sourcePath, outputPath, aspect, options.ffmpegBin, false); scene.imageFile = outputPath; scene.generatedAt = new Date().toISOString(); scene.generatedAspectRatio = aspect; scene.orientationChanged = false; scene.provider = 'manual'; scene.model = 'manual-import'; if (scene.videoFile) { await fs.rm(scene.videoFile, { force: true }); scene.videoFile = undefined; scene.videoGeneratedAt = undefined; scene.videoModel = undefined; } await saveBrollPlan(options.workDir, options.plan); return scene;
 }
 export async function generateBrollImage(options: { config: ImageProviderConfig; workDir: string; plan: BrollPlan; sceneId: string; regenerationComment?: string }) {
-  const { config, workDir, plan, sceneId } = options; const scene = plan.scenes.find((candidate) => candidate.id === sceneId); if (!scene) throw new Error('B-roll scene not found'); const provider = plan.settings.provider; const aspect = targetAspect(plan); const prompt = generatedImagePrompt(scene, plan, options.regenerationComment); const brollDir = path.join(workDir, 'broll'); await fs.mkdir(brollDir, { recursive: true }); const rawPath = path.join(brollDir, `${scene.id}.raw.png`); const outputPath = path.join(brollDir, `${scene.id}.png`); let model: string;
-  if (provider === 'openai') model = await generateOpenAi(prompt, aspect, config, rawPath); else if (provider === 'gemini') model = await generateGemini(prompt, aspect, config, rawPath); else model = await generateWithAgentCli(provider, prompt, config, workDir, rawPath); await normalizeImage(rawPath, outputPath, aspect, config.ffmpegBin, true); scene.imageFile = outputPath; scene.generatedAt = new Date().toISOString(); scene.provider = provider; scene.model = model; if (scene.videoFile) { await fs.rm(scene.videoFile, { force: true }); scene.videoFile = undefined; scene.videoGeneratedAt = undefined; scene.videoModel = undefined; } await saveBrollPlan(workDir, plan); return scene;
+  const { config, workDir, plan, sceneId } = options; const scene = plan.scenes.find((candidate) => candidate.id === sceneId); if (!scene) throw new Error('B-roll scene not found'); const provider = plan.settings.provider; const aspect = resolveSceneAssetAspect(plan, scene); const prompt = generatedImagePrompt(scene, plan, options.regenerationComment); const brollDir = path.join(workDir, 'broll'); await fs.mkdir(brollDir, { recursive: true }); const rawPath = path.join(brollDir, `${scene.id}.raw.png`); const outputPath = path.join(brollDir, `${scene.id}.png`); let model: string;
+  if (provider === 'openai') model = await generateOpenAi(prompt, aspect, config, rawPath); else if (provider === 'gemini') model = await generateGemini(prompt, aspect, config, rawPath); else model = await generateWithAgentCli(provider, prompt, config, workDir, rawPath); await normalizeImage(rawPath, outputPath, aspect, config.ffmpegBin, true); scene.imageFile = outputPath; scene.generatedAt = new Date().toISOString(); scene.generatedAspectRatio = aspect; scene.orientationChanged = false; scene.provider = provider; scene.model = model; if (scene.videoFile) { await fs.rm(scene.videoFile, { force: true }); scene.videoFile = undefined; scene.videoGeneratedAt = undefined; scene.videoModel = undefined; } await saveBrollPlan(workDir, plan); return scene;
 }
 
 export async function createVideoPrompt(options: { codexBin: string; workDir: string; plan: BrollPlan; sceneId: string }) {
   const scene = options.plan.scenes.find((candidate) => candidate.id === options.sceneId); if (!scene) throw new Error('B-roll scene not found'); if (!scene.imageFile) throw new Error('Add or generate a B-roll image before creating video'); const schemaPath = path.join(options.workDir, `${scene.id}-video-prompt.schema.json`); const outputPath = path.join(options.workDir, `${scene.id}-video-prompt.json`); const schema = { type: 'object', additionalProperties: false, required: ['videoPrompt'], properties: { videoPrompt: { type: 'string' } } }; await fs.writeFile(schemaPath, JSON.stringify(schema, null, 2)); const duration = Math.max(2, Math.min(12, scene.sourceEnd - scene.sourceStart));
-  const prompt = `You are a cinematic image-to-video motion director. Write ONE production-ready motion prompt that animates the existing still image.\n\nNarration: ${scene.narration}\nVisual intent: ${scene.visualIntent}\nShot type: ${scene.shotType}\nStill-image prompt: ${scene.imagePrompt}\nTarget duration: about ${duration.toFixed(1)} seconds.\n\nPreserve exact people, identity, clothing, anatomy, environment, lighting, composition and clinical details. Add subtle believable breathing/blinking/hand/body/environment motion and restrained camera movement. Do not introduce people/objects/tools/text/logos; do not morph faces, hands, teeth or instruments; do not change ethnicity/age/wardrobe/room. Avoid dramatic camera moves, cuts, lip-sync unless required, and AI warping. Make it feel like real premium live action. Return only videoPrompt in the JSON schema.`;
+  const prompt = `You are a cinematic image-to-video motion director. Write ONE production-ready motion prompt that animates the existing still image.\n\nNarration: ${scene.narration}\nVisual intent: ${scene.visualIntent}\nShot type: ${scene.shotType}\nStill-image prompt: ${scene.imagePrompt}\nTarget frame: ${resolveSceneAssetAspect(options.plan, scene)}.\nTarget duration: about ${duration.toFixed(1)} seconds.\n\nPreserve exact people, identity, clothing, anatomy, environment, lighting, composition, frame aspect and clinical details. Add subtle believable breathing/blinking/hand/body/environment motion and restrained camera movement. Do not introduce people/objects/tools/text/logos; do not morph faces, hands, teeth or instruments; do not change ethnicity/age/wardrobe/room. Avoid dramatic camera moves, cuts, lip-sync unless required, and AI warping. Make it feel like real premium live action. Return only videoPrompt in the JSON schema.`;
   await run(options.codexBin, ['exec', '--ephemeral', '--output-schema', schemaPath, '--output-last-message', outputPath, '-'], prompt); const raw = JSON.parse(await fs.readFile(outputPath, 'utf8')); const videoPrompt = String(raw.videoPrompt ?? '').trim(); if (videoPrompt.length < 30) throw new Error('Codex returned an unusable video prompt'); scene.videoPrompt = videoPrompt; await saveBrollPlan(options.workDir, options.plan); return scene;
 }
 export async function generateBrollVideoWithGrokCli(options: { config: ImageProviderConfig; workDir: string; plan: BrollPlan; sceneId: string; regenerationComment?: string }) {
   const scene = options.plan.scenes.find((candidate) => candidate.id === options.sceneId); if (!scene) throw new Error('B-roll scene not found'); if (!scene.imageFile) throw new Error('Add or generate a B-roll image first'); if (!scene.videoPrompt) throw new Error('Create a Codex video prompt first'); if (!options.config.grokBin) throw new Error('Grok CLI was not found. Configure GROK_BIN or install Grok Build.'); const brollDir = path.join(options.workDir, 'broll'); const outputPath = path.join(brollDir, `${scene.id}.mp4`); await fs.rm(outputPath, { force: true }); const duration = Math.max(2, Math.min(12, scene.sourceEnd - scene.sourceStart)); const videoModel = options.config.grokVideoModel || 'grok-imagine-video-1.5';
   const requestedChange = options.regenerationComment?.trim() ? `\n\nUSER REQUEST FOR THIS REGENERATION:\n${options.regenerationComment.trim()}` : '';
-  const agentPrompt = `Turn the local still image at ${scene.imageFile} into an image-to-video clip and save the final playable MP4 to this exact path: ${outputPath}\n\nUse the xAI/Grok Imagine image-to-video capability available in this Grok Build environment. Prefer model ${videoModel}. Target duration: ${duration.toFixed(1)} seconds. Use the source still as the starting image.\n\nMOTION PROMPT:\n${scene.videoPrompt}${requestedChange}\n\nYou may use shell/code/tools available to Grok Build. Do not stop after instructions/code. The task is complete only after the MP4 exists. Do not modify the source still.`;
+  const agentPrompt = `Turn the local still image at ${scene.imageFile} into an image-to-video clip and save the final playable MP4 to this exact path: ${outputPath}\n\nUse the xAI/Grok Imagine image-to-video capability available in this Grok Build environment. Prefer model ${videoModel}. Target frame: ${resolveSceneAssetAspect(options.plan, scene)}. Preserve the source image's exact orientation and aspect ratio in the output video. Target duration: ${duration.toFixed(1)} seconds. Use the source still as the starting image.\n\nMOTION PROMPT:\n${scene.videoPrompt}${requestedChange}\n\nYou may use shell/code/tools available to Grok Build. Do not stop after instructions/code. The task is complete only after the MP4 exists. Do not modify the source still.`;
   const args = ['--no-auto-update', '--always-approve', '--cwd', options.workDir, '-p', agentPrompt, '--output-format', 'plain']; if (options.config.grokModel) args.splice(4, 0, '-m', options.config.grokModel); await run(options.config.grokBin, args, undefined, 900000); const stat = await fs.stat(outputPath).catch(() => null); if (!stat?.isFile() || stat.size < 50_000) throw new Error('Grok CLI completed without creating a usable MP4. The Grok CLI environment must have image-to-video capability/authentication.'); if (options.config.ffmpegBin) await run(options.config.ffmpegBin, ['-v', 'error', '-i', outputPath, '-f', 'null', '-'], undefined, 120000); scene.videoFile = outputPath; scene.videoGeneratedAt = new Date().toISOString(); scene.videoModel = videoModel; await saveBrollPlan(options.workDir, options.plan); return scene;
 }
 
 function even(value: number) { const rounded = Math.max(2, Math.round(value)); return rounded % 2 === 0 ? rounded : rounded - 1; }
-function roundedAlpha(radius: number) {
-  return `if(lte(hypot(max(${radius}-X,0)+max(X-(W-${radius}),0),max(${radius}-Y,0)+max(Y-(H-${radius}),0)),${radius}),255,0)`;
+function roundedAlpha(radius: number, maxAlpha = 255) {
+  return `if(lte(hypot(max(${radius}-X,0)+max(X-(W-${radius}),0),max(${radius}-Y,0)+max(Y-(H-${radius}),0)),${radius}),${maxAlpha},0)`;
 }
-function roundedRgba(radius: number) { return `format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='${roundedAlpha(radius)}'`; }
+function roundedRgba(radius: number, hdr = false) { return `format=${hdr ? 'gbrap10le' : 'rgba'},geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='${roundedAlpha(radius, hdr ? 1023 : 255)}'`; }
 function bt709Media() { return 'format=yuv420p,setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709'; }
+function hlgBt2020Media() {
+  return 'zscale=pin=bt709:tin=bt709:min=bt709:t=linear:npl=100,format=gbrpf32le,zscale=p=bt2020:t=arib-std-b67:m=bt2020nc:r=tv:npl=203,format=yuv420p10le,setparams=color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc';
+}
 function layoutRect(template: BrollDisplayTemplate, width: number, height: number) {
   if (template === 'top-card' || template === 'top-card-presenter') return { width: even(width * 0.92), height: even(height * 0.42), x: even(width * 0.04), y: even(height * 0.035) };
   if (template === 'split-top') return { width: even(width), height: even(height * 0.47), x: 0, y: 0 };
@@ -207,29 +226,34 @@ function layoutRect(template: BrollDisplayTemplate, width: number, height: numbe
   return { width: even(width), height: even(height), x: 0, y: 0 };
 }
 
-export function buildBrollOverlayFilter(options: { plan: BrollPlan; width: number; height: number; fps: number; cleanedSegments?: Array<{ start: number; end: number }>; presenterInputIndex?: number; includeAudio?: boolean; baseVideoFilter?: string }) {
+export function buildBrollOverlayFilter(options: { plan: BrollPlan; width: number; height: number; fps: number; cleanedSegments?: Array<{ start: number; end: number }>; presenterInputIndex?: number; includeAudio?: boolean; baseVideoFilter?: string; outputHdr?: boolean }) {
   const active = options.plan.scenes.filter((scene) => scene.enabled && (scene.videoFile || scene.imageFile));
   if (!active.length) throw new Error('Add at least one enabled B-roll image or video before exporting');
   const presenterScenes = active.filter((scene) => displayTemplateNeedsPresenterMatte(resolveSceneDisplayTemplate(options.plan, scene)));
-  const stackedScenes = active.filter((scene) => resolveSceneDisplayTemplate(options.plan, scene) === 'stacked-cards-cutout');
+  const stackedScenes = active.filter((scene) => ['stacked-cards-cutout', 'stacked-talking-top', 'stacked-broll-top'].includes(resolveSceneDisplayTemplate(options.plan, scene)));
   if (presenterScenes.length && options.presenterInputIndex === undefined) throw new Error('A presenter-cutout template is selected but the presenter matte input is missing');
 
   const parts: string[] = [];
   const basePrefix = options.baseVideoFilter?.trim() ? `${options.baseVideoFilter.trim()},` : '';
+  const mediaFilter = options.outputHdr ? hlgBt2020Media() : bt709Media();
+  const overlayFormat = options.outputHdr ? ':format=yuv420p10' : '';
+  const outputFormat = options.outputHdr ? 'format=yuv420p10le,setparams=color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc,' : '';
   let presenterLabels: string[] = [];
-  if (presenterScenes.length) {
-    const sourceLabels = ['base0', 'presenterSource', ...stackedScenes.map((_scene, index) => `stackedSource${index}`)];
+  const sourceLabels = ['base0', ...(presenterScenes.length ? ['presenterSource'] : []), ...stackedScenes.map((_scene, index) => `stackedSource${index}`)];
+  if (sourceLabels.length > 1) {
     parts.push(`[0:v]${basePrefix}setpts=PTS-STARTPTS,split=${sourceLabels.length}${sourceLabels.map((label) => `[${label}]`).join('')}`);
-    parts.push(`[${options.presenterInputIndex}:v]fps=${options.fps.toFixed(6)},scale=${options.width}:${options.height}:flags=bilinear,gblur=sigma=0.45:steps=1,format=gray,setpts=PTS-STARTPTS[presenterMask]`);
-    parts.push('[presenterSource]format=rgba[presenterRgb]');
+  } else {
+    parts.push(`[0:v]${basePrefix}setpts=PTS-STARTPTS[base0]`);
+  }
+  if (presenterScenes.length) {
+    parts.push(`[${options.presenterInputIndex}:v]fps=${options.fps.toFixed(6)},scale=${options.width}:${options.height}:flags=bilinear,gblur=sigma=0.45:steps=1,format=${options.outputHdr ? 'gray10le' : 'gray'},setpts=PTS-STARTPTS[presenterMask]`);
+    parts.push(`[presenterSource]format=${options.outputHdr ? 'gbrp10le' : 'rgba'}[presenterRgb]`);
     parts.push('[presenterRgb][presenterMask]alphamerge[presenterAlpha]');
     if (presenterScenes.length === 1) presenterLabels = ['presenterAlpha'];
     else {
       presenterLabels = presenterScenes.map((_scene, index) => `presenter${index}`);
       parts.push(`[presenterAlpha]split=${presenterLabels.length}${presenterLabels.map((label) => `[${label}]`).join('')}`);
     }
-  } else {
-    parts.push(`[0:v]${basePrefix}setpts=PTS-STARTPTS[base0]`);
   }
 
   let previous = 'base0'; let presenterCursor = 0; let stackedCursor = 0;
@@ -237,26 +261,37 @@ export function buildBrollOverlayFilter(options: { plan: BrollPlan; width: numbe
     const input = index + 1; const mediaLabel = `broll${index}`; const mediaOutput = `mediaBase${index}`; const output = `base${index + 1}`;
     const duration = Math.max(0.1, scene.sourceEnd - scene.sourceStart); const template = resolveSceneDisplayTemplate(options.plan, scene); const rect = layoutRect(template, options.width, options.height);
     const between = `between(t,${scene.sourceStart.toFixed(6)},${scene.sourceEnd.toFixed(6)})`;
-    if (template === 'stacked-cards-cutout') {
-      const margin = even(options.width * 0.035); const topY = even(options.height * 0.025); const cardWidth = even(options.width - margin * 2); const topHeight = even(options.height * 0.43); const lowerY = even(options.height * 0.50); const lowerHeight = even(options.height * 0.475); const radius = even(Math.min(cardWidth, topHeight) * 0.065);
-      const presenterWidth = even(cardWidth * 0.94); const presenterX = margin + even((cardWidth - presenterWidth) / 2); const presenterY = even(options.height * (options.height >= options.width ? 0.16 : 0.30)); const shadowY = presenterY + even(options.height * 0.008); const stackedSource = `stackedSource${stackedCursor++}`; const presenterLabel = presenterLabels[presenterCursor++];
-      parts.push(`[${input}:v]scale=${cardWidth}:${topHeight}:force_original_aspect_ratio=increase:flags=lanczos,crop=${cardWidth}:${topHeight},setsar=1,${bt709Media()},${roundedRgba(radius)},trim=duration=${duration.toFixed(6)},setpts=PTS-STARTPTS+${scene.sourceStart.toFixed(6)}/TB[${mediaLabel}]`);
-      parts.push(`[${stackedSource}]scale=${cardWidth}:${lowerHeight}:force_original_aspect_ratio=increase:flags=lanczos,crop=${cardWidth}:${lowerHeight},setsar=1,boxblur=luma_radius=12:luma_power=1:chroma_radius=6:chroma_power=1,${roundedRgba(radius)}[stackedRoom${index}]`);
-      parts.push(`[${presenterLabel}]scale=${presenterWidth}:-2:flags=lanczos,format=rgba,split=2[stackedPresenter${index}][stackedShadowSeed${index}]`);
-      parts.push(`[stackedShadowSeed${index}]colorchannelmixer=rr=0:gg=0:bb=0:aa=0.20,gblur=sigma=8:steps=2[stackedShadow${index}]`);
+    if (template === 'stacked-talking-top' || template === 'stacked-broll-top') {
+      const margin = even(options.width * 0.035); const topY = even(options.height * 0.025); const cardWidth = even(options.width - margin * 2); const cardHeight = even(options.height * 0.455); const lowerY = even(options.height * 0.52); const radius = even(Math.min(cardWidth, cardHeight) * 0.055); const stackedSource = `stackedSource${stackedCursor++}`;
+      parts.push(`[${input}:v]scale=${cardWidth}:${cardHeight}:force_original_aspect_ratio=increase:flags=lanczos,crop=${cardWidth}:${cardHeight},setsar=1,${mediaFilter},${roundedRgba(radius, options.outputHdr)},trim=duration=${duration.toFixed(6)},setpts=PTS-STARTPTS+${scene.sourceStart.toFixed(6)}/TB[${mediaLabel}]`);
+      parts.push(`[${stackedSource}]scale=${cardWidth}:${cardHeight}:force_original_aspect_ratio=increase:flags=lanczos,crop=${cardWidth}:${cardHeight},setsar=1,${roundedRgba(radius, options.outputHdr)}[talkingCard${index}]`);
       parts.push(`[${previous}]drawbox=x=0:y=0:w=iw:h=ih:color=black:t=fill:enable='${between}'[stackedBg${index}]`);
-      parts.push(`[stackedBg${index}][${mediaLabel}]overlay=${margin}:${topY}:eof_action=pass:enable='${between}'[stackedTop${index}]`);
-      parts.push(`[stackedTop${index}][stackedRoom${index}]overlay=${margin}:${lowerY}:eof_action=pass:enable='${between}'[stackedLower${index}]`);
-      parts.push(`[stackedLower${index}][stackedShadow${index}]overlay=${presenterX}:${shadowY}:eof_action=pass:enable='${between}'[stackedShadowed${index}]`);
-      parts.push(`[stackedShadowed${index}][stackedPresenter${index}]overlay=${presenterX}:${presenterY}:eof_action=pass:enable='${between}'[${output}]`);
+      const topLabel = template === 'stacked-broll-top' ? mediaLabel : `talkingCard${index}`; const bottomLabel = template === 'stacked-broll-top' ? `talkingCard${index}` : mediaLabel;
+      parts.push(`[stackedBg${index}][${topLabel}]overlay=${margin}:${topY}:eof_action=pass:enable='${between}'${overlayFormat}[stackedTop${index}]`);
+      parts.push(`[stackedTop${index}][${bottomLabel}]overlay=${margin}:${lowerY}:eof_action=pass:enable='${between}'${overlayFormat}[${output}]`);
       previous = output;
       return;
     }
-    parts.push(`[${input}:v]scale=${rect.width}:${rect.height}:force_original_aspect_ratio=increase:flags=lanczos,crop=${rect.width}:${rect.height},setsar=1,${bt709Media()},trim=duration=${duration.toFixed(6)},setpts=PTS-STARTPTS+${scene.sourceStart.toFixed(6)}/TB[${mediaLabel}]`);
-    parts.push(`[${previous}][${mediaLabel}]overlay=${rect.x}:${rect.y}:eof_action=pass:enable='${between}'[${mediaOutput}]`);
+    if (template === 'stacked-cards-cutout') {
+      const margin = even(options.width * 0.035); const topY = even(options.height * 0.025); const cardWidth = even(options.width - margin * 2); const topHeight = even(options.height * 0.43); const lowerY = even(options.height * 0.50); const lowerHeight = even(options.height * 0.475); const radius = even(Math.min(cardWidth, topHeight) * 0.065);
+      const presenterWidth = even(cardWidth * 0.94); const presenterX = margin + even((cardWidth - presenterWidth) / 2); const presenterY = even(options.height * (options.height >= options.width ? 0.16 : 0.30)); const shadowY = presenterY + even(options.height * 0.008); const stackedSource = `stackedSource${stackedCursor++}`; const presenterLabel = presenterLabels[presenterCursor++];
+      parts.push(`[${input}:v]scale=${cardWidth}:${topHeight}:force_original_aspect_ratio=increase:flags=lanczos,crop=${cardWidth}:${topHeight},setsar=1,${mediaFilter},${roundedRgba(radius, options.outputHdr)},trim=duration=${duration.toFixed(6)},setpts=PTS-STARTPTS+${scene.sourceStart.toFixed(6)}/TB[${mediaLabel}]`);
+      parts.push(`[${stackedSource}]scale=${cardWidth}:${lowerHeight}:force_original_aspect_ratio=increase:flags=lanczos,crop=${cardWidth}:${lowerHeight},setsar=1,boxblur=luma_radius=12:luma_power=1:chroma_radius=6:chroma_power=1,${roundedRgba(radius, options.outputHdr)}[stackedRoom${index}]`);
+      parts.push(`[${presenterLabel}]scale=${presenterWidth}:-2:flags=lanczos,format=${options.outputHdr ? 'gbrap10le' : 'rgba'},split=2[stackedPresenter${index}][stackedShadowSeed${index}]`);
+      parts.push(`[stackedShadowSeed${index}]colorchannelmixer=rr=0:gg=0:bb=0:aa=0.20,gblur=sigma=8:steps=2[stackedShadow${index}]`);
+      parts.push(`[${previous}]drawbox=x=0:y=0:w=iw:h=ih:color=black:t=fill:enable='${between}'[stackedBg${index}]`);
+      parts.push(`[stackedBg${index}][${mediaLabel}]overlay=${margin}:${topY}:eof_action=pass:enable='${between}'${overlayFormat}[stackedTop${index}]`);
+      parts.push(`[stackedTop${index}][stackedRoom${index}]overlay=${margin}:${lowerY}:eof_action=pass:enable='${between}'${overlayFormat}[stackedLower${index}]`);
+      parts.push(`[stackedLower${index}][stackedShadow${index}]overlay=${presenterX}:${shadowY}:eof_action=pass:enable='${between}'${overlayFormat}[stackedShadowed${index}]`);
+      parts.push(`[stackedShadowed${index}][stackedPresenter${index}]overlay=${presenterX}:${presenterY}:eof_action=pass:enable='${between}'${overlayFormat}[${output}]`);
+      previous = output;
+      return;
+    }
+    parts.push(`[${input}:v]scale=${rect.width}:${rect.height}:force_original_aspect_ratio=increase:flags=lanczos,crop=${rect.width}:${rect.height},setsar=1,${mediaFilter},trim=duration=${duration.toFixed(6)},setpts=PTS-STARTPTS+${scene.sourceStart.toFixed(6)}/TB[${mediaLabel}]`);
+    parts.push(`[${previous}][${mediaLabel}]overlay=${rect.x}:${rect.y}:eof_action=pass:enable='${between}'${overlayFormat}[${mediaOutput}]`);
     if (displayTemplateNeedsPresenterMatte(template)) {
       const presenterLabel = presenterLabels[presenterCursor++];
-      parts.push(`[${mediaOutput}][${presenterLabel}]overlay=0:0:eof_action=pass:enable='between(t,${scene.sourceStart.toFixed(6)},${scene.sourceEnd.toFixed(6)})'[${output}]`);
+      parts.push(`[${mediaOutput}][${presenterLabel}]overlay=0:0:eof_action=pass:enable='between(t,${scene.sourceStart.toFixed(6)},${scene.sourceEnd.toFixed(6)})'${overlayFormat}[${output}]`);
     } else {
       parts.push(`[${mediaOutput}]null[${output}]`);
     }
@@ -265,10 +300,10 @@ export function buildBrollOverlayFilter(options: { plan: BrollPlan; width: numbe
 
   if (options.cleanedSegments?.length) {
     const expression = options.cleanedSegments.map((segment) => `between(t\\,${segment.start.toFixed(6)}\\,${segment.end.toFixed(6)})`).join('+');
-    parts.push(`[${previous}]select='${expression}',setpts=N/${options.fps.toFixed(6)}/TB[vout]`);
+    parts.push(`[${previous}]${outputFormat}select='${expression}',setpts=N/${options.fps.toFixed(6)}/TB[vout]`);
     if (options.includeAudio !== false) parts.push(`[0:a]aselect='${expression}',asetpts=N/SR/TB[aout]`);
   } else {
-    parts.push(`[${previous}]setpts=PTS-STARTPTS[vout]`); if (options.includeAudio !== false) parts.push('[0:a]asetpts=PTS-STARTPTS[aout]');
+    parts.push(`[${previous}]${outputFormat}setpts=PTS-STARTPTS[vout]`); if (options.includeAudio !== false) parts.push('[0:a]asetpts=PTS-STARTPTS[aout]');
   }
   return { filter: parts.join(';'), activeScenes: active, needsPresenterMatte: presenterScenes.length > 0 };
 }

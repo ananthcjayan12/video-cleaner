@@ -71,7 +71,8 @@
 .styleStrip span,.styleStrip strong { padding:6px 9px; border-radius:999px; background:#18181b; border:1px solid #27272a; color:#a1a1aa; font-size:10px; }
 .styleStrip strong { color:#86efac; }
 .brollGrid { display:grid; grid-template-columns:repeat(auto-fit,minmax(440px,1fr)); gap:16px; align-items:start; }
-.brollCard { display:grid; grid-template-columns:minmax(170px,230px) minmax(0,1fr); gap:14px; border:1px solid #27272a; background:#0f0f11; border-radius:16px; padding:12px; min-width:0; transition:opacity .2s ease; }
+.brollCard { display:grid; grid-template-columns:minmax(170px,230px) minmax(0,1fr); gap:14px; border:1px solid #27272a; background:#0f0f11; border-radius:16px; padding:12px; min-width:0; transition:opacity .2s ease,border-color .2s ease,box-shadow .2s ease; }
+.brollCard.selectedForBatch { border-color:#22c55e; box-shadow:0 0 0 1px rgba(34,197,94,.28); }
 .brollCard.disabledScene { opacity:.55; }
 .brollMediaColumn { min-width:0; display:flex; flex-direction:column; gap:8px; }
 .brollImage { width:100%; overflow:hidden; border-radius:12px; background:linear-gradient(145deg,#18181b,#09090b); border:1px solid #27272a; display:grid; place-items:center; }
@@ -96,6 +97,7 @@ button.danger:hover:not(:disabled) { background:rgba(127,29,29,.28); border-colo
 .sceneLayout small { color:#71717a; font-size:9px; line-height:1.4; }
 .toggleRow { flex-direction:row !important; align-items:center; gap:8px !important; }
 .toggleRow input { width:auto; }
+.batchSelect { color:#d4d4d8 !important; font-weight:700; }
 .timingGrid { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
 textarea { width:100%; border:1px solid #3f3f46; background:#09090b; color:#e4e4e7; border-radius:9px; padding:10px 11px; outline:none; resize:vertical; line-height:1.45; font:inherit; font-size:11px; }
 textarea:focus { border-color:#71717a; }
