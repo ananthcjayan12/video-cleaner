@@ -4,7 +4,7 @@ export type Edl = { keepRanges: KeepRange[]; notes?: string[] };
 export type ImageProvider = 'openai' | 'gemini' | 'grok-cli' | 'codex-cli';
 export type BrollWorkflowMode = 'cleaned-video' | 'raw-video' | 'assets-only';
 export type BrollAssetAspectRatio = 'auto' | '9:16' | '16:9';
-export type BrollCountMode = 'auto' | 'exact' | 'per-minute';
+export type BrollCountMode = 'auto' | 'exact' | 'per-minute' | 'interval';
 export type BrollDisplayTemplate = 'full-frame' | 'top-card' | 'split-top' | 'picture-in-picture' | 'top-card-presenter' | 'presenter-overlay' | 'stacked-cards-cutout' | 'stacked-talking-top' | 'stacked-broll-top';
 
 export type ProjectState = {
@@ -24,6 +24,7 @@ export type Project = {
   name: string;
   sourceName: string;
   clipCount?: number;
+  clips?: Array<{ id: string; sourceName: string; duration: number; timelineStart: number; timelineEnd: number }>;
   createdAt: string;
   updatedAt: string;
   sourceAvailable: boolean;
@@ -57,7 +58,7 @@ export type SystemStatus = {
 export type PresenterMatteStatus = { ready: boolean; stale: boolean; generatedAt?: string; analysisSource?: 'proxy' | 'generated-proxy' };
 export type ExportStatus = { state: 'idle' | 'running' | 'completed' | 'failed' | 'stopped'; progress: number; outTime: string; speed: string; frame: number; outputPath?: string; encoder?: string; error?: string; checkpointCompleted?: number; checkpointTotal?: number; resumable?: boolean; resumed?: boolean };
 export type BrollPlanSettings = {
-  workflowMode: BrollWorkflowMode; provider: ImageProvider; countMode: BrollCountMode; targetCount: number; imagesPerMinute: number;
+  workflowMode: BrollWorkflowMode; provider: ImageProvider; countMode: BrollCountMode; targetCount: number; imagesPerMinute: number; intervalSeconds: number;
   minSceneDuration: number; maxSceneDuration: number; aspectRatio: 'auto' | '9:16' | '16:9'; displayTemplate?: BrollDisplayTemplate;
 };
 export type BrollScene = {
@@ -93,6 +94,9 @@ export const api = {
   renameProject: (id: string, name: string) => request<Project>(`/api/projects/${id}/meta`, { method: 'PUT', body: JSON.stringify({ name }) }),
   deleteProject: (id: string) => request<{ deleted: boolean; id: string }>(`/api/projects/${id}`, { method: 'DELETE' }),
   relinkProject: (id: string) => request<Project>(`/api/projects/${id}/relink`, { method: 'POST' }),
+  addProjectClips: (id: string) => request<Project>(`/api/projects/${id}/clips`, { method: 'POST' }),
+  reorderProjectClips: (id: string, clipIds: string[]) => request<Project>(`/api/projects/${id}/clips/order`, { method: 'PUT', body: JSON.stringify({ clipIds }) }),
+  removeProjectClip: (id: string, clipId: string) => request<Project>(`/api/projects/${id}/clips/${clipId}`, { method: 'DELETE' }),
 
   prepare: (id: string) => request<{ proxyUrl: string; proxy: { width: number; height: number; fps: number; hardware: boolean } }>(`/api/projects/${id}/prepare`, { method: 'POST' }),
   transcribe: (id: string) => request<{ transcript: { text?: string; words: Word[] }; edl: Edl }>(`/api/projects/${id}/transcribe`, { method: 'POST' }),

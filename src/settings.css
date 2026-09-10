@@ -51,7 +51,21 @@
 .resumeHint { margin:0; color:#facc15; font-size:11px; line-height:1.45; }
 .projectActions { margin-top:auto; }
 .projectActions .primary { min-width:92px; }
+.source { flex-direction:column; align-items:stretch; }
+.sourceSummary { display:flex; justify-content:space-between; align-items:center; gap:20px; }
 .sourceRight { display:flex; flex-direction:column; align-items:flex-end; gap:9px; }
+.sourceActions { display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; }
+.clipTimeline { border-top:1px solid #27272a; padding-top:14px; display:flex; flex-direction:column; gap:8px; }
+.clipTimelineHead { display:flex; align-items:baseline; justify-content:space-between; gap:12px; }
+.clipTimelineHead strong { font-size:12px; }
+.clipTimelineHead span { color:#71717a; font-size:10px; }
+.clipTimelineRow { display:grid; grid-template-columns:28px minmax(0,1fr) auto; gap:10px; align-items:center; padding:9px 10px; border:1px solid #27272a; background:#0f0f11; border-radius:11px; }
+.clipTimelineRow strong,.clipTimelineRow small { display:block; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.clipTimelineRow strong { margin:0; font-size:12px; }
+.clipTimelineRow small { color:#71717a; margin-top:3px; font-size:10px; }
+.clipOrder { width:25px; height:25px; border-radius:999px; display:grid; place-items:center; background:#27272a; color:#d4d4d8; font-size:10px; }
+.clipOrderActions { display:flex; gap:5px; }
+.clipOrderActions button { min-width:32px; padding:6px 8px; }
 .missingSourcePanel { border-color:#7f1d1d; }
 .sourceWarning { margin-top:-8px; margin-bottom:18px; padding:12px 16px; display:flex; gap:10px; align-items:center; border-color:#7f1d1d; color:#d4d4d8; }
 .sourceWarning strong { color:#fda4af; white-space:nowrap; }
@@ -126,5 +140,8 @@ textarea:focus { border-color:#71717a; }
   .timingGrid{grid-template-columns:1fr}
   .projectGrid{grid-template-columns:1fr}
   .sourceRight{align-items:flex-start}
+  .sourceSummary{align-items:flex-start;flex-direction:column}
+  .sourceActions{justify-content:flex-start}
+  .clipTimelineHead{align-items:flex-start;flex-direction:column}
   .sourceWarning{align-items:flex-start;flex-direction:column}
 }

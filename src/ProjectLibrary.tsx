@@ -17,14 +17,14 @@ export default function ProjectLibrary({ projects, busy, onNew, onOpen, onRename
       <div>
         <span className="eyebrow">LOCAL PROJECT LIBRARY</span>
         <h2>Resume exactly where you stopped.</h2>
-        <p>Projects can contain one or several talking-head clips. Transcripts, edits, B-roll images and generated clips stay on this computer while every large original video remains referenced in its existing location.</p>
+        <p>Start with one clip or select several at once. After creation, you can add more base clips in separate selections and arrange their playback order inside the project.</p>
       </div>
       <div className="libraryHeroActions"><button onClick={onRefresh} disabled={busy}>Refresh</button><button className="primary" onClick={onNew} disabled={busy}>+ New project</button></div>
     </div>
 
     <div className="libraryHeading"><div><span className="label">RECENT PROJECTS</span><h3>{projects.length ? `${projects.length} local project${projects.length === 1 ? '' : 's'}` : 'No saved projects yet'}</h3></div></div>
 
-    {!projects.length ? <div className="panel libraryEmpty"><strong>Your project library is empty.</strong><p>Create a project once and Video Cleaner will restore it from the local project folder on future launches. You can select multiple compatible video clips in the native picker.</p><button className="primary" onClick={onNew} disabled={busy}>Choose video clips</button></div> : <div className="projectGrid">
+    {!projects.length ? <div className="panel libraryEmpty"><strong>Your project library is empty.</strong><p>Choose one clip to begin, or select multiple compatible clips together. You can easily add the remaining clips after the project opens.</p><button className="primary" onClick={onNew} disabled={busy}>Create from video clip(s)</button></div> : <div className="projectGrid">
       {projects.map((project) => <article className={`panel projectCard ${project.sourceAvailable ? '' : 'sourceMissing'}`} key={project.id}>
         <div className="projectCardHead">
           <div><span className="label">{project.sourceAvailable ? 'LOCAL PROJECT' : 'SOURCE NEEDS RELINK'}</span><h3>{project.name}</h3><small>{project.sourceName}</small></div>

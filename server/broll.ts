@@ -6,7 +6,7 @@ export type BrollWord = { id: string; text: string; start: number; end: number }
 export type BrollKeepRange = { startWordId: string; endWordId: string };
 export type ImageProvider = 'openai' | 'gemini' | 'grok-cli' | 'codex-cli';
 export type BrollWorkflowMode = 'cleaned-video' | 'raw-video' | 'assets-only';
-export type BrollCountMode = 'auto' | 'exact' | 'per-minute';
+export type BrollCountMode = 'auto' | 'exact' | 'per-minute' | 'interval';
 export type BrollAssetAspectRatio = 'auto' | '9:16' | '16:9';
 export type BrollDisplayTemplate = 'full-frame' | 'top-card' | 'split-top' | 'picture-in-picture' | 'top-card-presenter' | 'presenter-overlay' | 'stacked-cards-cutout' | 'stacked-talking-top' | 'stacked-broll-top';
 
@@ -28,6 +28,7 @@ export type BrollPlanSettings = {
   countMode: BrollCountMode;
   targetCount: number;
   imagesPerMinute: number;
+  intervalSeconds: number;
   minSceneDuration: number;
   maxSceneDuration: number;
   aspectRatio: 'auto' | '9:16' | '16:9';
@@ -61,6 +62,13 @@ export const BROLL_STYLE_PRESET = [
   'Avoid plastic skin, excessive beauty retouching, oversharpening, surreal lighting, orange/teal grading, impossible reflections, malformed teeth, extra fingers, duplicated tools, uncanny faces or obviously AI-generated details.',
 ].join(' ');
 
+export const MIN_BROLL_GAP_SECONDS = 5;
+const MAX_BROLL_PLAN_ATTEMPTS = 4;
+
+class BrollPlanValidationError extends Error {
+  constructor(readonly issues: string[]) { super(issues.join('\n')); this.name = 'BrollPlanValidationError'; }
+}
+
 async function run(command: string, args: string[], stdin?: string, timeoutMs = 0, options?: RunOptions) {
   return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
     const child = spawn(command, args, { shell: false, windowsHide: true, cwd: options?.cwd, env: options?.env }); let stdout = ''; let stderr = ''; let timer: NodeJS.Timeout | undefined;
@@ -78,9 +86,26 @@ function keptWordIndexes(words: BrollWord[], ranges?: BrollKeepRange[]) {
   for (const range of activeRanges) { const start = index.get(range.startWordId); const end = index.get(range.endWordId); if (start === undefined || end === undefined || start > end) continue; for (let position = start; position <= end; position += 1) kept.add(position); }
   return { index, kept, activeRanges };
 }
+function keptTimeline(words: BrollWord[], ranges?: BrollKeepRange[]) {
+  const { index, activeRanges } = keptWordIndexes(words, ranges);
+  const times = new Map<number, { start: number; end: number }>();
+  let cursor = 0;
+  for (const range of activeRanges) {
+    const start = index.get(range.startWordId); const end = index.get(range.endWordId);
+    if (start === undefined || end === undefined || start > end) continue;
+    const rangeSourceStart = words[start].start;
+    for (let position = start; position <= end; position += 1) times.set(position, { start: cursor + words[position].start - rangeSourceStart, end: cursor + words[position].end - rangeSourceStart });
+    cursor += Math.max(0, words[end].end - rangeSourceStart);
+  }
+  return { times, duration: cursor };
+}
 function targetSceneCount(words: BrollWord[], ranges: BrollKeepRange[] | undefined, settings: BrollPlanSettings) {
-  if (settings.countMode === 'exact') return Math.max(1, Math.min(40, Math.round(settings.targetCount || 1))); if (settings.countMode !== 'per-minute') return 0;
-  const { kept } = keptWordIndexes(words, ranges); const keptWords = words.filter((_word, index) => kept.has(index)); if (!keptWords.length) return 0; const duration = Math.max(1, keptWords.at(-1)!.end - keptWords[0].start); return Math.max(1, Math.min(40, Math.round(duration / 60 * Math.max(0.5, settings.imagesPerMinute || 4))));
+  if (settings.countMode === 'exact') return Math.max(1, Math.min(40, Math.round(settings.targetCount || 1)));
+  if (settings.countMode !== 'per-minute' && settings.countMode !== 'interval') return 0;
+  const { duration } = keptTimeline(words, ranges);
+  if (!duration) return 0;
+  if (settings.countMode === 'interval') return Math.max(1, Math.ceil(duration / settings.intervalSeconds));
+  return Math.max(1, Math.min(40, Math.round(duration / 60 * Math.max(0.5, settings.imagesPerMinute || 4))));
 }
 function planSchema(exactCount = 0) { return { type: 'object', additionalProperties: false, required: ['scenes', 'notes'], properties: { scenes: { type: 'array', ...(exactCount ? { minItems: exactCount, maxItems: exactCount } : {}), items: { type: 'object', additionalProperties: false, required: ['id', 'title', 'startWordId', 'endWordId', 'narration', 'visualIntent', 'shotType', 'imagePrompt'], properties: { id: { type: 'string' }, title: { type: 'string' }, startWordId: { type: 'string' }, endWordId: { type: 'string' }, narration: { type: 'string' }, visualIntent: { type: 'string' }, shotType: { type: 'string' }, imagePrompt: { type: 'string' } } } }, notes: { type: 'array', items: { type: 'string' } } } }; }
 function normalizeDisplayTemplate(value: unknown): BrollDisplayTemplate {
@@ -90,27 +115,69 @@ function normalizeDisplayTemplate(value: unknown): BrollDisplayTemplate {
 function normalizeSettings(raw: Partial<BrollPlanSettings> | undefined): BrollPlanSettings {
   const workflowMode: BrollWorkflowMode = ['cleaned-video', 'raw-video', 'assets-only'].includes(String(raw?.workflowMode)) ? raw!.workflowMode as BrollWorkflowMode : 'cleaned-video';
   const provider: ImageProvider = ['openai', 'gemini', 'grok-cli', 'codex-cli'].includes(String(raw?.provider)) ? raw!.provider as ImageProvider : 'gemini';
-  const countMode: BrollCountMode = ['auto', 'exact', 'per-minute'].includes(String(raw?.countMode)) ? raw!.countMode as BrollCountMode : 'auto';
+  const countMode: BrollCountMode = ['auto', 'exact', 'per-minute', 'interval'].includes(String(raw?.countMode)) ? raw!.countMode as BrollCountMode : 'auto';
   const aspectRatio = ['auto', '9:16', '16:9'].includes(String(raw?.aspectRatio)) ? raw!.aspectRatio as BrollPlanSettings['aspectRatio'] : 'auto';
-  return { workflowMode, provider, countMode, targetCount: Math.max(1, Math.min(40, Number(raw?.targetCount) || 6)), imagesPerMinute: Math.max(0.5, Math.min(20, Number(raw?.imagesPerMinute) || 5)), minSceneDuration: Math.max(1, Math.min(20, Number(raw?.minSceneDuration) || 3)), maxSceneDuration: Math.max(2, Math.min(30, Number(raw?.maxSceneDuration) || 8)), aspectRatio, displayTemplate: normalizeDisplayTemplate(raw?.displayTemplate) };
+  return { workflowMode, provider, countMode, targetCount: Math.max(1, Math.min(40, Number(raw?.targetCount) || 6)), imagesPerMinute: Math.max(0.5, Math.min(20, Number(raw?.imagesPerMinute) || 5)), intervalSeconds: Math.max(10, Math.min(300, Number(raw?.intervalSeconds) || 20)), minSceneDuration: Math.max(1, Math.min(20, Number(raw?.minSceneDuration) || 3)), maxSceneDuration: Math.max(2, Math.min(30, Number(raw?.maxSceneDuration) || 8)), aspectRatio, displayTemplate: normalizeDisplayTemplate(raw?.displayTemplate) };
 }
 function validatePlan(words: BrollWord[], keepRanges: BrollKeepRange[] | undefined, raw: any, orientation: 'portrait' | 'landscape', settings: BrollPlanSettings): BrollPlan {
-  const { index, kept } = keptWordIndexes(words, keepRanges); const scenes: BrollScene[] = []; let previousStart = -1;
-  for (const candidate of raw.scenes ?? []) {
-    const start = index.get(candidate.startWordId); const end = index.get(candidate.endWordId); if (start === undefined || end === undefined || start > end || !kept.has(start) || !kept.has(end) || start < previousStart) continue;
-    const narrationWords: string[] = []; for (let position = start; position <= end; position += 1) if (kept.has(position)) narrationWords.push(words[position].text); const imagePrompt = String(candidate.imagePrompt ?? '').trim(); if (!narrationWords.length || imagePrompt.length < 40) continue;
-    const sceneNumber = scenes.length + 1; scenes.push({ id: `scene-${String(sceneNumber).padStart(3, '0')}`, title: String(candidate.title ?? `Scene ${sceneNumber}`).trim().slice(0, 100) || `Scene ${sceneNumber}`, startWordId: words[start].id, endWordId: words[end].id, sourceStart: words[start].start, sourceEnd: words[end].end, narration: narrationWords.join(' '), visualIntent: String(candidate.visualIntent ?? '').trim(), shotType: String(candidate.shotType ?? '').trim(), imagePrompt, enabled: true }); previousStart = start;
+  const { index, kept } = keptWordIndexes(words, keepRanges); const { times } = keptTimeline(words, keepRanges); const scenes: BrollScene[] = []; const issues: string[] = []; let previousStart = -1; let previousTimelineEnd = -1; let previousLabel = '';
+  if (!Array.isArray(raw?.scenes)) issues.push('The response does not contain a scenes array.');
+  for (const [candidateIndex, candidate] of (Array.isArray(raw?.scenes) ? raw.scenes : []).entries()) {
+    const label = String(candidate?.id || `scene at array position ${candidateIndex + 1}`); const start = index.get(candidate?.startWordId); const end = index.get(candidate?.endWordId);
+    if (start === undefined || end === undefined) { issues.push(`${label} uses a word ID that is not in the supplied narration.`); continue; }
+    if (start > end) { issues.push(`${label} ends before it starts.`); continue; }
+    if (!kept.has(start) || !kept.has(end)) { issues.push(`${label} uses words removed from the final narration.`); continue; }
+    if (start < previousStart) { issues.push(`${label} is out of chronological order.`); continue; }
+    const narrationWords: string[] = []; for (let position = start; position <= end; position += 1) if (kept.has(position)) narrationWords.push(words[position].text);
+    const imagePrompt = String(candidate?.imagePrompt ?? '').trim();
+    if (!narrationWords.length) { issues.push(`${label} has no kept narration words.`); continue; }
+    if (imagePrompt.length < 40) { issues.push(`${label} has an incomplete image prompt (${imagePrompt.length} characters; at least 40 required).`); continue; }
+    const timelineStart = times.get(start)?.start; const timelineEnd = times.get(end)?.end;
+    if (timelineStart === undefined || timelineEnd === undefined) { issues.push(`${label} cannot be mapped to the final narration timeline.`); continue; }
+    if (scenes.length) {
+      const gap = timelineStart - previousTimelineEnd;
+      if (gap < MIN_BROLL_GAP_SECONDS) issues.push(`${label} starts only ${gap.toFixed(2)} seconds after ${previousLabel} ends on the final narration timeline; at least ${MIN_BROLL_GAP_SECONDS.toFixed(2)} seconds is required.`);
+    }
+    const sceneNumber = scenes.length + 1;
+    scenes.push({ id: `scene-${String(sceneNumber).padStart(3, '0')}`, title: String(candidate?.title ?? `Scene ${sceneNumber}`).trim().slice(0, 100) || `Scene ${sceneNumber}`, startWordId: words[start].id, endWordId: words[end].id, sourceStart: words[start].start, sourceEnd: words[end].end, narration: narrationWords.join(' '), visualIntent: String(candidate?.visualIntent ?? '').trim(), shotType: String(candidate?.shotType ?? '').trim(), imagePrompt, enabled: true });
+    previousStart = start; previousTimelineEnd = timelineEnd; previousLabel = label;
   }
-  if (!scenes.length) throw new Error('The planning agent did not return any valid B-roll scenes'); const expected = targetSceneCount(words, keepRanges, settings); if (expected && scenes.length !== expected) throw new Error(`The planning agent returned ${scenes.length} scenes; ${expected} were requested. Retry planning.`); return { version: 2, orientation, stylePreset: BROLL_STYLE_PRESET, settings, scenes, notes: Array.isArray(raw.notes) ? raw.notes.map((note: unknown) => String(note)) : [] };
+  const expected = targetSceneCount(words, keepRanges, settings);
+  if (!scenes.length) issues.push('The response contains no valid B-roll scenes.');
+  else if (expected && scenes.length !== expected) issues.push(`The response contains ${scenes.length} valid scenes, but exactly ${expected} are required.`);
+  if (issues.length) throw new BrollPlanValidationError(issues);
+  return { version: 2, orientation, stylePreset: BROLL_STYLE_PRESET, settings, scenes, notes: Array.isArray(raw.notes) ? raw.notes.map((note: unknown) => String(note)) : [] };
 }
 
 export async function createBrollPlan(options: { codexBin: string; workDir: string; words: BrollWord[]; keepRanges?: BrollKeepRange[]; orientation: 'portrait' | 'landscape'; settings?: Partial<BrollPlanSettings> }) {
   const settings = normalizeSettings(options.settings); const { codexBin, workDir, words, keepRanges, orientation } = options; const { kept } = keptWordIndexes(words, keepRanges);
-  const transcript = words.map((word, index) => ({ word, index })).filter(({ index }) => kept.has(index)).map(({ word }) => `[${word.id} ${word.start.toFixed(3)}-${word.end.toFixed(3)}] ${word.text}`).join('\n');
+  const { times } = keptTimeline(words, keepRanges);
+  const transcript = words.map((word, index) => ({ word, index })).filter(({ index }) => kept.has(index)).map(({ word, index }) => { const timeline = times.get(index)!; return `[${word.id} source:${word.start.toFixed(3)}-${word.end.toFixed(3)} final:${timeline.start.toFixed(3)}-${timeline.end.toFixed(3)}] ${word.text}`; }).join('\n');
   const requestedCount = targetSceneCount(words, keepRanges, settings); const schemaPath = path.join(workDir, 'broll-plan.schema.json'); const outputPath = path.join(workDir, 'codex-broll-plan.json'); await fs.writeFile(schemaPath, JSON.stringify(planSchema(requestedCount), null, 2));
-  const targetAspect = settings.aspectRatio === 'auto' ? (orientation === 'portrait' ? 'vertical 9:16' : 'landscape 16:9') : settings.aspectRatio; const countInstruction = requestedCount ? `Create exactly ${requestedCount} B-roll scenes.` : `Choose the number of scenes automatically. Prefer one strong image per major idea, usually ${settings.minSceneDuration}-${settings.maxSceneDuration} seconds apart.`;
-  const prompt = `You are the B-roll director and image-prompt writer for a polished talking-head video.\n\n${countInstruction}\n\nAnalyze ONLY the supplied narration words. Group narration into distinct visual ideas and do not invent unsupported claims. Every scene must use supplied word IDs and stay chronological.\n\nTARGET FRAME: ${targetAspect}.\nTARGET SCENE DURATION: normally ${settings.minSceneDuration}-${settings.maxSceneDuration} seconds.\n\nREFERENCE VISUAL LANGUAGE:\n${BROLL_STYLE_PRESET}\n\nWrite complete standalone image prompts with exact subject/action/environment/camera/lens/light/composition/realism. Healthcare/dental scenes must be clinically believable. Prefer authentic Indian context when natural. Require natural skin, hands, teeth/anatomy, real-camera photography, and no text/logos/watermarks/CGI. Vary adjacent compositions.\n\nNARRATION WORDS:\n${transcript}`;
-  await run(codexBin, ['exec', '--ephemeral', '--output-schema', schemaPath, '--output-last-message', outputPath, '-'], prompt); const plan = validatePlan(words, keepRanges, JSON.parse(await fs.readFile(outputPath, 'utf8')), orientation, settings); await saveBrollPlan(workDir, plan); return plan;
+  const targetAspect = settings.aspectRatio === 'auto' ? (orientation === 'portrait' ? 'vertical 9:16' : 'landscape 16:9') : settings.aspectRatio;
+  const intervalDurationLimit = settings.countMode === 'interval' ? settings.intervalSeconds - MIN_BROLL_GAP_SECONDS : settings.maxSceneDuration;
+  const plannedMaxDuration = Math.min(settings.maxSceneDuration, intervalDurationLimit);
+  const plannedMinDuration = Math.min(settings.minSceneDuration, plannedMaxDuration);
+  const countInstruction = requestedCount ? `Create exactly ${requestedCount} B-roll scenes.` : `Choose the number of scenes automatically from distinct semantic ideas.`;
+  const cadenceInstruction = settings.countMode === 'interval'
+    ? `Plan approximately one B-roll scene in every ${settings.intervalSeconds}-second section of the narration. Place each scene near that cadence but align its start and end to a coherent spoken idea and the supplied word boundaries.`
+    : 'Distribute scenes across the narration according to the strongest semantic ideas; do not bunch them together.';
+  const prompt = `You are the B-roll director and image-prompt writer for a polished talking-head video.\n\n${countInstruction}\n${cadenceInstruction}\n\nHARD SCHEDULING RULE: after one B-roll ends, leave at least ${MIN_BROLL_GAP_SECONDS} full seconds of uninterrupted talking-head footage before the next B-roll starts. This is an end-to-next-start gap, not a start-to-start gap. Never overlap or place B-roll scenes back-to-back. Measure cadence and gaps using the final timestamps supplied for each word; source timestamps may contain footage removed by the dialogue edit. These timing rules must be satisfied while choosing the scene word IDs; the renderer will not repair the schedule.\n\nAnalyze ONLY the supplied narration words. Group narration into distinct visual ideas and do not invent unsupported claims. Every scene must use supplied word IDs and stay chronological.\n\nTARGET FRAME: ${targetAspect}.\nTARGET B-ROLL DURATION: normally ${plannedMinDuration}-${plannedMaxDuration} seconds.\n\nREFERENCE VISUAL LANGUAGE:\n${BROLL_STYLE_PRESET}\n\nWrite complete standalone image prompts with exact subject/action/environment/camera/lens/light/composition/realism. Healthcare/dental scenes must be clinically believable. Prefer authentic Indian context when natural. Require natural skin, hands, teeth/anatomy, real-camera photography, and no text/logos/watermarks/CGI. Vary adjacent compositions.\n\nNARRATION WORDS:\n${transcript}`;
+  let attemptPrompt = prompt; let lastIssues: string[] = [];
+  for (let attempt = 1; attempt <= MAX_BROLL_PLAN_ATTEMPTS; attempt += 1) {
+    await run(codexBin, ['exec', '--ephemeral', '--output-schema', schemaPath, '--output-last-message', outputPath, '-'], attemptPrompt);
+    let raw: any;
+    try { raw = JSON.parse(await fs.readFile(outputPath, 'utf8')); }
+    catch (error) { lastIssues = [`The response was not valid JSON: ${error instanceof Error ? error.message : String(error)}`]; raw = null; }
+    if (raw) {
+      try { const plan = validatePlan(words, keepRanges, raw, orientation, settings); await saveBrollPlan(workDir, plan); return plan; }
+      catch (error) { if (!(error instanceof BrollPlanValidationError)) throw error; lastIssues = error.issues; }
+    }
+    if (attempt === MAX_BROLL_PLAN_ATTEMPTS) break;
+    const previousPlan = raw ? JSON.stringify(raw, null, 2) : '(unparseable response)';
+    attemptPrompt = `${prompt}\n\nREPAIR PASS ${attempt} OF ${MAX_BROLL_PLAN_ATTEMPTS - 1}\nThe previous full plan failed validation. Re-evaluate the entire schedule and return a complete replacement plan, not a partial patch. Correct every issue below together while preserving strong valid scene ideas and prompts where possible. Recalculate all end-to-next-start gaps using the final timestamps.\n\nALL VALIDATION ISSUES:\n${lastIssues.map((issue, index) => `${index + 1}. ${issue}`).join('\n')}\n\nPREVIOUS PLAN TO REPAIR:\n${previousPlan}`;
+  }
+  throw new Error(`Codex could not produce a valid B-roll plan after ${MAX_BROLL_PLAN_ATTEMPTS} attempts. Remaining issues:\n${lastIssues.map((issue) => `- ${issue}`).join('\n')}`);
 }
 
 export async function saveBrollPlan(workDir: string, plan: BrollPlan) { await fs.mkdir(path.join(workDir, 'broll'), { recursive: true }); await fs.writeFile(path.join(workDir, 'broll-plan.json'), JSON.stringify(plan, null, 2)); }
@@ -132,11 +199,24 @@ export async function loadBrollPlan(workDir: string): Promise<BrollPlan | null> 
 export async function updateBrollScene(workDir: string, plan: BrollPlan, sceneId: string, patch: { imagePrompt?: string; videoPrompt?: string; title?: string; sourceStart?: number; sourceEnd?: number; enabled?: boolean; displayTemplate?: BrollDisplayTemplate | 'default'; assetAspectRatio?: BrollAssetAspectRatio }) {
   const scene = plan.scenes.find((candidate) => candidate.id === sceneId); if (!scene) throw new Error('B-roll scene not found');
   const previousAspect = resolveSceneAssetAspect(plan, scene);
+  const nextStart = Number.isFinite(patch.sourceStart) ? Math.max(0, Number(patch.sourceStart)) : scene.sourceStart;
+  const nextEnd = Number.isFinite(patch.sourceEnd) ? Math.max(0, Number(patch.sourceEnd)) : scene.sourceEnd;
+  const nextEnabled = typeof patch.enabled === 'boolean' ? patch.enabled : scene.enabled;
+  const timingChanged = Math.abs(nextStart - scene.sourceStart) > 0.0005 || Math.abs(nextEnd - scene.sourceEnd) > 0.0005;
+  const newlyEnabled = patch.enabled === true && !scene.enabled;
+  if (nextEnd <= nextStart) throw new Error('B-roll end time must be after start time');
+  if (nextEnabled && (timingChanged || newlyEnabled)) {
+    for (const other of plan.scenes) {
+      if (other.id === scene.id || !other.enabled) continue;
+      const gap = nextStart >= other.sourceEnd ? nextStart - other.sourceEnd : other.sourceStart >= nextEnd ? other.sourceStart - nextEnd : -1;
+      if (gap < MIN_BROLL_GAP_SECONDS) throw new Error(`Keep at least ${MIN_BROLL_GAP_SECONDS} seconds of talking-head footage between B-roll scenes. This timing is too close to ${other.title || other.id}.`);
+    }
+  }
   if (typeof patch.title === 'string' && patch.title.trim()) scene.title = patch.title.trim().slice(0, 100); if (typeof patch.imagePrompt === 'string' && patch.imagePrompt.trim()) scene.imagePrompt = patch.imagePrompt.trim(); if (typeof patch.videoPrompt === 'string') scene.videoPrompt = patch.videoPrompt.trim() || undefined; if (typeof patch.enabled === 'boolean') scene.enabled = patch.enabled;
   if (patch.displayTemplate === 'default') delete scene.displayTemplate; else if (patch.displayTemplate) scene.displayTemplate = normalizeDisplayTemplate(patch.displayTemplate);
   if (patch.assetAspectRatio && ['auto', '9:16', '16:9'].includes(patch.assetAspectRatio)) scene.assetAspectRatio = patch.assetAspectRatio;
   if (scene.imageFile) { scene.generatedAspectRatio ??= previousAspect; scene.orientationChanged = scene.generatedAspectRatio !== resolveSceneAssetAspect(plan, scene); } else scene.orientationChanged = false;
-  const nextStart = Number.isFinite(patch.sourceStart) ? Math.max(0, Number(patch.sourceStart)) : scene.sourceStart; const nextEnd = Number.isFinite(patch.sourceEnd) ? Math.max(0, Number(patch.sourceEnd)) : scene.sourceEnd; if (nextEnd <= nextStart) throw new Error('B-roll end time must be after start time'); scene.sourceStart = nextStart; scene.sourceEnd = nextEnd; await saveBrollPlan(workDir, plan); return scene;
+  scene.sourceStart = nextStart; scene.sourceEnd = nextEnd; await saveBrollPlan(workDir, plan); return scene;
 }
 export async function deleteBrollScene(workDir: string, plan: BrollPlan, sceneId: string) { const index = plan.scenes.findIndex((scene) => scene.id === sceneId); if (index < 0) throw new Error('B-roll scene not found'); const [scene] = plan.scenes.splice(index, 1); await Promise.all([scene.imageFile ? fs.rm(scene.imageFile, { force: true }) : Promise.resolve(), scene.videoFile ? fs.rm(scene.videoFile, { force: true }) : Promise.resolve()]); await saveBrollPlan(workDir, plan); return plan; }
 

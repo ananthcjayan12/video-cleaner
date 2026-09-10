@@ -222,6 +222,17 @@ async function sourceAvailable(project: Project) { const results = await Promise
 async function requireSource(project: Project) { if (await sourceAvailable(project)) return; const missing: string[] = []; for (const clip of projectClips(project)) if (!await fs.stat(clip.sourcePath).then((stat) => stat.isFile()).catch(() => false)) missing.push(clip.sourceName); throw new Error(`Original source clip${missing.length === 1 ? '' : 's'} missing: ${missing.join(', ')}. Relink before this operation.`); }
 async function touchProject(project: Project) { await saveProject(project); }
 async function invalidateBroll(project: Project) { brollPlans.delete(project.id); await fs.rm(path.join(project.workDir, 'broll-plan.json'), { force: true }); await touchProject(project); }
+async function invalidateSourceDerivedState(project: Project) {
+  brollPlans.delete(project.id); project.proxyPath = undefined; project.audioPath = undefined; project.transcript = undefined; project.edl = undefined;
+  await Promise.all([
+    fs.rm(path.join(project.workDir, 'proxy.mp4'), { force: true }),
+    fs.rm(path.join(project.workDir, 'analysis.m4a'), { force: true }),
+    fs.rm(path.join(project.workDir, 'transcript.json'), { force: true }),
+    fs.rm(path.join(project.workDir, 'edl.json'), { force: true }),
+    fs.rm(path.join(project.workDir, 'broll-plan.json'), { force: true }),
+  ]);
+  await touchProject(project);
+}
 
 function validateEdl(words: Word[], raw: any) {
   const index = new Map(words.map((word, i) => [word.id, i])); let previousEnd = -1; const ranges: KeepRange[] = [];
@@ -230,8 +241,14 @@ function validateEdl(words: Word[], raw: any) {
 }
 function rangesToSeconds(project: Project) {
   const words = project.transcript!.words; const index = new Map(words.map((word, i) => [word.id, i]));
-  const seconds = project.edl!.keepRanges.map((range) => { const startWord = words[index.get(range.startWordId)!]; const endWord = words[index.get(range.endWordId)!]; return { start: Math.max(0, startWord.start - 0.08), end: Math.min(project.media.duration || Number.POSITIVE_INFINITY, endWord.end + 0.12) }; });
-  const merged: { start: number; end: number }[] = []; for (const segment of seconds) { const previous = merged.at(-1); if (previous && segment.start - previous.end < 0.2) previous.end = Math.max(previous.end, segment.end); else merged.push({ ...segment }); } return merged;
+  return project.edl!.keepRanges.map((range) => {
+    const startIndex = index.get(range.startWordId)!; const endIndex = index.get(range.endWordId)!; const startWord = words[startIndex]; const endWord = words[endIndex];
+    const previousRemovedWord = startIndex > 0 ? words[startIndex - 1] : undefined; const nextRemovedWord = endIndex < words.length - 1 ? words[endIndex + 1] : undefined;
+    const paddedStart = Math.max(0, startWord.start - 0.08); const paddedEnd = Math.min(project.media.duration || Number.POSITIVE_INFINITY, endWord.end + 0.12);
+    const start = previousRemovedWord ? Math.max(paddedStart, Math.min(startWord.start, previousRemovedWord.end + 0.01)) : paddedStart;
+    const end = nextRemovedWord ? Math.min(paddedEnd, Math.max(endWord.end, nextRemovedWord.start - 0.01)) : paddedEnd;
+    return { start, end };
+  }).filter((range) => range.end > range.start);
 }
 function proxySize(media: MediaProfile, maxEdge = 720) { const width = media.width || 1280; const height = media.height || 720; const even = (v: number) => Math.max(2, Math.round(v / 2) * 2); if (width >= height) { const w = Math.min(maxEdge, width); return { width: even(w), height: even(height * w / width) }; } const h = Math.min(maxEdge, height); return { width: even(width * h / height), height: even(h) }; }
 function normalizedColorTag(value: string | undefined, fallback: string) { const tag = String(value || '').trim().toLowerCase(); if (!tag || tag === 'unknown' || tag === 'unspecified' || tag === 'reserved') return fallback; return tag === 'bt2020ncl' ? 'bt2020nc' : tag; }
@@ -475,6 +492,37 @@ app.post('/api/projects/:id/relink', route(async (req, res) => {
   target.sourcePath = sourcePath; target.sourceName = path.basename(sourcePath); target.media = { ...target.media, ...media }; syncProjectTimeline(project); await touchProject(project); res.json(await summarizeProject(project, brollPlans.get(project.id)));
 }));
 
+app.post('/api/projects/:id/clips', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id));
+  const sourcePaths = await pickNativeFiles('Add one or more base clips in playback order');
+  if (!sourcePaths.length) return void res.status(400).json({ error: 'No additional video clips selected' });
+  const existing = projectClips(project); const existingPaths = new Set(existing.map((clip) => path.resolve(clip.sourcePath)));
+  const uniquePaths = sourcePaths.filter((sourcePath) => !existingPaths.has(path.resolve(sourcePath)));
+  if (!uniquePaths.length) return void res.status(409).json({ error: 'Those clips are already in this project' });
+  const added = await Promise.all(uniquePaths.map(async (sourcePath) => ({ sourcePath, media: await probe(sourcePath) })));
+  assertCompatibleClips([...existing.map((clip) => ({ sourcePath: clip.sourcePath, media: clip.media })), ...added]);
+  let nextNumber = existing.reduce((highest, clip) => Math.max(highest, Number(clip.id.match(/(\d+)$/)?.[1]) || 0), 0) + 1;
+  project.clips = [...existing, ...added.map((item) => ({ id: `clip-${String(nextNumber++).padStart(3, '0')}`, sourcePath: item.sourcePath, sourceName: path.basename(item.sourcePath), media: item.media, timelineStart: 0, timelineEnd: 0 }))];
+  syncProjectTimeline(project); await invalidateSourceDerivedState(project); res.json(await summarizeProject(project, null));
+}));
+
+app.put('/api/projects/:id/clips/order', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id)); const clips = projectClips(project); const clipIds: string[] = Array.isArray(req.body?.clipIds) ? req.body.clipIds.map(String) : [];
+  if (clipIds.length !== clips.length || new Set(clipIds).size !== clips.length || clips.some((clip) => !clipIds.includes(clip.id))) throw new Error('The clip order must contain every project clip exactly once');
+  const byId = new Map(clips.map((clip) => [clip.id, clip])); project.clips = clipIds.map((id) => byId.get(id)!);
+  syncProjectTimeline(project); await invalidateSourceDerivedState(project); res.json(await summarizeProject(project, null));
+}));
+
+app.delete('/api/projects/:id/clips/:clipId', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id)); const clips = projectClips(project);
+  if (clips.length <= 1) throw new Error('A project must keep at least one base clip');
+  const clipId = routeParam(req.params.clipId); const clip = clips.find((candidate) => candidate.id === clipId);
+  if (!clip) throw new Error('Base clip not found');
+  project.clips = clips.filter((candidate) => candidate.id !== clipId); syncProjectTimeline(project);
+  await fs.rm(path.join(project.workDir, 'clips', clip.id), { recursive: true, force: true });
+  await invalidateSourceDerivedState(project); res.json(await summarizeProject(project, null));
+}));
+
 app.post('/api/projects/:id/prepare', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id)); const result = await prepareProjectMedia(project, true); res.json({ proxyUrl: `/api/projects/${project.id}/proxy`, proxy: { width: result.dimensions.width, height: result.dimensions.height, fps: 30, hardware: result.hardware } });
 }));
@@ -482,10 +530,10 @@ app.get('/api/projects/:id/proxy', route(async (req, res) => { const project = g
 app.post('/api/projects/:id/transcribe', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const transcript = await transcribeProject(project); res.json({ transcript, edl: project.edl }); }));
 app.post('/api/projects/:id/clean', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id)); const settings = await resolvedSettings(); const intensity = ['light', 'balanced', 'aggressive'].includes(req.body?.intensity) ? req.body.intensity : 'balanced'; if (!project.transcript) await transcribeProject(project); if (!settings.codexBin) throw new Error('Codex CLI was not found.');
-  const schemaPath = path.join(project.workDir, 'edl.schema.json'); const outputPath = path.join(project.workDir, 'codex-edl.json'); await atomicWriteJson(schemaPath, EDL_SCHEMA); const transcript = project.transcript!.words.map((word) => `[${word.id} ${word.start.toFixed(3)}-${word.end.toFixed(3)}] ${word.text}`).join('\n'); const prompt = `You are a professional talking-head dialogue cleaning editor.\n\nThis is DELETE-ONLY editing. Never invent, paraphrase, replace, reorder, or combine spoken words. Keep source chronology. Return only ranges of ORIGINAL words to keep.\n\nCleanup intensity: ${intensity}.\nLight: remove clear fillers, abandoned false starts, duplicate takes, and excessive dead space only.\nBalanced: also remove low-value repetition and concise tangents while preserving natural speech.\nAggressive: optimize pacing strongly, but preserve meaning and grammatical continuity.\n\nPrefer natural cut points.\n\nSOURCE WORDS:\n${transcript}`;
+  const schemaPath = path.join(project.workDir, 'edl.schema.json'); const outputPath = path.join(project.workDir, 'codex-edl.json'); await atomicWriteJson(schemaPath, EDL_SCHEMA); const transcript = project.transcript!.words.map((word) => `[${word.id} ${word.start.toFixed(3)}-${word.end.toFixed(3)}] ${word.text}`).join('\n'); const prompt = `You are a decisive professional talking-head dialogue editor. Produce a concise, natural final narration containing only material that earns its place.\n\nThis is DELETE-ONLY editing. Never invent, paraphrase, replace, reorder, or combine spoken words. Keep source chronology. Return only ranges of ORIGINAL words to keep, and never cut inside a word.\n\nREMOVE ALL NON-ESSENTIAL MATERIAL:\n- Silence, dead air, setup time, and unnecessarily long pauses. Infer silence from the timestamp gap between consecutive words. Split keep ranges around removable gaps instead of returning one range that bridges them.\n- Repeated sentences, repeated ideas, duplicate takes, and attempts where the speaker says the same thing again. Keep only the clearest, most complete, most natural version.\n- Fillers, verbal clutter, false starts, abandoned phrases, self-corrections, stumbles, off-topic remarks, production chatter, and low-value tangents.\n- Redundant lead-ins and conclusions that do not add meaning.\n\nPRESERVE:\n- The complete intended meaning, important facts, necessary context, and the speaker's natural voice.\n- Short pauses that make speech understandable or emotionally natural. Make cuts at safe phrase/sentence boundaries so the result remains grammatical and does not sound rushed.\n\nCleanup intensity: ${intensity}.\nLight: remove obvious mistakes, duplicate takes, fillers, and long silence while retaining relaxed pacing.\nBalanced: remove all clear repetition and non-essential wording, tighten ordinary pauses, and preserve only useful context.\nAggressive: keep the shortest coherent version of every necessary idea and remove nearly all avoidable pause or redundancy.\n\nFor every returned keep range, provide a short reason describing why that exact passage is necessary. In notes, summarize removed duplicate takes and major silence cleanup.\n\nSOURCE WORDS:\n${transcript}`;
   await run(settings.codexBin, ['exec', '--ephemeral', '--output-schema', schemaPath, '--output-last-message', outputPath, '-'], prompt); project.edl = validateEdl(project.transcript!.words, JSON.parse(await fs.readFile(outputPath, 'utf8'))); await invalidateBroll(project); await Promise.all([atomicWriteJson(path.join(project.workDir, 'edl.json'), project.edl), touchProject(project)]); res.json(project.edl);
 }));
-app.put('/api/projects/:id/edl', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); if (!project.transcript) throw new Error('Missing transcript'); project.edl = validateEdl(project.transcript.words, { keepRanges: req.body?.keepRanges, notes: ['Manually adjusted'] }); await Promise.all([atomicWriteJson(path.join(project.workDir, 'edl.json'), project.edl), touchProject(project)]); res.json(project.edl); }));
+app.put('/api/projects/:id/edl', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); if (!project.transcript) throw new Error('Missing transcript'); project.edl = validateEdl(project.transcript.words, { keepRanges: req.body?.keepRanges, notes: ['Manually adjusted'] }); await invalidateBroll(project); await atomicWriteJson(path.join(project.workDir, 'edl.json'), project.edl); res.json(project.edl); }));
 
 app.post('/api/projects/:id/broll/plan', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const settings = await resolvedSettings(); if (!settings.codexBin) throw new Error('Codex CLI was not found; it is required for B-roll scene planning.'); const transcript = await transcribeProject(project); const requested = (req.body?.settings ?? {}) as Partial<BrollPlanSettings>; const workflowMode = ['cleaned-video', 'raw-video', 'assets-only'].includes(String(requested.workflowMode)) ? requested.workflowMode : 'cleaned-video'; const keepRanges = workflowMode === 'cleaned-video' ? project.edl?.keepRanges : undefined; const orientation = (project.media.height || 0) > (project.media.width || 0) ? 'portrait' : 'landscape'; const plan = await createBrollPlan({ codexBin: settings.codexBin, workDir: project.workDir, words: transcript.words, keepRanges, orientation, settings: { ...requested, provider: requested.provider || settings.imageProvider } }); brollPlans.set(project.id, plan); await touchProject(project); res.json({ plan, transcript, edl: project.edl }); }));
 app.get('/api/projects/:id/broll', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const cached = brollPlans.get(project.id); if (cached) return void res.json(cached); const plan = await loadBrollPlan(project.workDir); if (!plan) return void res.status(404).json({ error: 'B-roll plan has not been created yet' }); brollPlans.set(project.id, plan); res.json(plan); }));

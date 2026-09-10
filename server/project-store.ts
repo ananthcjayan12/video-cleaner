@@ -52,6 +52,7 @@ export type ProjectSummary = {
   name: string;
   sourceName: string;
   clipCount: number;
+  clips: Array<{ id: string; sourceName: string; duration: number; timelineStart: number; timelineEnd: number }>;
   createdAt: string;
   updatedAt: string;
   media: MediaProfile;
@@ -261,6 +262,7 @@ export async function summarizeProject(project: Project, brollPlan?: BrollPlan |
     name: project.name,
     sourceName,
     clipCount: clips.length,
+    clips: clips.map((clip) => ({ id: clip.id, sourceName: clip.sourceName, duration: clip.media.duration, timelineStart: clip.timelineStart, timelineEnd: clip.timelineEnd })),
     createdAt: project.createdAt,
     updatedAt: project.updatedAt,
     media: project.media,
