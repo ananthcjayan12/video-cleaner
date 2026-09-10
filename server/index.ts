@@ -14,15 +14,18 @@ import {
   deleteBrollScene,
   displayTemplateNeedsPresenterMatte,
   generateBrollImage,
+  generateBrollVideoWithGoogleFlow,
   generateBrollVideoWithGrokCli,
   importBrollImage,
   loadBrollPlan,
   planNeedsPresenterMatte,
   updateBrollScene,
+  updateBrollSettings,
   type BrollDisplayTemplate,
   type BrollPlan,
   type BrollPlanSettings,
   type ImageProvider,
+  type VideoProvider,
 } from './broll.js';
 import { ensurePresenterMatte, mattingSystemStatus, presenterMatteStatus, type PresenterMatteSpecInput } from './presenter.js';
 import {
@@ -48,8 +51,8 @@ dotenv.config({ path: path.resolve('.env') });
 
 type LocalSettings = {
   elevenLabsApiKey?: string; openAiApiKey?: string; geminiApiKey?: string; imageProvider?: ImageProvider;
-  openAiImageModel?: string; geminiImageModel?: string; grokModel?: string; grokVideoModel?: string;
-  codexBin?: string; grokBin?: string; ffmpegBin?: string; ffprobeBin?: string; projectsDir?: string;
+  openAiImageModel?: string; geminiImageModel?: string; grokModel?: string; grokVideoModel?: string; gflowProfile?: string; gflowVideoModel?: string;
+  codexBin?: string; grokBin?: string; gflowBin?: string; ffmpegBin?: string; ffprobeBin?: string; projectsDir?: string;
 };
 type FfmpegCapabilities = { videoToolboxDecode: boolean; h264VideoToolbox: boolean; hevcVideoToolbox: boolean };
 type ExportJob = {
@@ -92,6 +95,7 @@ async function loadSettings() { try { localSettings = JSON.parse(await fs.readFi
 async function saveSettings() { await fs.mkdir(CONFIG_DIR, { recursive: true }); await fs.writeFile(CONFIG_PATH, JSON.stringify(localSettings, null, 2), { mode: 0o600 }); }
 async function detectBinary(name: string) { try { const { stdout } = await run(process.platform === 'win32' ? 'where' : 'which', [name], undefined, 3000); return stdout.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? ''; } catch { return ''; } }
 function providerValue(value: unknown): ImageProvider { return ['openai', 'gemini', 'grok-cli', 'codex-cli'].includes(String(value)) ? value as ImageProvider : 'gemini'; }
+function videoProviderValue(value: unknown): VideoProvider { return ['grok-cli', 'google-flow'].includes(String(value)) ? value as VideoProvider : 'grok-cli'; }
 function displayTemplateValue(value: unknown): BrollDisplayTemplate {
   const candidate = String(value || 'full-frame') as BrollDisplayTemplate;
   return BROLL_DISPLAY_TEMPLATES.some((template) => template.id === candidate) ? candidate : 'full-frame';
@@ -100,6 +104,7 @@ function displayTemplateValue(value: unknown): BrollDisplayTemplate {
 async function resolvedSettings() {
   const codexOverride = localSettings.codexBin || process.env.CODEX_BIN || '';
   const grokOverride = localSettings.grokBin || process.env.GROK_BIN || '';
+  const gflowOverride = localSettings.gflowBin || process.env.GFLOW_BIN || '';
   const ffmpegOverride = localSettings.ffmpegBin || process.env.FFMPEG_BIN || '';
   const ffprobeOverride = localSettings.ffprobeBin || process.env.FFPROBE_BIN || '';
   return {
@@ -111,7 +116,9 @@ async function resolvedSettings() {
     geminiImageModel: localSettings.geminiImageModel || process.env.GEMINI_IMAGE_MODEL || 'gemini-3.1-flash-image',
     grokModel: localSettings.grokModel || process.env.GROK_IMAGE_MODEL || '',
     grokVideoModel: localSettings.grokVideoModel || process.env.GROK_VIDEO_MODEL || 'grok-imagine-video-1.5',
-    codexBin: codexOverride || await detectBinary('codex'), grokBin: grokOverride || await detectBinary('grok'),
+    gflowProfile: localSettings.gflowProfile || process.env.GFLOW_PROFILE || '',
+    gflowVideoModel: localSettings.gflowVideoModel || process.env.GFLOW_VIDEO_MODEL || 'veo-fast',
+    codexBin: codexOverride || await detectBinary('codex'), grokBin: grokOverride || await detectBinary('grok'), gflowBin: gflowOverride || await detectBinary('gflow'),
     ffmpegBin: ffmpegOverride || await detectBinary('ffmpeg'), ffprobeBin: ffprobeOverride || await detectBinary('ffprobe'),
     projectsDir: localSettings.projectsDir || process.env.PROJECTS_DIR || path.join(os.homedir(), 'VideoCleaner', 'projects'),
   };
@@ -138,22 +145,29 @@ async function ffmpegCapabilities(ffmpegBin: string): Promise<FfmpegCapabilities
 
 async function systemStatus() {
   const settings = await resolvedSettings();
-  const [codexInstalled, grokInstalled, ffmpegInstalled, ffprobeInstalled] = await Promise.all([canRun(settings.codexBin, ['--version']), canRun(settings.grokBin, ['version']), canRun(settings.ffmpegBin, ['-version']), canRun(settings.ffprobeBin, ['-version'])]);
-  const [codexAuthenticated, capabilities, matting] = await Promise.all([
+  const [codexInstalled, grokInstalled, gflowInstalled, ffmpegInstalled, ffprobeInstalled] = await Promise.all([canRun(settings.codexBin, ['--version']), canRun(settings.grokBin, ['version']), canRun(settings.gflowBin, ['--version']), canRun(settings.ffmpegBin, ['-version']), canRun(settings.ffprobeBin, ['-version'])]);
+  const gflowAuthArgs = ['auth', 'status', ...(settings.gflowProfile ? ['--profile', settings.gflowProfile] : [])];
+  const [codexAuthenticated, gflowAuthenticated, capabilities, matting] = await Promise.all([
     codexInstalled ? canRun(settings.codexBin, ['login', 'status']) : Promise.resolve(false),
+    gflowInstalled ? canRun(settings.gflowBin, gflowAuthArgs) : Promise.resolve(false),
     ffmpegInstalled ? ffmpegCapabilities(settings.ffmpegBin) : Promise.resolve({ videoToolboxDecode: false, h264VideoToolbox: false, hevcVideoToolbox: false }),
     mattingSystemStatus(ffmpegInstalled ? settings.ffmpegBin : ''),
   ]);
   return {
     codex: { installed: codexInstalled, authenticated: codexAuthenticated, path: settings.codexBin || null },
     grok: { installed: grokInstalled, path: settings.grokBin || null, model: settings.grokModel || 'CLI default', videoModel: settings.grokVideoModel },
+    gflow: { installed: gflowInstalled, authenticated: gflowAuthenticated, path: settings.gflowBin || null, model: settings.gflowVideoModel, profile: settings.gflowProfile || 'default' },
     ffmpeg: { installed: ffmpegInstalled, path: settings.ffmpegBin || null, capabilities }, ffprobe: { installed: ffprobeInstalled, path: settings.ffprobeBin || null },
     elevenLabs: { configured: Boolean(settings.elevenLabsApiKey) }, imageProvider: settings.imageProvider,
     imageProviders: {
       openai: { configured: Boolean(settings.openAiApiKey), model: settings.openAiImageModel }, gemini: { configured: Boolean(settings.geminiApiKey), model: settings.geminiImageModel },
       grokCli: { configured: grokInstalled, model: settings.grokModel || 'CLI default', experimental: true }, codexCli: { configured: codexInstalled && codexAuthenticated, model: 'Codex CLI', experimental: true },
     },
-    brollVideo: { configured: grokInstalled && codexInstalled && codexAuthenticated, provider: 'Grok CLI', model: settings.grokVideoModel, experimental: true },
+    videoProviders: {
+      grokCli: { configured: grokInstalled, model: settings.grokVideoModel, experimental: true },
+      googleFlow: { configured: gflowInstalled && gflowAuthenticated, model: settings.gflowVideoModel, profile: settings.gflowProfile || 'default', experimental: true },
+    },
+    brollVideo: { configured: grokInstalled || (gflowInstalled && gflowAuthenticated), provider: 'Grok CLI / Google Flow', model: `${settings.grokVideoModel} / ${settings.gflowVideoModel}`, experimental: true },
     matting,
     projectsDir: settings.projectsDir,
   };
@@ -445,11 +459,11 @@ async function ensureProjectPresenterMattes(project: Project, plan: BrollPlan, f
 }
 
 app.get('/api/system/status', route(async (_req, res) => { res.json(await systemStatus()); }));
-app.get('/api/settings', route(async (_req, res) => { const status = await systemStatus(); res.json({ ...status, overrides: { codexBin: localSettings.codexBin ?? '', grokBin: localSettings.grokBin ?? '', ffmpegBin: localSettings.ffmpegBin ?? '', ffprobeBin: localSettings.ffprobeBin ?? '', projectsDir: localSettings.projectsDir ?? '', imageProvider: localSettings.imageProvider ?? '', openAiImageModel: localSettings.openAiImageModel ?? '', geminiImageModel: localSettings.geminiImageModel ?? '', grokModel: localSettings.grokModel ?? '', grokVideoModel: localSettings.grokVideoModel ?? '' } }); }));
+app.get('/api/settings', route(async (_req, res) => { const status = await systemStatus(); res.json({ ...status, overrides: { codexBin: localSettings.codexBin ?? '', grokBin: localSettings.grokBin ?? '', gflowBin: localSettings.gflowBin ?? '', ffmpegBin: localSettings.ffmpegBin ?? '', ffprobeBin: localSettings.ffprobeBin ?? '', projectsDir: localSettings.projectsDir ?? '', imageProvider: localSettings.imageProvider ?? '', openAiImageModel: localSettings.openAiImageModel ?? '', geminiImageModel: localSettings.geminiImageModel ?? '', grokModel: localSettings.grokModel ?? '', grokVideoModel: localSettings.grokVideoModel ?? '', gflowProfile: localSettings.gflowProfile ?? '', gflowVideoModel: localSettings.gflowVideoModel ?? '' } }); }));
 app.put('/api/settings', route(async (req, res) => {
   const body = req.body ?? {}; const previousProjectsDir = (await resolvedSettings()).projectsDir;
   if (typeof body.elevenLabsApiKey === 'string' && body.elevenLabsApiKey.trim()) localSettings.elevenLabsApiKey = body.elevenLabsApiKey.trim(); if (typeof body.openAiApiKey === 'string' && body.openAiApiKey.trim()) localSettings.openAiApiKey = body.openAiApiKey.trim(); if (typeof body.geminiApiKey === 'string' && body.geminiApiKey.trim()) localSettings.geminiApiKey = body.geminiApiKey.trim(); if (typeof body.imageProvider === 'string') localSettings.imageProvider = providerValue(body.imageProvider);
-  for (const key of ['codexBin', 'grokBin', 'ffmpegBin', 'ffprobeBin', 'projectsDir', 'openAiImageModel', 'geminiImageModel', 'grokModel', 'grokVideoModel'] as const) if (typeof body[key] === 'string') localSettings[key] = body[key].trim() || undefined;
+  for (const key of ['codexBin', 'grokBin', 'gflowBin', 'ffmpegBin', 'ffprobeBin', 'projectsDir', 'openAiImageModel', 'geminiImageModel', 'grokModel', 'grokVideoModel', 'gflowProfile', 'gflowVideoModel'] as const) if (typeof body[key] === 'string') localSettings[key] = body[key].trim() || undefined;
   capabilityCache.clear(); await saveSettings(); const nextProjectsDir = (await resolvedSettings()).projectsDir; if (nextProjectsDir !== previousProjectsDir) await hydrateProjects(true); res.json(await systemStatus());
 }));
 
@@ -537,6 +551,7 @@ app.put('/api/projects/:id/edl', route(async (req, res) => { const project = get
 
 app.post('/api/projects/:id/broll/plan', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const settings = await resolvedSettings(); if (!settings.codexBin) throw new Error('Codex CLI was not found; it is required for B-roll scene planning.'); const transcript = await transcribeProject(project); const requested = (req.body?.settings ?? {}) as Partial<BrollPlanSettings>; const workflowMode = ['cleaned-video', 'raw-video', 'assets-only'].includes(String(requested.workflowMode)) ? requested.workflowMode : 'cleaned-video'; const keepRanges = workflowMode === 'cleaned-video' ? project.edl?.keepRanges : undefined; const orientation = (project.media.height || 0) > (project.media.width || 0) ? 'portrait' : 'landscape'; const plan = await createBrollPlan({ codexBin: settings.codexBin, workDir: project.workDir, words: transcript.words, keepRanges, orientation, settings: { ...requested, provider: requested.provider || settings.imageProvider } }); brollPlans.set(project.id, plan); await touchProject(project); res.json({ plan, transcript, edl: project.edl }); }));
 app.get('/api/projects/:id/broll', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const cached = brollPlans.get(project.id); if (cached) return void res.json(cached); const plan = await loadBrollPlan(project.workDir); if (!plan) return void res.status(404).json({ error: 'B-roll plan has not been created yet' }); brollPlans.set(project.id, plan); res.json(plan); }));
+app.put('/api/projects/:id/broll/settings', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet'); const updated = await updateBrollSettings(project.workDir, plan, { videoProvider: videoProviderValue(req.body?.videoProvider) }); brollPlans.set(project.id, updated); await touchProject(project); res.json(updated); }));
 app.put('/api/projects/:id/broll/scenes/:sceneId', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id)); const sceneId = routeParam(req.params.sceneId); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet');
   const displayTemplate = req.body?.displayTemplate === 'default' ? 'default' : typeof req.body?.displayTemplate === 'string' ? displayTemplateValue(req.body.displayTemplate) : undefined;
@@ -566,7 +581,10 @@ app.post('/api/projects/:id/broll/scenes/:sceneId/video-prompt', route(async (re
 app.post('/api/projects/:id/broll/scenes/:sceneId/video', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id)); const settings = await resolvedSettings(); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet'); const sceneId = routeParam(req.params.sceneId); let scene = plan.scenes.find((candidate) => candidate.id === sceneId); if (!scene) throw new Error('B-roll scene not found'); if (!scene.videoPrompt) { if (!settings.codexBin) throw new Error('Codex CLI was not found'); scene = await createVideoPrompt({ codexBin: settings.codexBin, workDir: project.workDir, plan, sceneId }); }
   const regenerationComment = typeof req.body?.regenerationComment === 'string' ? req.body.regenerationComment.trim().slice(0, 2000) : undefined;
-  scene = await generateBrollVideoWithGrokCli({ workDir: project.workDir, plan, sceneId, regenerationComment, config: { grokBin: settings.grokBin, grokModel: settings.grokModel, grokVideoModel: settings.grokVideoModel, codexBin: settings.codexBin, ffmpegBin: settings.ffmpegBin } }); brollPlans.set(project.id, plan); await touchProject(project); res.json({ scene, videoUrl: `/api/projects/${project.id}/broll/scenes/${scene.id}/video?v=${encodeURIComponent(scene.videoGeneratedAt ?? '')}` });
+  const videoProvider = plan.settings.videoProvider || 'grok-cli';
+  scene = videoProvider === 'google-flow'
+    ? await generateBrollVideoWithGoogleFlow({ workDir: project.workDir, plan, sceneId, regenerationComment, config: { gflowBin: settings.gflowBin, gflowProfile: settings.gflowProfile, gflowVideoModel: settings.gflowVideoModel, codexBin: settings.codexBin, ffmpegBin: settings.ffmpegBin } })
+    : await generateBrollVideoWithGrokCli({ workDir: project.workDir, plan, sceneId, regenerationComment, config: { grokBin: settings.grokBin, grokModel: settings.grokModel, grokVideoModel: settings.grokVideoModel, codexBin: settings.codexBin, ffmpegBin: settings.ffmpegBin } }); brollPlans.set(project.id, plan); await touchProject(project); res.json({ scene, videoUrl: `/api/projects/${project.id}/broll/scenes/${scene.id}/video?v=${encodeURIComponent(scene.videoGeneratedAt ?? '')}` });
 }));
 app.get('/api/projects/:id/broll/scenes/:sceneId/video', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); const scene = plan?.scenes.find((candidate) => candidate.id === routeParam(req.params.sceneId)); if (!scene?.videoFile) return void res.status(404).json({ error: 'B-roll video has not been created yet' }); res.setHeader('Cache-Control', 'private, max-age=31536000, immutable'); res.sendFile(scene.videoFile); }));
 app.post('/api/projects/:id/broll/scenes/:sceneId/preview', route(async (req, res) => {

@@ -5,6 +5,7 @@ import path from 'node:path';
 export type BrollWord = { id: string; text: string; start: number; end: number };
 export type BrollKeepRange = { startWordId: string; endWordId: string };
 export type ImageProvider = 'openai' | 'gemini' | 'grok-cli' | 'codex-cli';
+export type VideoProvider = 'grok-cli' | 'google-flow';
 export type BrollWorkflowMode = 'cleaned-video' | 'raw-video' | 'assets-only';
 export type BrollCountMode = 'auto' | 'exact' | 'per-minute' | 'interval';
 export type BrollAssetAspectRatio = 'auto' | '9:16' | '16:9';
@@ -25,6 +26,7 @@ export const BROLL_DISPLAY_TEMPLATES: Array<{ id: BrollDisplayTemplate; label: s
 export type BrollPlanSettings = {
   workflowMode: BrollWorkflowMode;
   provider: ImageProvider;
+  videoProvider: VideoProvider;
   countMode: BrollCountMode;
   targetCount: number;
   imagesPerMinute: number;
@@ -39,7 +41,7 @@ export type BrollScene = {
   id: string; title: string; startWordId: string; endWordId: string; sourceStart: number; sourceEnd: number;
   narration: string; visualIntent: string; shotType: string; imagePrompt: string; videoPrompt?: string; enabled: boolean;
   imageFile?: string; generatedAt?: string; provider?: ImageProvider | 'manual'; model?: string;
-  videoFile?: string; videoGeneratedAt?: string; videoModel?: string;
+  videoFile?: string; videoGeneratedAt?: string; videoModel?: string; videoProvider?: VideoProvider;
   displayTemplate?: BrollDisplayTemplate;
   assetAspectRatio?: BrollAssetAspectRatio;
   generatedAspectRatio?: Exclude<BrollAssetAspectRatio, 'auto'>;
@@ -47,7 +49,7 @@ export type BrollScene = {
 };
 
 export type BrollPlan = { version: 2; orientation: 'portrait' | 'landscape'; stylePreset: string; settings: BrollPlanSettings; scenes: BrollScene[]; notes: string[] };
-export type ImageProviderConfig = { openAiApiKey?: string; openAiModel?: string; geminiApiKey?: string; geminiModel?: string; grokBin?: string; grokModel?: string; grokVideoModel?: string; codexBin?: string; ffmpegBin?: string };
+export type ImageProviderConfig = { openAiApiKey?: string; openAiModel?: string; geminiApiKey?: string; geminiModel?: string; grokBin?: string; grokModel?: string; grokVideoModel?: string; gflowBin?: string; gflowProfile?: string; gflowVideoModel?: string; codexBin?: string; ffmpegBin?: string };
 type RunOptions = { cwd?: string; env?: NodeJS.ProcessEnv };
 
 export const BROLL_STYLE_PRESET = [
@@ -115,9 +117,10 @@ function normalizeDisplayTemplate(value: unknown): BrollDisplayTemplate {
 function normalizeSettings(raw: Partial<BrollPlanSettings> | undefined): BrollPlanSettings {
   const workflowMode: BrollWorkflowMode = ['cleaned-video', 'raw-video', 'assets-only'].includes(String(raw?.workflowMode)) ? raw!.workflowMode as BrollWorkflowMode : 'cleaned-video';
   const provider: ImageProvider = ['openai', 'gemini', 'grok-cli', 'codex-cli'].includes(String(raw?.provider)) ? raw!.provider as ImageProvider : 'gemini';
+  const videoProvider: VideoProvider = ['grok-cli', 'google-flow'].includes(String(raw?.videoProvider)) ? raw!.videoProvider as VideoProvider : 'grok-cli';
   const countMode: BrollCountMode = ['auto', 'exact', 'per-minute', 'interval'].includes(String(raw?.countMode)) ? raw!.countMode as BrollCountMode : 'auto';
   const aspectRatio = ['auto', '9:16', '16:9'].includes(String(raw?.aspectRatio)) ? raw!.aspectRatio as BrollPlanSettings['aspectRatio'] : 'auto';
-  return { workflowMode, provider, countMode, targetCount: Math.max(1, Math.min(40, Number(raw?.targetCount) || 6)), imagesPerMinute: Math.max(0.5, Math.min(20, Number(raw?.imagesPerMinute) || 5)), intervalSeconds: Math.max(10, Math.min(300, Number(raw?.intervalSeconds) || 20)), minSceneDuration: Math.max(1, Math.min(20, Number(raw?.minSceneDuration) || 3)), maxSceneDuration: Math.max(2, Math.min(30, Number(raw?.maxSceneDuration) || 8)), aspectRatio, displayTemplate: normalizeDisplayTemplate(raw?.displayTemplate) };
+  return { workflowMode, provider, videoProvider, countMode, targetCount: Math.max(1, Math.min(40, Number(raw?.targetCount) || 6)), imagesPerMinute: Math.max(0.5, Math.min(20, Number(raw?.imagesPerMinute) || 5)), intervalSeconds: Math.max(10, Math.min(300, Number(raw?.intervalSeconds) || 20)), minSceneDuration: Math.max(1, Math.min(20, Number(raw?.minSceneDuration) || 3)), maxSceneDuration: Math.max(2, Math.min(30, Number(raw?.maxSceneDuration) || 8)), aspectRatio, displayTemplate: normalizeDisplayTemplate(raw?.displayTemplate) };
 }
 function validatePlan(words: BrollWord[], keepRanges: BrollKeepRange[] | undefined, raw: any, orientation: 'portrait' | 'landscape', settings: BrollPlanSettings): BrollPlan {
   const { index, kept } = keptWordIndexes(words, keepRanges); const { times } = keptTimeline(words, keepRanges); const scenes: BrollScene[] = []; const issues: string[] = []; let previousStart = -1; let previousTimelineEnd = -1; let previousLabel = '';
@@ -218,6 +221,7 @@ export async function updateBrollScene(workDir: string, plan: BrollPlan, sceneId
   if (scene.imageFile) { scene.generatedAspectRatio ??= previousAspect; scene.orientationChanged = scene.generatedAspectRatio !== resolveSceneAssetAspect(plan, scene); } else scene.orientationChanged = false;
   scene.sourceStart = nextStart; scene.sourceEnd = nextEnd; await saveBrollPlan(workDir, plan); return scene;
 }
+export async function updateBrollSettings(workDir: string, plan: BrollPlan, patch: Partial<Pick<BrollPlanSettings, 'videoProvider'>>) { plan.settings = normalizeSettings({ ...plan.settings, ...patch }); await saveBrollPlan(workDir, plan); return plan; }
 export async function deleteBrollScene(workDir: string, plan: BrollPlan, sceneId: string) { const index = plan.scenes.findIndex((scene) => scene.id === sceneId); if (index < 0) throw new Error('B-roll scene not found'); const [scene] = plan.scenes.splice(index, 1); await Promise.all([scene.imageFile ? fs.rm(scene.imageFile, { force: true }) : Promise.resolve(), scene.videoFile ? fs.rm(scene.videoFile, { force: true }) : Promise.resolve()]); await saveBrollPlan(workDir, plan); return plan; }
 
 export function resolveSceneDisplayTemplate(plan: BrollPlan, scene: BrollScene) { return scene.displayTemplate || plan.settings.displayTemplate || 'full-frame'; }
@@ -268,11 +272,11 @@ async function normalizeImage(rawPath: string, outputPath: string, aspect: '9:16
 }
 export async function importBrollImage(options: { workDir: string; plan: BrollPlan; sceneId: string; sourcePath: string; ffmpegBin?: string }) {
   const scene = options.plan.scenes.find((candidate) => candidate.id === options.sceneId); if (!scene) throw new Error('B-roll scene not found'); const brollDir = path.join(options.workDir, 'broll'); await fs.mkdir(brollDir, { recursive: true }); const outputPath = path.join(brollDir, `${scene.id}.png`);
-  const aspect = resolveSceneAssetAspect(options.plan, scene); await normalizeImage(options.sourcePath, outputPath, aspect, options.ffmpegBin, false); scene.imageFile = outputPath; scene.generatedAt = new Date().toISOString(); scene.generatedAspectRatio = aspect; scene.orientationChanged = false; scene.provider = 'manual'; scene.model = 'manual-import'; if (scene.videoFile) { await fs.rm(scene.videoFile, { force: true }); scene.videoFile = undefined; scene.videoGeneratedAt = undefined; scene.videoModel = undefined; } await saveBrollPlan(options.workDir, options.plan); return scene;
+  const aspect = resolveSceneAssetAspect(options.plan, scene); await normalizeImage(options.sourcePath, outputPath, aspect, options.ffmpegBin, false); scene.imageFile = outputPath; scene.generatedAt = new Date().toISOString(); scene.generatedAspectRatio = aspect; scene.orientationChanged = false; scene.provider = 'manual'; scene.model = 'manual-import'; if (scene.videoFile) { await fs.rm(scene.videoFile, { force: true }); scene.videoFile = undefined; scene.videoGeneratedAt = undefined; scene.videoModel = undefined; scene.videoProvider = undefined; } await saveBrollPlan(options.workDir, options.plan); return scene;
 }
 export async function generateBrollImage(options: { config: ImageProviderConfig; workDir: string; plan: BrollPlan; sceneId: string; regenerationComment?: string }) {
   const { config, workDir, plan, sceneId } = options; const scene = plan.scenes.find((candidate) => candidate.id === sceneId); if (!scene) throw new Error('B-roll scene not found'); const provider = plan.settings.provider; const aspect = resolveSceneAssetAspect(plan, scene); const prompt = generatedImagePrompt(scene, plan, options.regenerationComment); const brollDir = path.join(workDir, 'broll'); await fs.mkdir(brollDir, { recursive: true }); const rawPath = path.join(brollDir, `${scene.id}.raw.png`); const outputPath = path.join(brollDir, `${scene.id}.png`); let model: string;
-  if (provider === 'openai') model = await generateOpenAi(prompt, aspect, config, rawPath); else if (provider === 'gemini') model = await generateGemini(prompt, aspect, config, rawPath); else model = await generateWithAgentCli(provider, prompt, config, workDir, rawPath); await normalizeImage(rawPath, outputPath, aspect, config.ffmpegBin, true); scene.imageFile = outputPath; scene.generatedAt = new Date().toISOString(); scene.generatedAspectRatio = aspect; scene.orientationChanged = false; scene.provider = provider; scene.model = model; if (scene.videoFile) { await fs.rm(scene.videoFile, { force: true }); scene.videoFile = undefined; scene.videoGeneratedAt = undefined; scene.videoModel = undefined; } await saveBrollPlan(workDir, plan); return scene;
+  if (provider === 'openai') model = await generateOpenAi(prompt, aspect, config, rawPath); else if (provider === 'gemini') model = await generateGemini(prompt, aspect, config, rawPath); else model = await generateWithAgentCli(provider, prompt, config, workDir, rawPath); await normalizeImage(rawPath, outputPath, aspect, config.ffmpegBin, true); scene.imageFile = outputPath; scene.generatedAt = new Date().toISOString(); scene.generatedAspectRatio = aspect; scene.orientationChanged = false; scene.provider = provider; scene.model = model; if (scene.videoFile) { await fs.rm(scene.videoFile, { force: true }); scene.videoFile = undefined; scene.videoGeneratedAt = undefined; scene.videoModel = undefined; scene.videoProvider = undefined; } await saveBrollPlan(workDir, plan); return scene;
 }
 
 export async function createVideoPrompt(options: { codexBin: string; workDir: string; plan: BrollPlan; sceneId: string }) {
@@ -284,7 +288,20 @@ export async function generateBrollVideoWithGrokCli(options: { config: ImageProv
   const scene = options.plan.scenes.find((candidate) => candidate.id === options.sceneId); if (!scene) throw new Error('B-roll scene not found'); if (!scene.imageFile) throw new Error('Add or generate a B-roll image first'); if (!scene.videoPrompt) throw new Error('Create a Codex video prompt first'); if (!options.config.grokBin) throw new Error('Grok CLI was not found. Configure GROK_BIN or install Grok Build.'); const brollDir = path.join(options.workDir, 'broll'); const outputPath = path.join(brollDir, `${scene.id}.mp4`); await fs.rm(outputPath, { force: true }); const duration = Math.max(2, Math.min(12, scene.sourceEnd - scene.sourceStart)); const videoModel = options.config.grokVideoModel || 'grok-imagine-video-1.5';
   const requestedChange = options.regenerationComment?.trim() ? `\n\nUSER REQUEST FOR THIS REGENERATION:\n${options.regenerationComment.trim()}` : '';
   const agentPrompt = `Turn the local still image at ${scene.imageFile} into an image-to-video clip and save the final playable MP4 to this exact path: ${outputPath}\n\nUse the xAI/Grok Imagine image-to-video capability available in this Grok Build environment. Prefer model ${videoModel}. Target frame: ${resolveSceneAssetAspect(options.plan, scene)}. Preserve the source image's exact orientation and aspect ratio in the output video. Target duration: ${duration.toFixed(1)} seconds. Use the source still as the starting image.\n\nMOTION PROMPT:\n${scene.videoPrompt}${requestedChange}\n\nYou may use shell/code/tools available to Grok Build. Do not stop after instructions/code. The task is complete only after the MP4 exists. Do not modify the source still.`;
-  const args = ['--no-auto-update', '--always-approve', '--cwd', options.workDir, '-p', agentPrompt, '--output-format', 'plain']; if (options.config.grokModel) args.splice(4, 0, '-m', options.config.grokModel); await run(options.config.grokBin, args, undefined, 900000); const stat = await fs.stat(outputPath).catch(() => null); if (!stat?.isFile() || stat.size < 50_000) throw new Error('Grok CLI completed without creating a usable MP4. The Grok CLI environment must have image-to-video capability/authentication.'); if (options.config.ffmpegBin) await run(options.config.ffmpegBin, ['-v', 'error', '-i', outputPath, '-f', 'null', '-'], undefined, 120000); scene.videoFile = outputPath; scene.videoGeneratedAt = new Date().toISOString(); scene.videoModel = videoModel; await saveBrollPlan(options.workDir, options.plan); return scene;
+  const args = ['--no-auto-update', '--always-approve', '--cwd', options.workDir, '-p', agentPrompt, '--output-format', 'plain']; if (options.config.grokModel) args.splice(4, 0, '-m', options.config.grokModel); await run(options.config.grokBin, args, undefined, 900000); const stat = await fs.stat(outputPath).catch(() => null); if (!stat?.isFile() || stat.size < 50_000) throw new Error('Grok CLI completed without creating a usable MP4. The Grok CLI environment must have image-to-video capability/authentication.'); if (options.config.ffmpegBin) await run(options.config.ffmpegBin, ['-v', 'error', '-i', outputPath, '-f', 'null', '-'], undefined, 120000); scene.videoFile = outputPath; scene.videoGeneratedAt = new Date().toISOString(); scene.videoModel = videoModel; scene.videoProvider = 'grok-cli'; await saveBrollPlan(options.workDir, options.plan); return scene;
+}
+
+export async function generateBrollVideoWithGoogleFlow(options: { config: ImageProviderConfig; workDir: string; plan: BrollPlan; sceneId: string; regenerationComment?: string }) {
+  const scene = options.plan.scenes.find((candidate) => candidate.id === options.sceneId); if (!scene) throw new Error('B-roll scene not found'); if (!scene.imageFile) throw new Error('Add or generate a B-roll image first'); if (!scene.videoPrompt) throw new Error('Create a Codex video prompt first'); if (!options.config.gflowBin) throw new Error('Google Flow CLI was not found. Install gflow-cli and configure GFLOW_BIN if it is not on PATH.');
+  const brollDir = path.join(options.workDir, 'broll'); const outputPath = path.join(brollDir, `${scene.id}.mp4`); await fs.rm(outputPath, { force: true });
+  const targetDuration = Math.max(2, Math.min(12, scene.sourceEnd - scene.sourceStart)); const flowDuration = targetDuration <= 5 ? 4 : targetDuration <= 7 ? 6 : 8; const videoModel = options.config.gflowVideoModel || 'veo-fast';
+  const requestedChange = options.regenerationComment?.trim() ? `\n\nUSER REQUEST FOR THIS REGENERATION:\n${options.regenerationComment.trim()}` : ''; const motionPrompt = `${scene.videoPrompt}${requestedChange}`.trim();
+  const args = ['video', 'i2v', '--initial-frame', scene.imageFile, motionPrompt, '--model', videoModel, '--duration', String(flowDuration), '--count', '1', '--aspect', resolveSceneAssetAspect(options.plan, scene), '--output', outputPath];
+  if (options.config.gflowProfile?.trim()) args.push('--profile', options.config.gflowProfile.trim());
+  await run(options.config.gflowBin, args, undefined, 1_200_000, { cwd: options.workDir });
+  const stat = await fs.stat(outputPath).catch(() => null); if (!stat?.isFile() || stat.size < 50_000) throw new Error('Google Flow finished without creating a usable MP4. Run `gflow auth status` and verify that the selected Google account has Flow access/credits.');
+  if (options.config.ffmpegBin) await run(options.config.ffmpegBin, ['-v', 'error', '-i', outputPath, '-f', 'null', '-'], undefined, 120000);
+  scene.videoFile = outputPath; scene.videoGeneratedAt = new Date().toISOString(); scene.videoModel = `Google Flow · ${videoModel} · ${flowDuration}s`; scene.videoProvider = 'google-flow'; await saveBrollPlan(options.workDir, options.plan); return scene;
 }
 
 function even(value: number) { const rounded = Math.max(2, Math.round(value)); return rounded % 2 === 0 ? rounded : rounded - 1; }
