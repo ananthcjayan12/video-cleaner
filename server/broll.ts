@@ -5,7 +5,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
 export type BrollWord = { id: string; text: string; start: number; end: number };
-export type BrollKeepRange = { startWordId: string; endWordId: string };
+export type BrollKeepRange = { startWordId: string; endWordId: string; sourceStart?: number; sourceEnd?: number };
 export type ImageProvider = 'openai' | 'gemini' | 'grok-cli' | 'codex-cli';
 export type VideoProvider = 'grok-cli' | 'google-flow' | 'magnific';
 export type BrollWorkflowMode = 'cleaned-video' | 'raw-video' | 'assets-only';
@@ -135,9 +135,13 @@ function keptTimeline(words: BrollWord[], ranges?: BrollKeepRange[]) {
   for (const range of activeRanges) {
     const start = index.get(range.startWordId); const end = index.get(range.endWordId);
     if (start === undefined || end === undefined || start > end) continue;
-    const rangeSourceStart = words[start].start;
-    for (let position = start; position <= end; position += 1) times.set(position, { start: cursor + words[position].start - rangeSourceStart, end: cursor + words[position].end - rangeSourceStart });
-    cursor += Math.max(0, words[end].end - rangeSourceStart);
+    const rangeSourceStart = Number.isFinite(range.sourceStart) ? Number(range.sourceStart) : words[start].start;
+    const rangeSourceEnd = Number.isFinite(range.sourceEnd) ? Number(range.sourceEnd) : words[end].end;
+    for (let position = start; position <= end; position += 1) {
+      const wordStart = Math.max(rangeSourceStart, words[position].start); const wordEnd = Math.min(rangeSourceEnd, words[position].end);
+      if (wordEnd > wordStart) times.set(position, { start: cursor + wordStart - rangeSourceStart, end: cursor + wordEnd - rangeSourceStart });
+    }
+    cursor += Math.max(0, rangeSourceEnd - rangeSourceStart);
   }
   return { times, duration: cursor };
 }
