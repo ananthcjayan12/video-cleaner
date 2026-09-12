@@ -107,7 +107,7 @@ export const api = {
   prepare: (id: string) => request<{ proxyUrl: string; proxy: { width: number; height: number; fps: number; hardware: boolean } }>(`/api/projects/${id}/prepare`, { method: 'POST' }),
   transcribe: (id: string) => request<{ transcript: { text?: string; words: Word[] }; edl: Edl }>(`/api/projects/${id}/transcribe`, { method: 'POST' }),
   clean: (id: string, intensity: string) => request<Edl>(`/api/projects/${id}/clean`, { method: 'POST', body: JSON.stringify({ intensity }) }),
-  setEdl: (id: string, keepRanges: KeepRange[]) => request<Edl>(`/api/projects/${id}/edl`, { method: 'PUT', body: JSON.stringify({ keepRanges }) }),
+  setEdl: (id: string, keepRanges: KeepRange[], preserveBroll = false) => request<Edl>(`/api/projects/${id}/edl`, { method: 'PUT', body: JSON.stringify({ keepRanges, preserveBroll }) }),
   planBroll: (id: string, settings: Partial<BrollPlanSettings>) => request<{ plan: BrollPlan; transcript: { text?: string; words: Word[] }; edl: Edl }>(`/api/projects/${id}/broll/plan`, { method: 'POST', body: JSON.stringify({ settings: { ...settings, displayTemplate: undefined } }) }),
   getBroll: (id: string) => request<BrollPlan>(`/api/projects/${id}/broll`),
   updateBrollSettings: (id: string, patch: { videoProvider?: VideoProvider; returnVideoWithAudio?: boolean }) => request<BrollPlan>(`/api/projects/${id}/broll/settings`, { method: 'PUT', body: JSON.stringify(patch) }),
