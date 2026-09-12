@@ -1,5 +1,5 @@
 export type Word = { id: string; text: string; start: number; end: number };
-export type KeepRange = { startWordId: string; endWordId: string; reason?: string };
+export type KeepRange = { startWordId?: string; endWordId?: string; sourceStart?: number; sourceEnd?: number; reason?: string };
 export type Edl = { keepRanges: KeepRange[]; notes?: string[] };
 export type ImageProvider = 'openai' | 'gemini' | 'grok-cli' | 'codex-cli';
 export type VideoProvider = 'grok-cli' | 'google-flow' | 'magnific';
