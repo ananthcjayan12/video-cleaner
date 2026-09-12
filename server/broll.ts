@@ -88,7 +88,7 @@ export type BrollScene = {
 };
 
 export type BrollPlan = { version: 2; orientation: 'portrait' | 'landscape'; stylePreset: string; settings: BrollPlanSettings; scenes: BrollScene[]; notes: string[]; googleFlow?: GoogleFlowProjectState };
-export type ImageProviderConfig = { openAiApiKey?: string; openAiModel?: string; geminiApiKey?: string; geminiModel?: string; grokBin?: string; grokModel?: string; grokVideoModel?: string; gflowBin?: string; gflowProfile?: string; gflowVideoModel?: string; freepikApiKey?: string; freepikVideoModel?: string; freepikVideoEndpoint?: string; codexBin?: string; ffmpegBin?: string };
+export type ImageProviderConfig = { openAiApiKey?: string; openAiModel?: string; geminiApiKey?: string; geminiModel?: string; grokBin?: string; grokModel?: string; grokVideoModel?: string; gflowBin?: string; gflowProfile?: string; gflowVideoModel?: string; magnificApiKey?: string; magnificVideoModel?: string; magnificVideoEndpoint?: string; codexBin?: string; ffmpegBin?: string };
 type RunOptions = { cwd?: string; env?: NodeJS.ProcessEnv };
 
 export const BROLL_STYLE_PRESET = [
@@ -349,10 +349,10 @@ export async function generateBrollVideoWithMagnific(options: { config: ImagePro
   if (!scene) throw new Error('B-roll scene not found');
   if (!scene.imageFile) throw new Error('Add or generate a B-roll image first');
   if (!scene.videoPrompt) throw new Error('Create a Codex video prompt first');
-  if (!options.config.freepikApiKey) throw new Error('Magnific / Freepik API key is missing. Add FREEPIK_API_KEY in Settings or .env.local.');
+  if (!options.config.magnificApiKey) throw new Error('Magnific API key is missing. Add MAGNIFIC_API_KEY in Settings or .env.local.');
 
-  const model = options.config.freepikVideoModel || 'minimax-h3-max-turbo';
-  const endpoint = (options.config.freepikVideoEndpoint || `https://api.freepik.com/v1/ai/image-to-video/${model}`).replace(/\/$/, '');
+  const model = options.config.magnificVideoModel || 'minimax-hailuo-2-3-768p-fast';
+  const endpoint = (options.config.magnificVideoEndpoint || `https://api.magnific.com/v1/ai/image-to-video/${model}`).replace(/\/$/, '');
   const requestedChange = options.regenerationComment?.trim() ? `\n\nUSER REQUEST FOR THIS REGENERATION:\n${options.regenerationComment.trim()}` : '';
   const prompt = `${scene.videoPrompt}${requestedChange}`.trim();
   const displayModel = `Magnific · MiniMax · ${model}`;
@@ -365,12 +365,12 @@ export async function generateBrollVideoWithMagnific(options: { config: ImagePro
     const image = (await fs.readFile(scene.imageFile)).toString('base64');
     const createResponse = await fetch(endpoint, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-freepik-api-key': options.config.freepikApiKey },
+      headers: { 'Content-Type': 'application/json', 'x-magnific-api-key': options.config.magnificApiKey },
       body: JSON.stringify({
-        image,
         prompt,
-        duration: 5,
-        resolution: '768p',
+        first_frame_image: image,
+        prompt_optimizer: true,
+        duration: 6,
       }),
     });
     const createBody: any = await createResponse.json().catch(() => ({}));
@@ -383,7 +383,7 @@ export async function generateBrollVideoWithMagnific(options: { config: ImagePro
     let lastStatus = 'CREATED';
     while (Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 3000));
-      const statusResponse = await fetch(`${endpoint}/${encodeURIComponent(taskId)}`, { headers: { 'x-freepik-api-key': options.config.freepikApiKey } });
+      const statusResponse = await fetch(`${endpoint}/${encodeURIComponent(taskId)}`, { headers: { 'x-magnific-api-key': options.config.magnificApiKey } });
       const statusBody: any = await statusResponse.json().catch(() => ({}));
       if (!statusResponse.ok) throw new Error(`Magnific task polling failed (${statusResponse.status}): ${statusBody?.message || statusBody?.error || JSON.stringify(statusBody)}`);
       const data = statusBody?.data ?? statusBody;
