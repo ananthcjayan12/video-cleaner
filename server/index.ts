@@ -56,6 +56,8 @@ type LocalSettings = {
   elevenLabsApiKey?: string; openAiApiKey?: string; geminiApiKey?: string; imageProvider?: ImageProvider;
   openAiImageModel?: string; geminiImageModel?: string; grokModel?: string; grokVideoModel?: string; gflowProfile?: string; gflowVideoModel?: string;
   magnificApiKey?: string; magnificVideoModel?: string; magnificVideoEndpoint?: string;
+  // Legacy names from the initial Magnific integration; retained for automatic migration.
+  freepikApiKey?: string; freepikVideoModel?: string; freepikVideoEndpoint?: string;
   codexBin?: string; grokBin?: string; gflowBin?: string; ffmpegBin?: string; ffprobeBin?: string; projectsDir?: string;
 };
 type FfmpegCapabilities = { videoToolboxDecode: boolean; h264VideoToolbox: boolean; hevcVideoToolbox: boolean };
@@ -126,7 +128,7 @@ async function resolvedSettings() {
     elevenLabsApiKey: localSettings.elevenLabsApiKey || process.env.ELEVENLABS_API_KEY || '',
     openAiApiKey: localSettings.openAiApiKey || process.env.OPENAI_API_KEY || '',
     geminiApiKey: localSettings.geminiApiKey || process.env.GEMINI_API_KEY || '',
-    magnificApiKey: localSettings.magnificApiKey || process.env.MAGNIFIC_API_KEY || process.env.FREEPIK_API_KEY || '',
+    magnificApiKey: localSettings.magnificApiKey || localSettings.freepikApiKey || process.env.MAGNIFIC_API_KEY || process.env.FREEPIK_API_KEY || '',
     imageProvider: providerValue(localSettings.imageProvider || process.env.IMAGE_PROVIDER),
     openAiImageModel: localSettings.openAiImageModel || process.env.OPENAI_IMAGE_MODEL || 'gpt-image-2',
     geminiImageModel: localSettings.geminiImageModel || process.env.GEMINI_IMAGE_MODEL || 'gemini-3.1-flash-image',
@@ -134,8 +136,8 @@ async function resolvedSettings() {
     grokVideoModel: localSettings.grokVideoModel || process.env.GROK_VIDEO_MODEL || 'grok-imagine-video-1.5',
     gflowProfile: localSettings.gflowProfile || process.env.GFLOW_PROFILE || '',
     gflowVideoModel: localSettings.gflowVideoModel || process.env.GFLOW_VIDEO_MODEL || 'veo-fast',
-    magnificVideoModel: localSettings.magnificVideoModel || process.env.MAGNIFIC_VIDEO_MODEL || process.env.FREEPIK_VIDEO_MODEL || 'minimax-hailuo-2-3-768p-fast',
-    magnificVideoEndpoint: localSettings.magnificVideoEndpoint || process.env.MAGNIFIC_VIDEO_ENDPOINT || process.env.FREEPIK_VIDEO_ENDPOINT || '',
+    magnificVideoModel: localSettings.magnificVideoModel || localSettings.freepikVideoModel || process.env.MAGNIFIC_VIDEO_MODEL || process.env.FREEPIK_VIDEO_MODEL || 'minimax-hailuo-2-3-768p-fast',
+    magnificVideoEndpoint: localSettings.magnificVideoEndpoint || localSettings.freepikVideoEndpoint || process.env.MAGNIFIC_VIDEO_ENDPOINT || process.env.FREEPIK_VIDEO_ENDPOINT || '',
     codexBin: codexOverride || await detectBinary('codex'), grokBin: grokOverride || await detectBinary('grok'), gflowBin: gflowOverride || await detectBinary('gflow'),
     ffmpegBin: ffmpegOverride || await detectBinary('ffmpeg'), ffprobeBin: ffprobeOverride || await detectBinary('ffprobe'),
     projectsDir: localSettings.projectsDir || process.env.PROJECTS_DIR || path.join(os.homedir(), 'VideoCleaner', 'projects'),
