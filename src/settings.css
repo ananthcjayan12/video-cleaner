@@ -76,6 +76,10 @@
 .brollActions,.sceneButtons,.brollFooterActions,.assetActions,.promptActions,.modalActions { display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; }
 .brollConfig { display:grid; grid-template-columns:repeat(auto-fit,minmax(175px,1fr)); gap:10px; padding:12px; border:1px solid #27272a; background:#0f0f11; border-radius:14px; margin-bottom:10px; }
 .brollConfig label,.timingGrid label { color:#a1a1aa; font-size:11px; display:flex; flex-direction:column; gap:6px; }
+.brollConfig .configToggle { flex-direction:row; align-items:center; padding:9px 10px; border:1px solid #27272a; border-radius:10px; background:#151517; }
+.configToggle input { width:auto; }
+.configToggle span { display:flex; flex-direction:column; gap:3px; color:#d4d4d8; }
+.configToggle small { color:#71717a; line-height:1.35; }
 .brollModeHelp { font-size:11px; line-height:1.55; margin:0 0 16px; }
 .brollModeHelp strong { color:#d4d4d8; }
 .brollEmpty { border:1px dashed #3f3f46; background:#0f0f11; border-radius:14px; padding:24px; }
@@ -84,6 +88,17 @@
 .styleStrip { display:flex; flex-wrap:wrap; gap:8px; margin:-2px 0 16px; }
 .styleStrip span,.styleStrip strong { padding:6px 9px; border-radius:999px; background:#18181b; border:1px solid #27272a; color:#a1a1aa; font-size:10px; }
 .styleStrip strong { color:#86efac; }
+.flowProjectPanel { display:flex; justify-content:space-between; gap:12px; align-items:center; border:1px solid #1e3a8a; background:rgba(30,58,138,.12); border-radius:12px; padding:12px; margin:0 0 14px; }
+.flowProjectPanel > div:first-child { display:flex; flex-direction:column; gap:4px; min-width:0; }
+.flowProjectPanel small { color:#a1a1aa; overflow-wrap:anywhere; }
+.flowProjectActions { display:flex; gap:8px; align-items:center; flex-wrap:wrap; justify-content:flex-end; }
+.flowProjectActions a { color:#93c5fd; font-size:11px; text-decoration:none; border:1px solid #1e3a8a; border-radius:8px; padding:8px 10px; }
+.flowInbox { border:1px solid #3f3f46; background:#111113; border-radius:12px; padding:12px; margin:0 0 16px; }
+.flowInbox > p { color:#71717a; font-size:11px; margin:5px 0 10px; }
+.flowInboxRow { display:grid; grid-template-columns:minmax(0,1fr) minmax(180px,260px) auto; gap:8px; align-items:center; border-top:1px solid #27272a; padding:9px 0; }
+.flowInboxRow > div { display:flex; flex-direction:column; gap:3px; min-width:0; }
+.flowInboxRow span,.flowInboxRow small { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.flowInboxRow small { color:#71717a; }
 .brollGrid { display:grid; grid-template-columns:repeat(auto-fit,minmax(440px,1fr)); gap:16px; align-items:start; }
 .brollCard { display:grid; grid-template-columns:minmax(170px,230px) minmax(0,1fr); gap:14px; border:1px solid #27272a; background:#0f0f11; border-radius:16px; padding:12px; min-width:0; transition:opacity .2s ease,border-color .2s ease,box-shadow .2s ease; }
 .brollCard.selectedForBatch { border-color:#22c55e; box-shadow:0 0 0 1px rgba(34,197,94,.28); }
@@ -104,6 +119,12 @@ button.danger:hover:not(:disabled) { background:rgba(127,29,29,.28); border-colo
 .sceneMeta { display:flex; gap:6px; flex-wrap:wrap; }
 .sceneMeta span { font-size:10px; color:#a1a1aa; background:#18181b; border-radius:999px; padding:5px 7px; }
 .sceneMeta .videoBadge { color:#93c5fd; border:1px solid #1e3a8a; background:rgba(30,58,138,.22); }
+.videoAttempts { border:1px solid #27272a; background:#151517; border-radius:10px; padding:8px; }
+.videoAttempts summary { cursor:pointer; color:#a1a1aa; font-size:10px; font-weight:700; }
+.videoAttempt { display:flex; flex-direction:column; gap:3px; margin-top:7px; padding-top:7px; border-top:1px solid #27272a; font-size:9px; color:#a1a1aa; overflow-wrap:anywhere; }
+.videoAttempt.completed > span { color:#86efac; }
+.videoAttempt.failed > span,.attemptError { color:#fda4af !important; }
+.videoAttempt.submitted > span { color:#fde68a; }
 .sceneNarration { margin:0; color:#d4d4d8; font-size:12px; line-height:1.5; }
 .visualIntent { margin:0; color:#71717a; font-size:11px; line-height:1.5; }
 .brollBody label { display:flex; flex-direction:column; gap:6px; color:#a1a1aa; font-size:11px; }

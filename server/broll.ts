@@ -1,10 +1,12 @@
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
 export type BrollWord = { id: string; text: string; start: number; end: number };
 export type BrollKeepRange = { startWordId: string; endWordId: string };
 export type ImageProvider = 'openai' | 'gemini' | 'grok-cli' | 'codex-cli';
+export type VideoProvider = 'grok-cli' | 'google-flow';
 export type BrollWorkflowMode = 'cleaned-video' | 'raw-video' | 'assets-only';
 export type BrollCountMode = 'auto' | 'exact' | 'per-minute' | 'interval';
 export type BrollAssetAspectRatio = 'auto' | '9:16' | '16:9';
@@ -25,6 +27,7 @@ export const BROLL_DISPLAY_TEMPLATES: Array<{ id: BrollDisplayTemplate; label: s
 export type BrollPlanSettings = {
   workflowMode: BrollWorkflowMode;
   provider: ImageProvider;
+  videoProvider: VideoProvider;
   countMode: BrollCountMode;
   targetCount: number;
   imagesPerMinute: number;
@@ -33,21 +36,59 @@ export type BrollPlanSettings = {
   maxSceneDuration: number;
   aspectRatio: 'auto' | '9:16' | '16:9';
   displayTemplate: BrollDisplayTemplate;
+  returnVideoWithAudio: boolean;
+};
+
+export type BrollVideoAttempt = {
+  id: string;
+  source: 'google-flow' | 'grok-cli' | 'manual' | 'flow-catalog';
+  status: 'submitted' | 'completed' | 'failed';
+  startedAt: string;
+  completedAt?: string;
+  model?: string;
+  prompt?: string;
+  localFile?: string;
+  flowProjectId?: string;
+  flowMediaId?: string;
+  flowWorkflowId?: string;
+  error?: string;
+  errorLogFile?: string;
+};
+
+export type GoogleFlowProjectState = {
+  projectId: string;
+  title: string;
+  profile: string;
+  url: string;
+  createdAt: string;
+  lastSyncedAt?: string;
+};
+
+export type GoogleFlowCatalogVideo = {
+  mediaId: string;
+  projectId: string;
+  prompt: string;
+  aspect?: string;
+  model?: string;
+  duration?: number;
+  createdAt?: string;
+  localPath?: string;
 };
 
 export type BrollScene = {
   id: string; title: string; startWordId: string; endWordId: string; sourceStart: number; sourceEnd: number;
   narration: string; visualIntent: string; shotType: string; imagePrompt: string; videoPrompt?: string; enabled: boolean;
   imageFile?: string; generatedAt?: string; provider?: ImageProvider | 'manual'; model?: string;
-  videoFile?: string; videoGeneratedAt?: string; videoModel?: string;
+  videoFile?: string; videoGeneratedAt?: string; videoModel?: string; videoProvider?: VideoProvider;
+  videoAttempts?: BrollVideoAttempt[]; activeVideoAttemptId?: string;
   displayTemplate?: BrollDisplayTemplate;
   assetAspectRatio?: BrollAssetAspectRatio;
   generatedAspectRatio?: Exclude<BrollAssetAspectRatio, 'auto'>;
   orientationChanged?: boolean;
 };
 
-export type BrollPlan = { version: 2; orientation: 'portrait' | 'landscape'; stylePreset: string; settings: BrollPlanSettings; scenes: BrollScene[]; notes: string[] };
-export type ImageProviderConfig = { openAiApiKey?: string; openAiModel?: string; geminiApiKey?: string; geminiModel?: string; grokBin?: string; grokModel?: string; grokVideoModel?: string; codexBin?: string; ffmpegBin?: string };
+export type BrollPlan = { version: 2; orientation: 'portrait' | 'landscape'; stylePreset: string; settings: BrollPlanSettings; scenes: BrollScene[]; notes: string[]; googleFlow?: GoogleFlowProjectState };
+export type ImageProviderConfig = { openAiApiKey?: string; openAiModel?: string; geminiApiKey?: string; geminiModel?: string; grokBin?: string; grokModel?: string; grokVideoModel?: string; gflowBin?: string; gflowProfile?: string; gflowVideoModel?: string; codexBin?: string; ffmpegBin?: string };
 type RunOptions = { cwd?: string; env?: NodeJS.ProcessEnv };
 
 export const BROLL_STYLE_PRESET = [
@@ -115,9 +156,10 @@ function normalizeDisplayTemplate(value: unknown): BrollDisplayTemplate {
 function normalizeSettings(raw: Partial<BrollPlanSettings> | undefined): BrollPlanSettings {
   const workflowMode: BrollWorkflowMode = ['cleaned-video', 'raw-video', 'assets-only'].includes(String(raw?.workflowMode)) ? raw!.workflowMode as BrollWorkflowMode : 'cleaned-video';
   const provider: ImageProvider = ['openai', 'gemini', 'grok-cli', 'codex-cli'].includes(String(raw?.provider)) ? raw!.provider as ImageProvider : 'gemini';
+  const videoProvider: VideoProvider = ['grok-cli', 'google-flow'].includes(String(raw?.videoProvider)) ? raw!.videoProvider as VideoProvider : 'grok-cli';
   const countMode: BrollCountMode = ['auto', 'exact', 'per-minute', 'interval'].includes(String(raw?.countMode)) ? raw!.countMode as BrollCountMode : 'auto';
   const aspectRatio = ['auto', '9:16', '16:9'].includes(String(raw?.aspectRatio)) ? raw!.aspectRatio as BrollPlanSettings['aspectRatio'] : 'auto';
-  return { workflowMode, provider, countMode, targetCount: Math.max(1, Math.min(40, Number(raw?.targetCount) || 6)), imagesPerMinute: Math.max(0.5, Math.min(20, Number(raw?.imagesPerMinute) || 5)), intervalSeconds: Math.max(10, Math.min(300, Number(raw?.intervalSeconds) || 20)), minSceneDuration: Math.max(1, Math.min(20, Number(raw?.minSceneDuration) || 3)), maxSceneDuration: Math.max(2, Math.min(30, Number(raw?.maxSceneDuration) || 8)), aspectRatio, displayTemplate: normalizeDisplayTemplate(raw?.displayTemplate) };
+  return { workflowMode, provider, videoProvider, countMode, targetCount: Math.max(1, Math.min(40, Number(raw?.targetCount) || 6)), imagesPerMinute: Math.max(0.5, Math.min(20, Number(raw?.imagesPerMinute) || 5)), intervalSeconds: Math.max(10, Math.min(300, Number(raw?.intervalSeconds) || 20)), minSceneDuration: Math.max(1, Math.min(20, Number(raw?.minSceneDuration) || 3)), maxSceneDuration: Math.max(2, Math.min(30, Number(raw?.maxSceneDuration) || 8)), aspectRatio, displayTemplate: normalizeDisplayTemplate(raw?.displayTemplate), returnVideoWithAudio: raw?.returnVideoWithAudio === true };
 }
 function validatePlan(words: BrollWord[], keepRanges: BrollKeepRange[] | undefined, raw: any, orientation: 'portrait' | 'landscape', settings: BrollPlanSettings): BrollPlan {
   const { index, kept } = keptWordIndexes(words, keepRanges); const { times } = keptTimeline(words, keepRanges); const scenes: BrollScene[] = []; const issues: string[] = []; let previousStart = -1; let previousTimelineEnd = -1; let previousLabel = '';
@@ -186,12 +228,23 @@ export async function loadBrollPlan(workDir: string): Promise<BrollPlan | null> 
     const raw = JSON.parse(await fs.readFile(path.join(workDir, 'broll-plan.json'), 'utf8')) as BrollPlan;
     if (raw.version !== 2) return null;
     raw.settings = normalizeSettings(raw.settings);
+    if (raw.googleFlow?.projectId) raw.googleFlow.url = flowProjectUrl(raw.googleFlow.projectId);
     for (const scene of raw.scenes ?? []) {
       if (scene.displayTemplate && !BROLL_DISPLAY_TEMPLATES.some((template) => template.id === scene.displayTemplate)) delete scene.displayTemplate;
       if (scene.assetAspectRatio && !['auto', '9:16', '16:9'].includes(scene.assetAspectRatio)) delete scene.assetAspectRatio;
       if (scene.generatedAspectRatio && !['9:16', '16:9'].includes(scene.generatedAspectRatio)) delete scene.generatedAspectRatio;
       if (scene.imageFile && !scene.generatedAspectRatio) scene.generatedAspectRatio = resolveSceneAssetAspect(raw, scene);
       scene.orientationChanged = Boolean(scene.imageFile && scene.generatedAspectRatio !== resolveSceneAssetAspect(raw, scene));
+      scene.videoAttempts = Array.isArray(scene.videoAttempts) ? scene.videoAttempts : [];
+      if (scene.videoFile && !scene.videoAttempts.length) {
+        const id = `legacy-${scene.id}`;
+        scene.videoAttempts.push({ id, source: scene.videoProvider === 'google-flow' ? 'google-flow' : 'grok-cli', status: 'completed', startedAt: scene.videoGeneratedAt ?? new Date(0).toISOString(), completedAt: scene.videoGeneratedAt, model: scene.videoModel, localFile: scene.videoFile });
+        scene.activeVideoAttemptId = id;
+      }
+      for (const attempt of scene.videoAttempts) {
+        if (attempt.source !== 'google-flow' || attempt.status !== 'failed' || !attempt.errorLogFile) continue;
+        const detail = await fs.readFile(attempt.errorLogFile, 'utf8').catch(() => ''); if (!detail) continue; captureFlowAttemptIds(attempt, detail); attempt.error = conciseAttemptError(detail);
+      }
     }
     return raw;
   } catch { return null; }
@@ -218,7 +271,8 @@ export async function updateBrollScene(workDir: string, plan: BrollPlan, sceneId
   if (scene.imageFile) { scene.generatedAspectRatio ??= previousAspect; scene.orientationChanged = scene.generatedAspectRatio !== resolveSceneAssetAspect(plan, scene); } else scene.orientationChanged = false;
   scene.sourceStart = nextStart; scene.sourceEnd = nextEnd; await saveBrollPlan(workDir, plan); return scene;
 }
-export async function deleteBrollScene(workDir: string, plan: BrollPlan, sceneId: string) { const index = plan.scenes.findIndex((scene) => scene.id === sceneId); if (index < 0) throw new Error('B-roll scene not found'); const [scene] = plan.scenes.splice(index, 1); await Promise.all([scene.imageFile ? fs.rm(scene.imageFile, { force: true }) : Promise.resolve(), scene.videoFile ? fs.rm(scene.videoFile, { force: true }) : Promise.resolve()]); await saveBrollPlan(workDir, plan); return plan; }
+export async function updateBrollSettings(workDir: string, plan: BrollPlan, patch: Partial<Pick<BrollPlanSettings, 'videoProvider' | 'returnVideoWithAudio'>>) { plan.settings = normalizeSettings({ ...plan.settings, ...patch }); await saveBrollPlan(workDir, plan); return plan; }
+export async function deleteBrollScene(workDir: string, plan: BrollPlan, sceneId: string) { const index = plan.scenes.findIndex((scene) => scene.id === sceneId); if (index < 0) throw new Error('B-roll scene not found'); const [scene] = plan.scenes.splice(index, 1); const files = new Set([scene.imageFile, scene.videoFile, ...(scene.videoAttempts ?? []).map((attempt) => attempt.localFile), ...(scene.videoAttempts ?? []).map((attempt) => attempt.errorLogFile)].filter((value): value is string => Boolean(value))); await Promise.all([...files].map((file) => fs.rm(file, { force: true }))); await saveBrollPlan(workDir, plan); return plan; }
 
 export function resolveSceneDisplayTemplate(plan: BrollPlan, scene: BrollScene) { return scene.displayTemplate || plan.settings.displayTemplate || 'full-frame'; }
 export function displayTemplateNeedsPresenterMatte(template: BrollDisplayTemplate) { return template === 'top-card-presenter' || template === 'presenter-overlay' || template === 'stacked-cards-cutout'; }
@@ -268,11 +322,11 @@ async function normalizeImage(rawPath: string, outputPath: string, aspect: '9:16
 }
 export async function importBrollImage(options: { workDir: string; plan: BrollPlan; sceneId: string; sourcePath: string; ffmpegBin?: string }) {
   const scene = options.plan.scenes.find((candidate) => candidate.id === options.sceneId); if (!scene) throw new Error('B-roll scene not found'); const brollDir = path.join(options.workDir, 'broll'); await fs.mkdir(brollDir, { recursive: true }); const outputPath = path.join(brollDir, `${scene.id}.png`);
-  const aspect = resolveSceneAssetAspect(options.plan, scene); await normalizeImage(options.sourcePath, outputPath, aspect, options.ffmpegBin, false); scene.imageFile = outputPath; scene.generatedAt = new Date().toISOString(); scene.generatedAspectRatio = aspect; scene.orientationChanged = false; scene.provider = 'manual'; scene.model = 'manual-import'; if (scene.videoFile) { await fs.rm(scene.videoFile, { force: true }); scene.videoFile = undefined; scene.videoGeneratedAt = undefined; scene.videoModel = undefined; } await saveBrollPlan(options.workDir, options.plan); return scene;
+  const aspect = resolveSceneAssetAspect(options.plan, scene); await normalizeImage(options.sourcePath, outputPath, aspect, options.ffmpegBin, false); scene.imageFile = outputPath; scene.generatedAt = new Date().toISOString(); scene.generatedAspectRatio = aspect; scene.orientationChanged = false; scene.provider = 'manual'; scene.model = 'manual-import'; scene.videoFile = undefined; scene.activeVideoAttemptId = undefined; scene.videoGeneratedAt = undefined; scene.videoModel = undefined; scene.videoProvider = undefined; await saveBrollPlan(options.workDir, options.plan); return scene;
 }
 export async function generateBrollImage(options: { config: ImageProviderConfig; workDir: string; plan: BrollPlan; sceneId: string; regenerationComment?: string }) {
   const { config, workDir, plan, sceneId } = options; const scene = plan.scenes.find((candidate) => candidate.id === sceneId); if (!scene) throw new Error('B-roll scene not found'); const provider = plan.settings.provider; const aspect = resolveSceneAssetAspect(plan, scene); const prompt = generatedImagePrompt(scene, plan, options.regenerationComment); const brollDir = path.join(workDir, 'broll'); await fs.mkdir(brollDir, { recursive: true }); const rawPath = path.join(brollDir, `${scene.id}.raw.png`); const outputPath = path.join(brollDir, `${scene.id}.png`); let model: string;
-  if (provider === 'openai') model = await generateOpenAi(prompt, aspect, config, rawPath); else if (provider === 'gemini') model = await generateGemini(prompt, aspect, config, rawPath); else model = await generateWithAgentCli(provider, prompt, config, workDir, rawPath); await normalizeImage(rawPath, outputPath, aspect, config.ffmpegBin, true); scene.imageFile = outputPath; scene.generatedAt = new Date().toISOString(); scene.generatedAspectRatio = aspect; scene.orientationChanged = false; scene.provider = provider; scene.model = model; if (scene.videoFile) { await fs.rm(scene.videoFile, { force: true }); scene.videoFile = undefined; scene.videoGeneratedAt = undefined; scene.videoModel = undefined; } await saveBrollPlan(workDir, plan); return scene;
+  if (provider === 'openai') model = await generateOpenAi(prompt, aspect, config, rawPath); else if (provider === 'gemini') model = await generateGemini(prompt, aspect, config, rawPath); else model = await generateWithAgentCli(provider, prompt, config, workDir, rawPath); await normalizeImage(rawPath, outputPath, aspect, config.ffmpegBin, true); scene.imageFile = outputPath; scene.generatedAt = new Date().toISOString(); scene.generatedAspectRatio = aspect; scene.orientationChanged = false; scene.provider = provider; scene.model = model; scene.videoFile = undefined; scene.activeVideoAttemptId = undefined; scene.videoGeneratedAt = undefined; scene.videoModel = undefined; scene.videoProvider = undefined; await saveBrollPlan(workDir, plan); return scene;
 }
 
 export async function createVideoPrompt(options: { codexBin: string; workDir: string; plan: BrollPlan; sceneId: string }) {
@@ -281,10 +335,61 @@ export async function createVideoPrompt(options: { codexBin: string; workDir: st
   await run(options.codexBin, ['exec', '--ephemeral', '--output-schema', schemaPath, '--output-last-message', outputPath, '-'], prompt); const raw = JSON.parse(await fs.readFile(outputPath, 'utf8')); const videoPrompt = String(raw.videoPrompt ?? '').trim(); if (videoPrompt.length < 30) throw new Error('Codex returned an unusable video prompt'); scene.videoPrompt = videoPrompt; await saveBrollPlan(options.workDir, options.plan); return scene;
 }
 export async function generateBrollVideoWithGrokCli(options: { config: ImageProviderConfig; workDir: string; plan: BrollPlan; sceneId: string; regenerationComment?: string }) {
-  const scene = options.plan.scenes.find((candidate) => candidate.id === options.sceneId); if (!scene) throw new Error('B-roll scene not found'); if (!scene.imageFile) throw new Error('Add or generate a B-roll image first'); if (!scene.videoPrompt) throw new Error('Create a Codex video prompt first'); if (!options.config.grokBin) throw new Error('Grok CLI was not found. Configure GROK_BIN or install Grok Build.'); const brollDir = path.join(options.workDir, 'broll'); const outputPath = path.join(brollDir, `${scene.id}.mp4`); await fs.rm(outputPath, { force: true }); const duration = Math.max(2, Math.min(12, scene.sourceEnd - scene.sourceStart)); const videoModel = options.config.grokVideoModel || 'grok-imagine-video-1.5';
+  const scene = options.plan.scenes.find((candidate) => candidate.id === options.sceneId); if (!scene) throw new Error('B-roll scene not found'); if (!scene.imageFile) throw new Error('Add or generate a B-roll image first'); if (!scene.videoPrompt) throw new Error('Create a Codex video prompt first'); if (!options.config.grokBin) throw new Error('Grok CLI was not found. Configure GROK_BIN or install Grok Build.'); const duration = Math.max(2, Math.min(12, scene.sourceEnd - scene.sourceStart)); const videoModel = options.config.grokVideoModel || 'grok-imagine-video-1.5';
   const requestedChange = options.regenerationComment?.trim() ? `\n\nUSER REQUEST FOR THIS REGENERATION:\n${options.regenerationComment.trim()}` : '';
+  const prompt = `${scene.videoPrompt}${requestedChange}`.trim(); const attempt = newVideoAttempt(scene, 'grok-cli', videoModel, prompt); const outputPath = await videoAttemptPath(options.workDir, scene.id, attempt.id); attempt.localFile = outputPath; await saveBrollPlan(options.workDir, options.plan);
   const agentPrompt = `Turn the local still image at ${scene.imageFile} into an image-to-video clip and save the final playable MP4 to this exact path: ${outputPath}\n\nUse the xAI/Grok Imagine image-to-video capability available in this Grok Build environment. Prefer model ${videoModel}. Target frame: ${resolveSceneAssetAspect(options.plan, scene)}. Preserve the source image's exact orientation and aspect ratio in the output video. Target duration: ${duration.toFixed(1)} seconds. Use the source still as the starting image.\n\nMOTION PROMPT:\n${scene.videoPrompt}${requestedChange}\n\nYou may use shell/code/tools available to Grok Build. Do not stop after instructions/code. The task is complete only after the MP4 exists. Do not modify the source still.`;
-  const args = ['--no-auto-update', '--always-approve', '--cwd', options.workDir, '-p', agentPrompt, '--output-format', 'plain']; if (options.config.grokModel) args.splice(4, 0, '-m', options.config.grokModel); await run(options.config.grokBin, args, undefined, 900000); const stat = await fs.stat(outputPath).catch(() => null); if (!stat?.isFile() || stat.size < 50_000) throw new Error('Grok CLI completed without creating a usable MP4. The Grok CLI environment must have image-to-video capability/authentication.'); if (options.config.ffmpegBin) await run(options.config.ffmpegBin, ['-v', 'error', '-i', outputPath, '-f', 'null', '-'], undefined, 120000); scene.videoFile = outputPath; scene.videoGeneratedAt = new Date().toISOString(); scene.videoModel = videoModel; await saveBrollPlan(options.workDir, options.plan); return scene;
+  try {
+    const args = ['--no-auto-update', '--always-approve', '--cwd', options.workDir, '-p', agentPrompt, '--output-format', 'plain']; if (options.config.grokModel) args.splice(4, 0, '-m', options.config.grokModel); await run(options.config.grokBin, args, undefined, 900000); await validateVideo(outputPath, options.config.ffmpegBin, 'Grok CLI completed without creating a usable MP4. The Grok CLI environment must have image-to-video capability/authentication.'); if (!options.plan.settings.returnVideoWithAudio) await stripVideoAudio(outputPath, options.config.ffmpegBin); completeVideoAttempt(scene, attempt, outputPath, videoModel, 'grok-cli'); await saveBrollPlan(options.workDir, options.plan); return scene;
+  } catch (error) { await failVideoAttempt(options.workDir, options.plan, attempt, error); throw error; }
+}
+
+function newVideoAttempt(scene: BrollScene, source: BrollVideoAttempt['source'], model: string, prompt: string) {
+  const attempt: BrollVideoAttempt = { id: randomUUID(), source, status: 'submitted', startedAt: new Date().toISOString(), model, prompt };
+  scene.videoAttempts ??= []; scene.videoAttempts.push(attempt); return attempt;
+}
+async function videoAttemptPath(workDir: string, sceneId: string, attemptId: string, extension = '.mp4') { const dir = path.join(workDir, 'broll', 'video-attempts'); await fs.mkdir(dir, { recursive: true }); return path.join(dir, `${sceneId}-${attemptId}${extension}`); }
+async function validateVideo(file: string, ffmpegBin: string | undefined, missingMessage: string) { const stat = await fs.stat(file).catch(() => null); if (!stat?.isFile() || stat.size < 50_000) throw new Error(missingMessage); if (ffmpegBin) await run(ffmpegBin, ['-v', 'error', '-i', file, '-f', 'null', '-'], undefined, 120000); }
+async function stripVideoAudio(file: string, ffmpegBin?: string) { if (!ffmpegBin) throw new Error('FFmpeg is required when “Return video with audio” is disabled.'); const extension = path.extname(file) || '.mp4'; const silentPath = `${file}.silent${extension}`; try { await run(ffmpegBin, ['-hide_banner', '-loglevel', 'error', '-y', '-i', file, '-map', '0:v:0', '-c:v', 'copy', '-an', '-movflags', '+faststart', silentPath], undefined, 120000); await fs.rename(silentPath, file); } finally { await fs.rm(silentPath, { force: true }); } }
+function completeVideoAttempt(scene: BrollScene, attempt: BrollVideoAttempt, outputPath: string, model: string, provider: VideoProvider) { const completedAt = new Date().toISOString(); attempt.status = 'completed'; attempt.completedAt = completedAt; attempt.localFile = outputPath; scene.activeVideoAttemptId = attempt.id; scene.videoFile = outputPath; scene.videoGeneratedAt = completedAt; scene.videoModel = model; scene.videoProvider = provider; }
+function conciseAttemptError(detail: string) { if (/"event": "migrated\.status"[^\n]*"status": 4|"status": 4[^\n]*"event": "migrated\.status"/.test(detail)) return 'Google Flow accepted the submission but the Veo generation failed (Flow status 4). Open the saved Flow project to inspect or create the scene manually.'; const nonLog = detail.split(/\r?\n/).filter((line) => line.trim() && !line.trim().startsWith('{')); return (nonLog.at(-1) || detail.split(/\r?\n/).filter(Boolean).at(-1) || 'Video generation failed').slice(0, 1000); }
+async function failVideoAttempt(workDir: string, plan: BrollPlan, attempt: BrollVideoAttempt, error: unknown) { const detail = error instanceof Error ? error.message : String(error); attempt.status = 'failed'; attempt.completedAt = new Date().toISOString(); attempt.error = conciseAttemptError(detail); const logDir = path.join(workDir, 'broll', 'generation-logs'); await fs.mkdir(logDir, { recursive: true }); attempt.errorLogFile = path.join(logDir, `${attempt.id}.log`); await fs.writeFile(attempt.errorLogFile, detail); await saveBrollPlan(workDir, plan); }
+function parseJsonObject(text: string) { const trimmed = text.trim(); if (!trimmed) return null; try { return JSON.parse(trimmed); } catch { const start = trimmed.indexOf('{'); const end = trimmed.lastIndexOf('}'); if (start >= 0 && end > start) { try { return JSON.parse(trimmed.slice(start, end + 1)); } catch { return null; } } return null; } }
+function flowProjectUrl(projectId: string) { return `https://flow.google.com/project/${projectId}`; }
+function captureFlowAttemptIds(attempt: BrollVideoAttempt, detail: string) { for (const line of detail.split(/\r?\n/)) { const start = line.indexOf('{'); if (start < 0) continue; try { const event = JSON.parse(line.slice(start)); if (event.event === 'migrated.submit_observed') { if (event.media_id) attempt.flowMediaId = String(event.media_id); if (event.workflow_id) attempt.flowWorkflowId = String(event.workflow_id); } } catch { /* Keep parsing later structured log lines. */ } } }
+async function ensureGoogleFlowProject(options: { config: ImageProviderConfig; workDir: string; plan: BrollPlan; projectName: string }) {
+  const profile = options.config.gflowProfile?.trim() || 'default';
+  if (options.plan.googleFlow?.projectId && options.plan.googleFlow.profile === profile) return options.plan.googleFlow;
+  if (!options.config.gflowBin) throw new Error('Google Flow CLI was not found.');
+  const localId = path.basename(options.workDir).slice(0, 8); const title = `Video Cleaner · ${options.projectName.slice(0, 60)} · ${localId}`;
+  const args = ['project', 'create', '--name', title, '--json']; if (profile !== 'default') args.push('--profile', profile);
+  const { stdout } = await run(options.config.gflowBin, args, undefined, 180000, { cwd: options.workDir }); const result = parseJsonObject(stdout); const projectId = String(result?.project_id ?? ''); if (!projectId) throw new Error(`Google Flow project creation returned no project id.\n${stdout}`);
+  options.plan.googleFlow = { projectId, title: String(result?.title || title), profile, url: flowProjectUrl(projectId), createdAt: new Date().toISOString() }; await saveBrollPlan(options.workDir, options.plan); return options.plan.googleFlow;
+}
+function openFlowProject(url: string) { if (process.platform !== 'darwin') return; const child = spawn('open', [url], { detached: true, stdio: 'ignore' }); child.unref(); }
+
+export async function generateBrollVideoWithGoogleFlow(options: { config: ImageProviderConfig; workDir: string; projectName: string; plan: BrollPlan; sceneId: string; regenerationComment?: string }) {
+  const scene = options.plan.scenes.find((candidate) => candidate.id === options.sceneId); if (!scene) throw new Error('B-roll scene not found'); if (!scene.imageFile) throw new Error('Add or generate a B-roll image first'); if (!scene.videoPrompt) throw new Error('Create a Codex video prompt first'); if (!options.config.gflowBin) throw new Error('Google Flow CLI was not found. Install gflow-cli and configure GFLOW_BIN if it is not on PATH.');
+  const flowProject = await ensureGoogleFlowProject(options); const videoModel = options.config.gflowVideoModel || 'veo-fast';
+  const silentInstruction = options.plan.settings.returnVideoWithAudio || /completely silent|no (?:dialogue|speech|audio)/i.test(scene.videoPrompt) ? '' : 'Create a completely silent video with no dialogue, speech, music, sound effects, ambient sound, or generated audio. ';
+  const requestedChange = options.regenerationComment?.trim() ? `\n\nUSER REQUEST FOR THIS REGENERATION:\n${options.regenerationComment.trim()}` : ''; const motionPrompt = `${silentInstruction}${scene.videoPrompt}${requestedChange}`.trim();
+  const attempt = newVideoAttempt(scene, 'google-flow', `Google Flow · ${videoModel}`, motionPrompt); attempt.flowProjectId = flowProject.projectId; const trackingMarker = `VC_${scene.id.replace(/[^a-z0-9]/gi, '_').toUpperCase()}_${attempt.id.slice(0, 8).toUpperCase()}`; const trackedPrompt = `Production tracking marker (metadata only; never render this as text): ${trackingMarker}. ${motionPrompt}`; attempt.prompt = trackedPrompt; const outputPath = await videoAttemptPath(options.workDir, scene.id, attempt.id); attempt.localFile = outputPath; await saveBrollPlan(options.workDir, options.plan);
+  const args = ['video', 'i2v', '--initial-frame', scene.imageFile, trackedPrompt, '--model', videoModel, '--count', '1', '--aspect', resolveSceneAssetAspect(options.plan, scene), '--project', flowProject.projectId, '--output', outputPath, '--json'];
+  if (options.config.gflowProfile?.trim()) args.push('--profile', options.config.gflowProfile.trim());
+  try {
+    const { stdout } = await run(options.config.gflowBin, args, undefined, 1_200_000, { cwd: options.workDir }); const result = parseJsonObject(stdout); if (result?.media_id) attempt.flowMediaId = String(result.media_id); if (result?.status === 'fail') throw new Error(String(result?.error_message || result?.failure_reasons?.join?.(', ') || 'Google Flow generation failed'));
+    await validateVideo(outputPath, options.config.ffmpegBin, 'Google Flow finished without creating a usable MP4. Check the saved Flow project and account credits.'); if (!options.plan.settings.returnVideoWithAudio) await stripVideoAudio(outputPath, options.config.ffmpegBin); completeVideoAttempt(scene, attempt, outputPath, `Google Flow · ${videoModel}`, 'google-flow'); await saveBrollPlan(options.workDir, options.plan); return scene;
+  } catch (error) { captureFlowAttemptIds(attempt, error instanceof Error ? error.message : String(error)); await failVideoAttempt(options.workDir, options.plan, attempt, error); openFlowProject(flowProject.url); throw new Error(`${attempt.error}\nFlow media: ${attempt.flowMediaId || 'not reported'}\nFlow project left open for inspection: ${flowProject.url}\nFull log: ${attempt.errorLogFile}`); }
+}
+
+export async function importBrollVideo(options: { workDir: string; plan: BrollPlan; sceneId: string; sourcePath: string; ffmpegBin?: string; source?: 'manual' | 'flow-catalog'; flowMediaId?: string }) {
+  const scene = options.plan.scenes.find((candidate) => candidate.id === options.sceneId); if (!scene) throw new Error('B-roll scene not found'); const extension = path.extname(options.sourcePath).toLowerCase() || '.mp4'; const attempt = newVideoAttempt(scene, options.source ?? 'manual', options.source === 'flow-catalog' ? 'Google Flow · manual/catalog import' : 'Manual video import', scene.videoPrompt ?? 'Manual video import'); const outputPath = await videoAttemptPath(options.workDir, scene.id, attempt.id, extension); await fs.copyFile(options.sourcePath, outputPath); if (!options.plan.settings.returnVideoWithAudio) await stripVideoAudio(outputPath, options.ffmpegBin); await validateVideo(outputPath, options.ffmpegBin, 'The selected file is not a usable video.'); attempt.flowProjectId = options.plan.googleFlow?.projectId; attempt.flowMediaId = options.flowMediaId; completeVideoAttempt(scene, attempt, outputPath, attempt.model!, options.source === 'flow-catalog' ? 'google-flow' : (scene.videoProvider ?? 'google-flow')); if (options.source === 'manual') scene.videoProvider = undefined; await saveBrollPlan(options.workDir, options.plan); return scene;
+}
+
+export async function listGoogleFlowProjectVideos(options: { config: ImageProviderConfig; workDir: string; plan: BrollPlan }) {
+  if (!options.plan.googleFlow?.projectId) return [] as GoogleFlowCatalogVideo[]; if (!options.config.gflowBin) throw new Error('Google Flow CLI was not found.'); const profile = options.plan.googleFlow.profile; const args = ['data', 'list', 'videos', '--limit', '1000', '--json']; if (profile !== 'default') args.push('--profile', profile); const { stdout } = await run(options.config.gflowBin, args, undefined, 120000, { cwd: options.workDir });
+  const rows = stdout.split(/\r?\n/).map((line) => { try { return JSON.parse(line); } catch { return null; } }).filter(Boolean); const videos = rows.filter((row: any) => String(row.project_id) === options.plan.googleFlow!.projectId).map((row: any): GoogleFlowCatalogVideo => ({ mediaId: String(row.media_id), projectId: String(row.project_id), prompt: String(row.prompt ?? ''), aspect: row.aspect ? String(row.aspect) : undefined, model: row.model ? String(row.model) : undefined, duration: Number.isFinite(Number(row.duration)) ? Number(row.duration) : undefined, createdAt: row.created_at ? String(row.created_at) : undefined, localPath: row.local_path ? String(row.local_path) : undefined }));
+  const known = new Set(options.plan.scenes.flatMap((candidate) => candidate.videoAttempts ?? []).map((candidate) => candidate.flowMediaId).filter(Boolean)); options.plan.googleFlow.lastSyncedAt = new Date().toISOString(); await saveBrollPlan(options.workDir, options.plan); return videos.filter((video) => !known.has(video.mediaId));
 }
 
 function even(value: number) { const rounded = Math.max(2, Math.round(value)); return rounded % 2 === 0 ? rounded : rounded - 1; }
