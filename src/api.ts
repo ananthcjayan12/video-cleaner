@@ -54,7 +54,7 @@ export type SystemStatus = {
   projectsDir: string;
   overrides?: {
     codexBin: string; grokBin: string; gflowBin: string; ffmpegBin: string; ffprobeBin: string; projectsDir: string;
-    imageProvider: string; openAiImageModel: string; geminiImageModel: string; grokModel: string; grokVideoModel?: string; gflowProfile?: string; gflowVideoModel?: string; freepikVideoModel?: string; freepikVideoEndpoint?: string;
+    imageProvider: string; openAiImageModel: string; geminiImageModel: string; grokModel: string; grokVideoModel?: string; gflowProfile?: string; gflowVideoModel?: string; magnificVideoModel?: string; magnificVideoEndpoint?: string;
   };
 };
 
