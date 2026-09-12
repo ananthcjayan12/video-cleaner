@@ -89,7 +89,7 @@ export type BrollScene = {
 };
 
 export type BrollPlan = { version: 2; orientation: 'portrait' | 'landscape'; stylePreset: string; settings: BrollPlanSettings; scenes: BrollScene[]; notes: string[]; googleFlow?: GoogleFlowProjectState };
-export type ImageProviderConfig = { openAiApiKey?: string; openAiModel?: string; geminiApiKey?: string; geminiModel?: string; grokBin?: string; grokModel?: string; grokVideoModel?: string; gflowBin?: string; gflowProfile?: string; gflowVideoModel?: string; magnificApiKey?: string; magnificVideoModel?: string; magnificVideoEndpoint?: string; codexBin?: string; ffmpegBin?: string };
+export type ImageProviderConfig = { openAiApiKey?: string; openAiModel?: string; geminiApiKey?: string; geminiModel?: string; grokBin?: string; grokModel?: string; grokVideoModel?: string; gflowBin?: string; gflowProfile?: string; gflowVideoModel?: string; magnificApiKey?: string; magnificVideoModel?: string; magnificVideoEndpoint?: string; magnificFetch?: typeof fetch; magnificPollIntervalMs?: number; magnificTimeoutMs?: number; codexBin?: string; ffmpegBin?: string };
 type RunOptions = { cwd?: string; env?: NodeJS.ProcessEnv };
 
 export const BROLL_STYLE_PRESET = [
@@ -352,8 +352,8 @@ export async function generateBrollVideoWithMagnific(options: { config: ImagePro
   if (!scene.videoPrompt) throw new Error('Create a Codex video prompt first');
   if (!options.config.magnificApiKey) throw new Error('Magnific API key is missing. Add MAGNIFIC_API_KEY in Settings or .env.local.');
 
-  const model = options.config.magnificVideoModel || 'minimax-hailuo-2-3-768p-fast';
-  const endpoint = (options.config.magnificVideoEndpoint || `https://api.magnific.com/v1/ai/image-to-video/${model}`).replace(/\/$/, '');
+  const { model, endpoint } = resolveMagnificVideoConfig(options.config.magnificVideoModel, options.config.magnificVideoEndpoint);
+  const fetchMagnific = options.config.magnificFetch ?? fetch;
   const requestedChange = options.regenerationComment?.trim() ? `\n\nUSER REQUEST FOR THIS REGENERATION:\n${options.regenerationComment.trim()}` : '';
   const prompt = `${scene.videoPrompt}${requestedChange}`.trim();
   const displayModel = `Magnific · MiniMax · ${model}`;
@@ -364,7 +364,7 @@ export async function generateBrollVideoWithMagnific(options: { config: ImagePro
 
   try {
     const image = (await fs.readFile(scene.imageFile)).toString('base64');
-    const createResponse = await fetch(endpoint, {
+    const createResponse = await fetchMagnific(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-magnific-api-key': options.config.magnificApiKey },
       body: JSON.stringify({
@@ -379,23 +379,24 @@ export async function generateBrollVideoWithMagnific(options: { config: ImagePro
     const taskId = String(createBody?.data?.task_id || createBody?.task_id || '');
     if (!taskId) throw new Error(`Magnific video submission returned no task_id: ${JSON.stringify(createBody)}`);
 
-    const deadline = Date.now() + 15 * 60_000;
+    const deadline = Date.now() + (options.config.magnificTimeoutMs ?? 15 * 60_000);
     let generatedUrl = '';
     let lastStatus = 'CREATED';
     while (Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 3000));
-      const statusResponse = await fetch(`${endpoint}/${encodeURIComponent(taskId)}`, { headers: { 'x-magnific-api-key': options.config.magnificApiKey } });
+      await new Promise((resolve) => setTimeout(resolve, options.config.magnificPollIntervalMs ?? 3000));
+      const statusResponse = await fetchMagnific(`${endpoint}/${encodeURIComponent(taskId)}`, { headers: { 'x-magnific-api-key': options.config.magnificApiKey } });
       const statusBody: any = await statusResponse.json().catch(() => ({}));
       if (!statusResponse.ok) throw new Error(`Magnific task polling failed (${statusResponse.status}): ${statusBody?.message || statusBody?.error || JSON.stringify(statusBody)}`);
       const data = statusBody?.data ?? statusBody;
       lastStatus = String(data?.status || '').toUpperCase() || lastStatus;
-      generatedUrl = String(Array.isArray(data?.generated) ? data.generated[0] || '' : data?.generated || '');
+      const generated = Array.isArray(data?.generated) ? data.generated[0] : data?.generated;
+      generatedUrl = String(typeof generated === 'object' ? generated?.url || generated?.video_url || '' : generated || data?.url || data?.video_url || '');
       if (lastStatus === 'COMPLETED' && generatedUrl) break;
       if (['FAILED', 'ERROR', 'CANCELLED'].includes(lastStatus)) throw new Error(`Magnific MiniMax generation failed with status ${lastStatus}: ${JSON.stringify(data)}`);
     }
     if (!generatedUrl) throw new Error(`Magnific MiniMax generation timed out or returned no video URL (last status: ${lastStatus}).`);
 
-    const videoResponse = await fetch(generatedUrl);
+    const videoResponse = await fetchMagnific(generatedUrl);
     if (!videoResponse.ok) throw new Error(`Magnific generated video download failed (${videoResponse.status}).`);
     await fs.writeFile(outputPath, Buffer.from(await videoResponse.arrayBuffer()));
     await validateVideo(outputPath, options.config.ffmpegBin, 'Magnific completed without returning a usable MP4.');
@@ -407,6 +408,24 @@ export async function generateBrollVideoWithMagnific(options: { config: ImagePro
     await failVideoAttempt(options.workDir, options.plan, attempt, error);
     throw error;
   }
+}
+
+export const DEFAULT_MAGNIFIC_VIDEO_MODEL = 'minimax-hailuo-2-3-768p-fast';
+
+export function resolveMagnificVideoConfig(configuredModel?: string, configuredEndpoint?: string) {
+  const legacyModel = configuredModel?.trim() === 'minimax-h3-max-turbo';
+  const model = legacyModel || !configuredModel?.trim() ? DEFAULT_MAGNIFIC_VIDEO_MODEL : configuredModel.trim();
+  const override = configuredEndpoint?.trim().replace(/\/$/, '');
+  if (override) {
+    try {
+      const parsed = new URL(override);
+      if (parsed.hostname === 'api.freepik.com' && parsed.pathname.startsWith('/v1/ai/image-to-video/')) {
+        return { model, endpoint: `https://api.magnific.com/v1/ai/image-to-video/${model}`, migratedLegacyEndpoint: true };
+      }
+    } catch { /* Preserve custom non-URL overrides so the request reports the useful transport error. */ }
+    return { model, endpoint: override, migratedLegacyEndpoint: legacyModel };
+  }
+  return { model, endpoint: `https://api.magnific.com/v1/ai/image-to-video/${model}`, migratedLegacyEndpoint: legacyModel };
 }
 
 function newVideoAttempt(scene: BrollScene, source: BrollVideoAttempt['source'], model: string, prompt: string) {

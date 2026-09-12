@@ -23,6 +23,7 @@ import {
   listGoogleFlowProjectVideos,
   loadBrollPlan,
   planNeedsPresenterMatte,
+  resolveMagnificVideoConfig,
   updateBrollScene,
   updateBrollSettings,
   type BrollDisplayTemplate,
@@ -98,7 +99,20 @@ async function run(command: string, args: string[], stdin?: string, timeoutMs = 
   });
 }
 
-async function loadSettings() { try { localSettings = JSON.parse(await fs.readFile(CONFIG_PATH, 'utf8')) as LocalSettings; } catch { localSettings = {}; } }
+async function loadSettings() {
+  try {
+    localSettings = JSON.parse(await fs.readFile(CONFIG_PATH, 'utf8')) as LocalSettings;
+    const hasLegacyNames = Boolean(localSettings.freepikApiKey || localSettings.freepikVideoModel || localSettings.freepikVideoEndpoint);
+    const magnific = resolveMagnificVideoConfig(localSettings.magnificVideoModel || localSettings.freepikVideoModel, localSettings.magnificVideoEndpoint || localSettings.freepikVideoEndpoint);
+    if (hasLegacyNames || magnific.migratedLegacyEndpoint) {
+      localSettings.magnificApiKey ||= localSettings.freepikApiKey;
+      localSettings.magnificVideoModel = magnific.model;
+      localSettings.magnificVideoEndpoint = magnific.migratedLegacyEndpoint ? undefined : magnific.endpoint;
+      delete localSettings.freepikApiKey; delete localSettings.freepikVideoModel; delete localSettings.freepikVideoEndpoint;
+      await saveSettings();
+    }
+  } catch { localSettings = {}; }
+}
 async function saveSettings() { await fs.mkdir(CONFIG_DIR, { recursive: true }); await fs.writeFile(CONFIG_PATH, JSON.stringify(localSettings, null, 2), { mode: 0o600 }); }
 async function detectBinary(name: string) {
   try {
@@ -125,6 +139,10 @@ async function resolvedSettings() {
   const gflowOverride = localSettings.gflowBin || process.env.GFLOW_BIN || '';
   const ffmpegOverride = localSettings.ffmpegBin || process.env.FFMPEG_BIN || '';
   const ffprobeOverride = localSettings.ffprobeBin || process.env.FFPROBE_BIN || '';
+  const magnific = resolveMagnificVideoConfig(
+    localSettings.magnificVideoModel || localSettings.freepikVideoModel || process.env.MAGNIFIC_VIDEO_MODEL || process.env.FREEPIK_VIDEO_MODEL,
+    localSettings.magnificVideoEndpoint || localSettings.freepikVideoEndpoint || process.env.MAGNIFIC_VIDEO_ENDPOINT || process.env.FREEPIK_VIDEO_ENDPOINT,
+  );
   return {
     elevenLabsApiKey: localSettings.elevenLabsApiKey || process.env.ELEVENLABS_API_KEY || '',
     openAiApiKey: localSettings.openAiApiKey || process.env.OPENAI_API_KEY || '',
@@ -137,8 +155,8 @@ async function resolvedSettings() {
     grokVideoModel: localSettings.grokVideoModel || process.env.GROK_VIDEO_MODEL || 'grok-imagine-video-1.5',
     gflowProfile: localSettings.gflowProfile || process.env.GFLOW_PROFILE || '',
     gflowVideoModel: localSettings.gflowVideoModel || process.env.GFLOW_VIDEO_MODEL || 'veo-fast',
-    magnificVideoModel: localSettings.magnificVideoModel || localSettings.freepikVideoModel || process.env.MAGNIFIC_VIDEO_MODEL || process.env.FREEPIK_VIDEO_MODEL || 'minimax-hailuo-2-3-768p-fast',
-    magnificVideoEndpoint: localSettings.magnificVideoEndpoint || localSettings.freepikVideoEndpoint || process.env.MAGNIFIC_VIDEO_ENDPOINT || process.env.FREEPIK_VIDEO_ENDPOINT || '',
+    magnificVideoModel: magnific.model,
+    magnificVideoEndpoint: magnific.endpoint,
     codexBin: codexOverride || await detectBinary('codex'), grokBin: grokOverride || await detectBinary('grok'), gflowBin: gflowOverride || await detectBinary('gflow'),
     ffmpegBin: ffmpegOverride || await detectBinary('ffmpeg'), ffprobeBin: ffprobeOverride || await detectBinary('ffprobe'),
     projectsDir: localSettings.projectsDir || process.env.PROJECTS_DIR || path.join(os.homedir(), 'VideoCleaner', 'projects'),
@@ -196,7 +214,7 @@ async function systemStatus() {
     videoProviders: {
       grokCli: { configured: grokInstalled, model: settings.grokVideoModel, experimental: true },
       googleFlow: { configured: gflowInstalled && gflowAuthenticated, model: settings.gflowVideoModel, profile: settings.gflowProfile || 'default', experimental: true },
-      magnific: { configured: Boolean(settings.magnificApiKey), model: settings.magnificVideoModel, endpoint: settings.magnificVideoEndpoint || `https://api.magnific.com/v1/ai/image-to-video/${settings.magnificVideoModel}`, experimental: false },
+      magnific: { configured: Boolean(settings.magnificApiKey), model: settings.magnificVideoModel, endpoint: settings.magnificVideoEndpoint, experimental: false },
     },
     brollVideo: { configured: grokInstalled || (gflowInstalled && gflowAuthenticated) || Boolean(settings.magnificApiKey), provider: 'Grok CLI / Google Flow / Magnific', model: `${settings.grokVideoModel} / ${settings.gflowVideoModel} / ${settings.magnificVideoModel}`, experimental: true },
     matting,
