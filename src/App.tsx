@@ -64,8 +64,8 @@ function App() {
   const [system, setSystem] = useState<SystemStatus | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsForm, setSettingsForm] = useState({
-    elevenLabsApiKey: '', openAiApiKey: '', geminiApiKey: '', imageProvider: 'gemini',
-    openAiImageModel: '', geminiImageModel: '', grokModel: '', grokVideoModel: '', gflowProfile: '', gflowVideoModel: '',
+    elevenLabsApiKey: '', openAiApiKey: '', geminiApiKey: '', freepikApiKey: '', imageProvider: 'gemini',
+    openAiImageModel: '', geminiImageModel: '', grokModel: '', grokVideoModel: '', gflowProfile: '', gflowVideoModel: '', freepikVideoModel: '', freepikVideoEndpoint: '',
     codexBin: '', grokBin: '', gflowBin: '', ffmpegBin: '', ffprobeBin: '', projectsDir: '',
   });
   const [status, setStatus] = useState('Loading local projects…');
