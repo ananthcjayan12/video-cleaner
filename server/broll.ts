@@ -1,3 +1,4 @@
+import { colorVideoFilter, type ColorProfile } from './color.js';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
@@ -6,7 +7,7 @@ import path from 'node:path';
 export type BrollWord = { id: string; text: string; start: number; end: number };
 export type BrollKeepRange = { startWordId: string; endWordId: string };
 export type ImageProvider = 'openai' | 'gemini' | 'grok-cli' | 'codex-cli';
-export type VideoProvider = 'grok-cli' | 'google-flow';
+export type VideoProvider = 'grok-cli' | 'google-flow' | 'magnific';
 export type BrollWorkflowMode = 'cleaned-video' | 'raw-video' | 'assets-only';
 export type BrollCountMode = 'auto' | 'exact' | 'per-minute' | 'interval';
 export type BrollAssetAspectRatio = 'auto' | '9:16' | '16:9';
@@ -41,7 +42,7 @@ export type BrollPlanSettings = {
 
 export type BrollVideoAttempt = {
   id: string;
-  source: 'google-flow' | 'grok-cli' | 'manual' | 'flow-catalog';
+  source: 'google-flow' | 'grok-cli' | 'magnific' | 'manual' | 'flow-catalog';
   status: 'submitted' | 'completed' | 'failed';
   startedAt: string;
   completedAt?: string;
@@ -88,7 +89,7 @@ export type BrollScene = {
 };
 
 export type BrollPlan = { version: 2; orientation: 'portrait' | 'landscape'; stylePreset: string; settings: BrollPlanSettings; scenes: BrollScene[]; notes: string[]; googleFlow?: GoogleFlowProjectState };
-export type ImageProviderConfig = { openAiApiKey?: string; openAiModel?: string; geminiApiKey?: string; geminiModel?: string; grokBin?: string; grokModel?: string; grokVideoModel?: string; gflowBin?: string; gflowProfile?: string; gflowVideoModel?: string; codexBin?: string; ffmpegBin?: string };
+export type ImageProviderConfig = { openAiApiKey?: string; openAiModel?: string; geminiApiKey?: string; geminiModel?: string; grokBin?: string; grokModel?: string; grokVideoModel?: string; gflowBin?: string; gflowProfile?: string; gflowVideoModel?: string; magnificApiKey?: string; magnificVideoModel?: string; magnificVideoEndpoint?: string; magnificFetch?: typeof fetch; magnificPollIntervalMs?: number; magnificTimeoutMs?: number; codexBin?: string; ffmpegBin?: string };
 type RunOptions = { cwd?: string; env?: NodeJS.ProcessEnv };
 
 export const BROLL_STYLE_PRESET = [
@@ -156,7 +157,7 @@ function normalizeDisplayTemplate(value: unknown): BrollDisplayTemplate {
 function normalizeSettings(raw: Partial<BrollPlanSettings> | undefined): BrollPlanSettings {
   const workflowMode: BrollWorkflowMode = ['cleaned-video', 'raw-video', 'assets-only'].includes(String(raw?.workflowMode)) ? raw!.workflowMode as BrollWorkflowMode : 'cleaned-video';
   const provider: ImageProvider = ['openai', 'gemini', 'grok-cli', 'codex-cli'].includes(String(raw?.provider)) ? raw!.provider as ImageProvider : 'gemini';
-  const videoProvider: VideoProvider = ['grok-cli', 'google-flow'].includes(String(raw?.videoProvider)) ? raw!.videoProvider as VideoProvider : 'grok-cli';
+  const videoProvider: VideoProvider = ['grok-cli', 'google-flow', 'magnific'].includes(String(raw?.videoProvider)) ? raw!.videoProvider as VideoProvider : 'grok-cli';
   const countMode: BrollCountMode = ['auto', 'exact', 'per-minute', 'interval'].includes(String(raw?.countMode)) ? raw!.countMode as BrollCountMode : 'auto';
   const aspectRatio = ['auto', '9:16', '16:9'].includes(String(raw?.aspectRatio)) ? raw!.aspectRatio as BrollPlanSettings['aspectRatio'] : 'auto';
   return { workflowMode, provider, videoProvider, countMode, targetCount: Math.max(1, Math.min(40, Number(raw?.targetCount) || 6)), imagesPerMinute: Math.max(0.5, Math.min(20, Number(raw?.imagesPerMinute) || 5)), intervalSeconds: Math.max(10, Math.min(300, Number(raw?.intervalSeconds) || 20)), minSceneDuration: Math.max(1, Math.min(20, Number(raw?.minSceneDuration) || 3)), maxSceneDuration: Math.max(2, Math.min(30, Number(raw?.maxSceneDuration) || 8)), aspectRatio, displayTemplate: normalizeDisplayTemplate(raw?.displayTemplate), returnVideoWithAudio: raw?.returnVideoWithAudio === true };
@@ -344,6 +345,89 @@ export async function generateBrollVideoWithGrokCli(options: { config: ImageProv
   } catch (error) { await failVideoAttempt(options.workDir, options.plan, attempt, error); throw error; }
 }
 
+export async function generateBrollVideoWithMagnific(options: { config: ImageProviderConfig; workDir: string; plan: BrollPlan; sceneId: string; regenerationComment?: string }) {
+  const scene = options.plan.scenes.find((candidate) => candidate.id === options.sceneId);
+  if (!scene) throw new Error('B-roll scene not found');
+  if (!scene.imageFile) throw new Error('Add or generate a B-roll image first');
+  if (!scene.videoPrompt) throw new Error('Create a Codex video prompt first');
+  if (!options.config.magnificApiKey) throw new Error('Magnific API key is missing. Add MAGNIFIC_API_KEY in Settings or .env.local.');
+
+  const { model, endpoint } = resolveMagnificVideoConfig(options.config.magnificVideoModel, options.config.magnificVideoEndpoint);
+  const fetchMagnific = options.config.magnificFetch ?? fetch;
+  const requestedChange = options.regenerationComment?.trim() ? `\n\nUSER REQUEST FOR THIS REGENERATION:\n${options.regenerationComment.trim()}` : '';
+  const prompt = `${scene.videoPrompt}${requestedChange}`.trim();
+  const displayModel = `Magnific · MiniMax · ${model}`;
+  const attempt = newVideoAttempt(scene, 'magnific', displayModel, prompt);
+  const outputPath = await videoAttemptPath(options.workDir, scene.id, attempt.id);
+  attempt.localFile = outputPath;
+  await saveBrollPlan(options.workDir, options.plan);
+
+  try {
+    const image = (await fs.readFile(scene.imageFile)).toString('base64');
+    const createResponse = await fetchMagnific(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-magnific-api-key': options.config.magnificApiKey },
+      body: JSON.stringify({
+        prompt,
+        first_frame_image: image,
+        prompt_optimizer: true,
+        duration: 6,
+      }),
+    });
+    const createBody: any = await createResponse.json().catch(() => ({}));
+    if (!createResponse.ok) throw new Error(`Magnific video submission failed (${createResponse.status}): ${createBody?.message || createBody?.error || JSON.stringify(createBody)}`);
+    const taskId = String(createBody?.data?.task_id || createBody?.task_id || '');
+    if (!taskId) throw new Error(`Magnific video submission returned no task_id: ${JSON.stringify(createBody)}`);
+
+    const deadline = Date.now() + (options.config.magnificTimeoutMs ?? 15 * 60_000);
+    let generatedUrl = '';
+    let lastStatus = 'CREATED';
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, options.config.magnificPollIntervalMs ?? 3000));
+      const statusResponse = await fetchMagnific(`${endpoint}/${encodeURIComponent(taskId)}`, { headers: { 'x-magnific-api-key': options.config.magnificApiKey } });
+      const statusBody: any = await statusResponse.json().catch(() => ({}));
+      if (!statusResponse.ok) throw new Error(`Magnific task polling failed (${statusResponse.status}): ${statusBody?.message || statusBody?.error || JSON.stringify(statusBody)}`);
+      const data = statusBody?.data ?? statusBody;
+      lastStatus = String(data?.status || '').toUpperCase() || lastStatus;
+      const generated = Array.isArray(data?.generated) ? data.generated[0] : data?.generated;
+      generatedUrl = String(typeof generated === 'object' ? generated?.url || generated?.video_url || '' : generated || data?.url || data?.video_url || '');
+      if (lastStatus === 'COMPLETED' && generatedUrl) break;
+      if (['FAILED', 'ERROR', 'CANCELLED'].includes(lastStatus)) throw new Error(`Magnific MiniMax generation failed with status ${lastStatus}: ${JSON.stringify(data)}`);
+    }
+    if (!generatedUrl) throw new Error(`Magnific MiniMax generation timed out or returned no video URL (last status: ${lastStatus}).`);
+
+    const videoResponse = await fetchMagnific(generatedUrl);
+    if (!videoResponse.ok) throw new Error(`Magnific generated video download failed (${videoResponse.status}).`);
+    await fs.writeFile(outputPath, Buffer.from(await videoResponse.arrayBuffer()));
+    await validateVideo(outputPath, options.config.ffmpegBin, 'Magnific completed without returning a usable MP4.');
+    if (!options.plan.settings.returnVideoWithAudio) await stripVideoAudio(outputPath, options.config.ffmpegBin);
+    completeVideoAttempt(scene, attempt, outputPath, displayModel, 'magnific');
+    await saveBrollPlan(options.workDir, options.plan);
+    return scene;
+  } catch (error) {
+    await failVideoAttempt(options.workDir, options.plan, attempt, error);
+    throw error;
+  }
+}
+
+export const DEFAULT_MAGNIFIC_VIDEO_MODEL = 'minimax-hailuo-2-3-768p-fast';
+
+export function resolveMagnificVideoConfig(configuredModel?: string, configuredEndpoint?: string) {
+  const legacyModel = configuredModel?.trim() === 'minimax-h3-max-turbo';
+  const model = legacyModel || !configuredModel?.trim() ? DEFAULT_MAGNIFIC_VIDEO_MODEL : configuredModel.trim();
+  const override = configuredEndpoint?.trim().replace(/\/$/, '');
+  if (override) {
+    try {
+      const parsed = new URL(override);
+      if (parsed.hostname === 'api.freepik.com' && parsed.pathname.startsWith('/v1/ai/image-to-video/')) {
+        return { model, endpoint: `https://api.magnific.com/v1/ai/image-to-video/${model}`, migratedLegacyEndpoint: true };
+      }
+    } catch { /* Preserve custom non-URL overrides so the request reports the useful transport error. */ }
+    return { model, endpoint: override, migratedLegacyEndpoint: legacyModel };
+  }
+  return { model, endpoint: `https://api.magnific.com/v1/ai/image-to-video/${model}`, migratedLegacyEndpoint: legacyModel };
+}
+
 function newVideoAttempt(scene: BrollScene, source: BrollVideoAttempt['source'], model: string, prompt: string) {
   const attempt: BrollVideoAttempt = { id: randomUUID(), source, status: 'submitted', startedAt: new Date().toISOString(), model, prompt };
   scene.videoAttempts ??= []; scene.videoAttempts.push(attempt); return attempt;
@@ -397,10 +481,6 @@ function roundedAlpha(radius: number, maxAlpha = 255) {
   return `if(lte(hypot(max(${radius}-X,0)+max(X-(W-${radius}),0),max(${radius}-Y,0)+max(Y-(H-${radius}),0)),${radius}),${maxAlpha},0)`;
 }
 function roundedRgba(radius: number, hdr = false) { return `format=${hdr ? 'gbrap10le' : 'rgba'},geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='${roundedAlpha(radius, hdr ? 1023 : 255)}'`; }
-function bt709Media() { return 'format=yuv420p,setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709'; }
-function hlgBt2020Media() {
-  return 'zscale=pin=bt709:tin=bt709:min=bt709:t=linear:npl=100,format=gbrpf32le,zscale=p=bt2020:t=arib-std-b67:m=bt2020nc:r=tv:npl=203,format=yuv420p10le,setparams=color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc';
-}
 function layoutRect(template: BrollDisplayTemplate, width: number, height: number) {
   if (template === 'top-card' || template === 'top-card-presenter') return { width: even(width * 0.92), height: even(height * 0.42), x: even(width * 0.04), y: even(height * 0.035) };
   if (template === 'split-top') return { width: even(width), height: even(height * 0.47), x: 0, y: 0 };
@@ -411,7 +491,7 @@ function layoutRect(template: BrollDisplayTemplate, width: number, height: numbe
   return { width: even(width), height: even(height), x: 0, y: 0 };
 }
 
-export function buildBrollOverlayFilter(options: { plan: BrollPlan; width: number; height: number; fps: number; cleanedSegments?: Array<{ start: number; end: number }>; presenterInputIndex?: number; includeAudio?: boolean; baseVideoFilter?: string; outputHdr?: boolean }) {
+export function buildBrollOverlayFilter(options: { plan: BrollPlan; width: number; height: number; fps: number; cleanedSegments?: Array<{ start: number; end: number }>; presenterInputIndex?: number; includeAudio?: boolean; baseVideoFilter?: string; outputHdr?: boolean; assetColors?: Record<string, ColorProfile> }) {
   const active = options.plan.scenes.filter((scene) => scene.enabled && (scene.videoFile || scene.imageFile));
   if (!active.length) throw new Error('Add at least one enabled B-roll image or video before exporting');
   const presenterScenes = active.filter((scene) => displayTemplateNeedsPresenterMatte(resolveSceneDisplayTemplate(options.plan, scene)));
@@ -420,7 +500,6 @@ export function buildBrollOverlayFilter(options: { plan: BrollPlan; width: numbe
 
   const parts: string[] = [];
   const basePrefix = options.baseVideoFilter?.trim() ? `${options.baseVideoFilter.trim()},` : '';
-  const mediaFilter = options.outputHdr ? hlgBt2020Media() : bt709Media();
   const overlayFormat = options.outputHdr ? ':format=yuv420p10' : '';
   const outputFormat = options.outputHdr ? 'format=yuv420p10le,setparams=color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc,' : '';
   let presenterLabels: string[] = [];
@@ -443,6 +522,7 @@ export function buildBrollOverlayFilter(options: { plan: BrollPlan; width: numbe
 
   let previous = 'base0'; let presenterCursor = 0; let stackedCursor = 0;
   active.forEach((scene, index) => {
+    const mediaFilter = colorVideoFilter(options.assetColors?.[scene.id] ?? { pixelFormat: scene.videoFile ? "yuv420p" : "rgb24" }, options.outputHdr);
     const input = index + 1; const mediaLabel = `broll${index}`; const mediaOutput = `mediaBase${index}`; const output = `base${index + 1}`;
     const duration = Math.max(0.1, scene.sourceEnd - scene.sourceStart); const template = resolveSceneDisplayTemplate(options.plan, scene); const rect = layoutRect(template, options.width, options.height);
     const between = `between(t,${scene.sourceStart.toFixed(6)},${scene.sourceEnd.toFixed(6)})`;

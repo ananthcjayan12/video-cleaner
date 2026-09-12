@@ -110,6 +110,21 @@ OPENAI_API_KEY=
 OPENAI_IMAGE_MODEL=gpt-image-2
 ```
 
+## Image-to-video with Magnific + MiniMax
+
+Magnific is available as a first-class video provider. The API key stays in the local Node service and is never exposed to the browser. The default model is `minimax-hailuo-2-3-768p-fast`; Video Cleaner submits the scene still as the first frame, uses the Codex motion prompt, requests a 6-second 768p Fast clip, polls the asynchronous task, downloads the completed MP4, validates it with FFmpeg, and stores it in the normal per-scene video-attempt history.
+
+The MiniMax Hailuo 2.3 768p Fast endpoint currently uses 6-second generations; the final compositor trims/loops the generated clip to the scene window as needed.
+
+```env
+MAGNIFIC_API_KEY=your_magnific_api_key
+MAGNIFIC_VIDEO_MODEL=minimax-hailuo-2-3-768p-fast
+# Optional. Leave blank to use https://api.magnific.com/v1/ai/image-to-video/<model>
+MAGNIFIC_VIDEO_ENDPOINT=
+```
+
+You can also enter these values in **Settings → Magnific API key**. If Magnific changes a model endpoint before the app is updated, set `MAGNIFIC_VIDEO_ENDPOINT` to the exact image-to-video endpoint from the Magnific API docs.
+
 ## Image-to-video with Codex + Grok CLI
 
 The video action is intentionally separated into two responsibilities:
@@ -155,7 +170,7 @@ The existing source-aware hardware-first H.264/HEVC export path is reused, inclu
 - Codex CLI installed and authenticated (`codex login`)
 - ElevenLabs API key
 - at least one configured/available B-roll image provider
-- Grok Build CLI for B-roll video generation
+- at least one B-roll video provider: Magnific API, Google Flow, or Grok Build CLI
 
 ## Configuration
 

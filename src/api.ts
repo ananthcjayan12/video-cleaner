@@ -2,7 +2,7 @@ export type Word = { id: string; text: string; start: number; end: number };
 export type KeepRange = { startWordId: string; endWordId: string; reason?: string };
 export type Edl = { keepRanges: KeepRange[]; notes?: string[] };
 export type ImageProvider = 'openai' | 'gemini' | 'grok-cli' | 'codex-cli';
-export type VideoProvider = 'grok-cli' | 'google-flow';
+export type VideoProvider = 'grok-cli' | 'google-flow' | 'magnific';
 export type BrollWorkflowMode = 'cleaned-video' | 'raw-video' | 'assets-only';
 export type BrollAssetAspectRatio = 'auto' | '9:16' | '16:9';
 export type BrollCountMode = 'auto' | 'exact' | 'per-minute' | 'interval';
@@ -48,13 +48,13 @@ export type SystemStatus = {
     grokCli: { configured: boolean; model: string; experimental: boolean };
     codexCli: { configured: boolean; model: string; experimental: boolean };
   };
-  videoProviders: { grokCli: { configured: boolean; model: string; experimental: boolean }; googleFlow: { configured: boolean; model: string; profile: string; experimental: boolean } };
+  videoProviders: { grokCli: { configured: boolean; model: string; experimental: boolean }; googleFlow: { configured: boolean; model: string; profile: string; experimental: boolean }; magnific: { configured: boolean; model: string; endpoint: string; experimental: boolean } };
   brollVideo?: { configured: boolean; provider: string; model: string; experimental: boolean };
   matting?: { configured: boolean; pythonInstalled: boolean; dependenciesInstalled: boolean; pythonPath: string | null; detail: string };
   projectsDir: string;
   overrides?: {
     codexBin: string; grokBin: string; gflowBin: string; ffmpegBin: string; ffprobeBin: string; projectsDir: string;
-    imageProvider: string; openAiImageModel: string; geminiImageModel: string; grokModel: string; grokVideoModel?: string; gflowProfile?: string; gflowVideoModel?: string;
+    imageProvider: string; openAiImageModel: string; geminiImageModel: string; grokModel: string; grokVideoModel?: string; gflowProfile?: string; gflowVideoModel?: string; magnificVideoModel?: string; magnificVideoEndpoint?: string;
   };
 };
 
@@ -64,7 +64,7 @@ export type BrollPlanSettings = {
   workflowMode: BrollWorkflowMode; provider: ImageProvider; videoProvider: VideoProvider; countMode: BrollCountMode; targetCount: number; imagesPerMinute: number; intervalSeconds: number;
   minSceneDuration: number; maxSceneDuration: number; aspectRatio: 'auto' | '9:16' | '16:9'; displayTemplate?: BrollDisplayTemplate; returnVideoWithAudio: boolean;
 };
-export type BrollVideoAttempt = { id: string; source: 'google-flow' | 'grok-cli' | 'manual' | 'flow-catalog'; status: 'submitted' | 'completed' | 'failed'; startedAt: string; completedAt?: string; model?: string; prompt?: string; localFile?: string; flowProjectId?: string; flowMediaId?: string; flowWorkflowId?: string; error?: string; errorLogFile?: string };
+export type BrollVideoAttempt = { id: string; source: 'google-flow' | 'grok-cli' | 'magnific' | 'manual' | 'flow-catalog'; status: 'submitted' | 'completed' | 'failed'; startedAt: string; completedAt?: string; model?: string; prompt?: string; localFile?: string; flowProjectId?: string; flowMediaId?: string; flowWorkflowId?: string; error?: string; errorLogFile?: string };
 export type GoogleFlowProjectState = { projectId: string; title: string; profile: string; url: string; createdAt: string; lastSyncedAt?: string };
 export type GoogleFlowCatalogVideo = { mediaId: string; projectId: string; prompt: string; aspect?: string; model?: string; duration?: number; createdAt?: string; localPath?: string };
 export type BrollScene = {
