@@ -3,7 +3,7 @@ import path from 'node:path';
 import { loadBrollPlan, type BrollPlan } from './broll.js';
 
 export type Word = { id: string; text: string; start: number; end: number };
-export type KeepRange = { startWordId: string; endWordId: string; reason?: string };
+export type KeepRange = { startWordId?: string; endWordId?: string; sourceStart?: number; sourceEnd?: number; reason?: string };
 export type MediaProfile = {
   duration: number;
   size: number;
