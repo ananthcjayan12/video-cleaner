@@ -17,6 +17,8 @@ export type MediaProfile = {
   colorTransfer?: string;
   colorPrimaries?: string;
   colorSpace?: string;
+  colorRange?: string;
+  rotation?: number;
   hdr: boolean;
 };
 

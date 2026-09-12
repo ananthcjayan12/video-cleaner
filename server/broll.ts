@@ -1,3 +1,4 @@
+import { colorVideoFilter, type ColorProfile } from './color.js';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
@@ -461,10 +462,6 @@ function roundedAlpha(radius: number, maxAlpha = 255) {
   return `if(lte(hypot(max(${radius}-X,0)+max(X-(W-${radius}),0),max(${radius}-Y,0)+max(Y-(H-${radius}),0)),${radius}),${maxAlpha},0)`;
 }
 function roundedRgba(radius: number, hdr = false) { return `format=${hdr ? 'gbrap10le' : 'rgba'},geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='${roundedAlpha(radius, hdr ? 1023 : 255)}'`; }
-function bt709Media() { return 'format=yuv420p,setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709'; }
-function hlgBt2020Media() {
-  return 'zscale=pin=bt709:tin=bt709:min=bt709:t=linear:npl=100,format=gbrpf32le,zscale=p=bt2020:t=arib-std-b67:m=bt2020nc:r=tv:npl=203,format=yuv420p10le,setparams=color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc';
-}
 function layoutRect(template: BrollDisplayTemplate, width: number, height: number) {
   if (template === 'top-card' || template === 'top-card-presenter') return { width: even(width * 0.92), height: even(height * 0.42), x: even(width * 0.04), y: even(height * 0.035) };
   if (template === 'split-top') return { width: even(width), height: even(height * 0.47), x: 0, y: 0 };
@@ -475,7 +472,7 @@ function layoutRect(template: BrollDisplayTemplate, width: number, height: numbe
   return { width: even(width), height: even(height), x: 0, y: 0 };
 }
 
-export function buildBrollOverlayFilter(options: { plan: BrollPlan; width: number; height: number; fps: number; cleanedSegments?: Array<{ start: number; end: number }>; presenterInputIndex?: number; includeAudio?: boolean; baseVideoFilter?: string; outputHdr?: boolean }) {
+export function buildBrollOverlayFilter(options: { plan: BrollPlan; width: number; height: number; fps: number; cleanedSegments?: Array<{ start: number; end: number }>; presenterInputIndex?: number; includeAudio?: boolean; baseVideoFilter?: string; outputHdr?: boolean; assetColors?: Record<string, ColorProfile> }) {
   const active = options.plan.scenes.filter((scene) => scene.enabled && (scene.videoFile || scene.imageFile));
   if (!active.length) throw new Error('Add at least one enabled B-roll image or video before exporting');
   const presenterScenes = active.filter((scene) => displayTemplateNeedsPresenterMatte(resolveSceneDisplayTemplate(options.plan, scene)));
@@ -484,7 +481,6 @@ export function buildBrollOverlayFilter(options: { plan: BrollPlan; width: numbe
 
   const parts: string[] = [];
   const basePrefix = options.baseVideoFilter?.trim() ? `${options.baseVideoFilter.trim()},` : '';
-  const mediaFilter = options.outputHdr ? hlgBt2020Media() : bt709Media();
   const overlayFormat = options.outputHdr ? ':format=yuv420p10' : '';
   const outputFormat = options.outputHdr ? 'format=yuv420p10le,setparams=color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc,' : '';
   let presenterLabels: string[] = [];
@@ -507,6 +503,7 @@ export function buildBrollOverlayFilter(options: { plan: BrollPlan; width: numbe
 
   let previous = 'base0'; let presenterCursor = 0; let stackedCursor = 0;
   active.forEach((scene, index) => {
+    const mediaFilter = colorVideoFilter(options.assetColors?.[scene.id] ?? { pixelFormat: scene.videoFile ? "yuv420p" : "rgb24" }, options.outputHdr);
     const input = index + 1; const mediaLabel = `broll${index}`; const mediaOutput = `mediaBase${index}`; const output = `base${index + 1}`;
     const duration = Math.max(0.1, scene.sourceEnd - scene.sourceStart); const template = resolveSceneDisplayTemplate(options.plan, scene); const rect = layoutRect(template, options.width, options.height);
     const between = `between(t,${scene.sourceStart.toFixed(6)},${scene.sourceEnd.toFixed(6)})`;
