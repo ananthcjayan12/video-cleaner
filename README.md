@@ -34,6 +34,26 @@ If a scene PNG/MP4 exists on disk but the app was closed before its metadata fin
 
 No cloud project database is used. Provider calls still send only the media/prompt data required by the configured external provider; the project library itself remains on the user's computer.
 
+## Pre-render timeline editor
+
+After a proxy/transcript exists, Video Cleaner exposes a CapCut-style non-destructive timeline underneath the preview player. The interaction surface uses `@xzdarcy/react-timeline-editor` for the playhead, snapping, zooming, clip selection and edge resizing rather than maintaining a custom drag/resize implementation.
+
+The timeline and transcript editor share the same EDL used by FFmpeg final rendering. Timeline trims can store exact source times, so cuts may land inside silence or between transcript words while legacy word-based cleanup ranges continue to work. Late timeline trims preserve the existing B-roll plan and generated assets; B-roll placements appear on a read-only B1 track below the editable V1 kept clips.
+
+Keyboard shortcuts:
+
+- `Space` — play / pause
+- `S` or `Cmd/Ctrl+B` — split the kept clip at the playhead
+- `Delete` / `Backspace` — remove the selected clip
+- `[` / `]` — set the selected clip start / end to the playhead
+- `Left/Right` — step one frame
+- `Shift+Left/Right` — step one second
+- `Cmd/Ctrl+Z` — undo
+- `Cmd/Ctrl+Shift+Z` or `Ctrl+Y` — redo
+- `+` / `-` — zoom the timeline
+
+The proxy player skips removed ranges immediately, so edit decisions can be reviewed before starting the full-quality render. Existing per-scene B-roll previews remain the accurate preview path for complex B-roll layouts and presenter cutouts.
+
 ## B-roll workflows
 
 ### 1. Cleaned video -> B-roll -> final video

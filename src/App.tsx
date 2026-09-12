@@ -17,6 +17,7 @@ import {
   type Word,
 } from './api';
 import ProjectLibrary from './ProjectLibrary';
+import TimelineEditorPanel from './TimelineEditor';
 import './settings.css';
 
 type SceneDraft = { title: string; imagePrompt: string; videoPrompt: string; sourceStart: string; sourceEnd: string; enabled: boolean };
@@ -111,19 +112,25 @@ function App() {
   const keepMask = useMemo(() => {
     const mask = words.map(() => false);
     for (const range of edl?.keepRanges ?? []) {
-      const start = index.get(range.startWordId); const end = index.get(range.endWordId);
-      if (start === undefined || end === undefined) continue;
-      for (let i = start; i <= end; i += 1) mask[i] = true;
+      if (range.startWordId && range.endWordId) {
+        const start = index.get(range.startWordId); const end = index.get(range.endWordId);
+        if (start !== undefined && end !== undefined) { for (let i = start; i <= end; i += 1) mask[i] = true; continue; }
+      }
+      if (Number.isFinite(range.sourceStart) && Number.isFinite(range.sourceEnd)) {
+        for (let i = 0; i < words.length; i += 1) if (words[i].end > Number(range.sourceStart) && words[i].start < Number(range.sourceEnd)) mask[i] = true;
+      }
     }
     return mask;
   }, [words, edl, index]);
   const previewSegments = useMemo(() => (edl?.keepRanges ?? []).map((range) => {
+    if (Number.isFinite(range.sourceStart) && Number.isFinite(range.sourceEnd)) return { start: Math.max(0, Number(range.sourceStart)), end: Math.min(project?.media.duration ?? Number.POSITIVE_INFINITY, Number(range.sourceEnd)) };
+    if (!range.startWordId || !range.endWordId) return null;
     const startIndex = index.get(range.startWordId) ?? -1; const endIndex = index.get(range.endWordId) ?? -1; const startWord = words[startIndex]; const endWord = words[endIndex];
     if (!startWord || !endWord) return null;
     const previousRemovedWord = startIndex > 0 ? words[startIndex - 1] : undefined; const nextRemovedWord = endIndex < words.length - 1 ? words[endIndex + 1] : undefined;
     const paddedStart = Math.max(0, startWord.start - 0.08); const paddedEnd = endWord.end + 0.12;
     return { start: previousRemovedWord ? Math.max(paddedStart, Math.min(startWord.start, previousRemovedWord.end + 0.01)) : paddedStart, end: nextRemovedWord ? Math.min(paddedEnd, Math.max(endWord.end, nextRemovedWord.start - 0.01)) : paddedEnd };
-  }).filter(Boolean) as Array<{ start: number; end: number }>, [edl, words, index]);
+  }).filter((range): range is { start: number; end: number } => Boolean(range && range.end > range.start)), [edl, words, index, project?.media.duration]);
 
   useEffect(() => {
     previewSegmentsRef.current = previewSegments; syncPreview(); if (videoRef.current && !videoRef.current.paused) startPreviewGuard();
@@ -278,7 +285,17 @@ function App() {
     for (let i = 0; i <= mask.length; i += 1) { if (i < mask.length && mask[i] && start < 0) start = i; if (start >= 0 && (i === mask.length || !mask[i])) { ranges.push({ startWordId: words[start].id, endWordId: words[i - 1].id, reason: 'Manual edit' }); start = -1; } }
     return ranges;
   }
-  async function toggleWord(wordIndex: number) { if (!project || busy || exportRunning || generatingAll) return; const nextMask = [...keepMask]; nextMask[wordIndex] = !nextMask[wordIndex]; if (!nextMask.some(Boolean)) return; try { const updated = await api.setEdl(project.id, maskToRanges(nextMask)); setEdl(updated); resetBroll(); setProject((current) => current ? { ...current, state: { ...current.state, cleaned: true, brollPlanned: false, brollScenes: 0, brollImages: 0, brollVideos: 0, missingImages: 0, missingVideos: 0 } } : current); setStatus('Dialogue edit saved locally ✓ Preview updated.'); } catch (err) { setError(message(err)); } }
+  async function saveManualEdl(keepRanges: KeepRange[], preserveBroll = false) {
+    if (!project) return;
+    const updated = await api.setEdl(project.id, keepRanges, preserveBroll); setEdl(updated);
+    if (!preserveBroll) {
+      resetBroll();
+      setProject((current) => current ? { ...current, state: { ...current.state, cleaned: true, brollPlanned: false, brollScenes: 0, brollImages: 0, brollVideos: 0, missingImages: 0, missingVideos: 0 } } : current);
+    } else {
+      setProject((current) => current ? { ...current, state: { ...current.state, cleaned: true } } : current);
+    }
+  }
+  async function toggleWord(wordIndex: number) { if (!project || busy || exportRunning || generatingAll) return; const nextMask = [...keepMask]; nextMask[wordIndex] = !nextMask[wordIndex]; if (!nextMask.some(Boolean)) return; try { await saveManualEdl(maskToRanges(nextMask)); setStatus('Dialogue edit saved locally ✓ Preview updated.'); } catch (err) { setError(message(err)); } }
   function syncPreview() { const video = videoRef.current; const segments = previewSegmentsRef.current; if (!video || !segments.length) return; const time = video.currentTime; if (segments.some((segment) => time >= segment.start && time < segment.end)) return; const next = segments.find((segment) => segment.start > time); if (next) video.currentTime = next.start; else video.pause(); }
   function startPreviewGuard() { if (previewFrameRef.current !== null) window.cancelAnimationFrame(previewFrameRef.current); const tick = () => { syncPreview(); const video = videoRef.current; if (video && !video.paused && !video.ended) previewFrameRef.current = window.requestAnimationFrame(tick); else previewFrameRef.current = null; }; previewFrameRef.current = window.requestAnimationFrame(tick); }
   function stopPreviewGuard() { if (previewFrameRef.current !== null) window.cancelAnimationFrame(previewFrameRef.current); previewFrameRef.current = null; }
@@ -511,6 +528,7 @@ function App() {
         <section className="workflow"><aside className="panel controls"><h3>Dialogue flow</h3><button onClick={prepare} disabled={busy || exportRunning || !!proxyUrl || !system?.ffmpeg.installed || !project.sourceAvailable}>1. Create proxy + audio</button><button onClick={transcribe} disabled={busy || exportRunning || !system?.elevenLabs.configured || !!words.length}>2. Transcribe audio</button><label>Cleanup intensity<select value={intensity} onChange={(e) => setIntensity(e.target.value as typeof intensity)}><option value="light">Light</option><option value="balanced">Balanced</option><option value="aggressive">Aggressive</option></select></label><button onClick={clean} disabled={busy || exportRunning || !system?.codex.authenticated}>3. Clean with Codex</button><div className="divider" /><button onClick={() => exportBaseVideo('quality')} disabled={busy || exportRunning || !edl || !project.sourceAvailable}>Export cleaned video only</button>{exportJob && exportJob.state !== 'idle' && <ExportProgress job={exportJob} onStop={stopExport} />}</aside>
           <section className="workspace"><div className="panel playerCard">{proxyUrl ? <video ref={videoRef} src={proxyUrl} controls onPlay={startPreviewGuard} onPause={stopPreviewGuard} onEnded={stopPreviewGuard} onTimeUpdate={syncPreview} onSeeked={syncPreview} /> : <div className="emptyPlayer">Proxy is optional for standalone B-roll. Saved projects restore it automatically when available.</div>}</div><div className="panel transcriptCard"><div className="sectionTitle"><div><span className="label">EDIT DECISION LIST</span><h3>Transcript</h3></div><span className="legend"><i /> kept <i className="removedDot" /> removed</span></div>{words.length ? <div className="transcript">{words.map((word, i) => <button key={word.id} className={`word ${keepMask[i] ? 'kept' : 'removed'}`} title={`${word.start.toFixed(2)}s – ${word.end.toFixed(2)}s`} onClick={() => toggleWord(i)}>{word.text}</button>)}</div> : <p className="muted">No transcript yet. Raw/asset-only B-roll planning can create it automatically.</p>}</div></section>
         </section>
+        {proxyUrl && edl && words.length > 0 && <TimelineEditorPanel duration={project.media.duration} fps={project.media.frameRate} words={words} edl={edl} broll={broll} videoRef={videoRef} disabled={busy || exportRunning || generatingAll} onSave={(ranges) => saveManualEdl(ranges, true)} onNotice={setStatus} />}
         <BrollWorkspace project={project} system={system} plan={broll} settings={brollSettings} setSettings={setBrollSettings} drafts={sceneDrafts} changeDraft={changeDraft} changeSceneLayout={changeSceneLayout} changeSceneAspect={changeSceneAspect} changeVideoProvider={changeVideoProvider} changeVideoAudio={changeVideoAudio} previewScene={previewScene} previewingScene={previewingScene} planBroll={planBroll} generateScene={generateScene} importSceneImage={importSceneImage} importSceneVideo={importSceneVideo} deleteScene={deleteScene} rewriteVideoPrompt={rewriteVideoPrompt} createSceneVideo={createSceneVideo} generateAll={generateAllBroll} generateMissing={generateMissingBroll} regenerateSelected={regenerateSelectedBroll} generateAllVideoPrompts={generateAllVideoPrompts} generateAllVideos={generateAllVideos} generateMissingVideos={generateMissingVideos} saveScene={saveScene} generating={brollGenerating} layoutSaving={layoutSaving} parallelRunning={parallelRunning} generatingAll={generatingAll} busy={busy || exportRunning} exportAssets={exportAssets} exportVideo={() => exportBrollVideo('quality')} imageConcurrency={imageConcurrency} setImageConcurrency={setImageConcurrency} videoConcurrency={videoConcurrency} setVideoConcurrency={setVideoConcurrency} flowUnmatched={flowUnmatched} syncGoogleFlow={syncGoogleFlow} assignGoogleFlowVideo={assignGoogleFlowVideo} />
       </>}
       <footer className="statusbar"><span className={busy || exportRunning || generatingAll ? 'pulse' : ''}>{busy || exportRunning || generatingAll ? '●' : '○'}</span> {status}{error && <strong className="error">{error}</strong>}</footer>
