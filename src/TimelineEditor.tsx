@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { Timeline, type TimelineState } from '@xzdarcy/react-timeline-editor';
-import type { Edl, KeepRange, Word } from './api';
+import type { BrollPlan, Edl, KeepRange, Word } from './api';
 import './timeline-editor.css';
 
 type TimelineEditorPanelProps = {
@@ -8,6 +8,7 @@ type TimelineEditorPanelProps = {
   fps?: number;
   words: Word[];
   edl: Edl;
+  broll?: BrollPlan | null;
   videoRef: RefObject<HTMLVideoElement | null>;
   disabled?: boolean;
   onSave: (ranges: KeepRange[]) => Promise<void>;
@@ -66,7 +67,7 @@ function isEditableTarget(target: EventTarget | null) {
   return Boolean(element?.closest('input, textarea, select, [contenteditable="true"]'));
 }
 
-export default function TimelineEditorPanel({ duration, fps = 30, words, edl, videoRef, disabled, onSave, onNotice }: TimelineEditorPanelProps) {
+export default function TimelineEditorPanel({ duration, fps = 30, words, edl, broll, videoRef, disabled, onSave, onNotice }: TimelineEditorPanelProps) {
   const timelineRef = useRef<TimelineState>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [zoom, setZoom] = useState(92);
@@ -107,8 +108,12 @@ export default function TimelineEditorPanel({ duration, fps = 30, words, edl, vi
     if (disabled || saving || !next.length) return;
     setSaving(true);
     try {
+      await onSave(next);
       if (recordHistory) { setUndoStack((stack) => [...stack.slice(-49), cloneRanges(edl.keepRanges)]); setRedoStack([]); }
-      await onSave(next); onNotice?.(message);
+      onNotice?.(message);
+    } catch (error) {
+      onNotice?.(`Timeline save failed: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
     } finally { setSaving(false); }
   }
 
@@ -189,15 +194,22 @@ export default function TimelineEditorPanel({ duration, fps = 30, words, edl, vi
     window.addEventListener('keydown', keydown); return () => window.removeEventListener('keydown', keydown);
   });
 
-  const editorData = useMemo(() => [{
-    id: 'video-track',
-    actions: clips.map((clip) => ({
-      id: clip.id, start: clip.start, end: clip.end, effectId: 'video', selected: clip.id === selectedId,
-      movable: false, flexible: true, minStart: clips[clip.index - 1]?.end ?? 0, maxEnd: clips[clip.index + 1]?.start ?? duration,
-    })),
-  }], [clips, selectedId, duration]);
+  const brollActions = useMemo(() => (broll?.scenes ?? []).filter((scene) => scene.enabled && (scene.imageFile || scene.videoFile)).map((scene) => ({
+    id: `broll:${scene.id}`, start: Math.max(0, scene.sourceStart), end: Math.min(duration, scene.sourceEnd), effectId: 'broll', movable: false, flexible: false,
+  })).filter((action) => action.end > action.start), [broll, duration]);
 
-  const effects = useMemo(() => ({ video: { id: 'video', name: 'Video' } }), []);
+  const editorData = useMemo(() => [
+    {
+      id: 'video-track',
+      actions: clips.map((clip) => ({
+        id: clip.id, start: clip.start, end: clip.end, effectId: 'video', selected: clip.id === selectedId,
+        movable: false, flexible: true, minStart: clips[clip.index - 1]?.end ?? 0, maxEnd: clips[clip.index + 1]?.start ?? duration,
+      })),
+    },
+    ...(brollActions.length ? [{ id: 'broll-track', actions: brollActions }] : []),
+  ], [clips, selectedId, duration, brollActions]);
+
+  const effects = useMemo(() => ({ video: { id: 'video', name: 'Video' }, broll: { id: 'broll', name: 'B-roll' } }), []);
 
   return <section className="panel capcutTimelinePanel">
     <div className="timelineTopbar">
@@ -217,8 +229,8 @@ export default function TimelineEditorPanel({ duration, fps = 30, words, edl, vi
       <label className="timelineZoom">Zoom<input type="range" min="42" max="220" step="6" value={zoom} onChange={(event) => setZoom(Number(event.target.value))} /></label>
     </div>
 
-    <div className="timelineTrackLabels"><span>V1</span><strong>{selected ? `Clip ${selected.index + 1} · ${(selected.end - selected.start).toFixed(2)}s` : 'Select a clip'}</strong><small>Arrow keys = 1 frame · Shift+Arrow = 1 sec</small></div>
-    <div className="timelineLibrarySurface">
+    <div className="timelineTrackLabels"><span>V1</span><strong>{selected ? `Clip ${selected.index + 1} · ${(selected.end - selected.start).toFixed(2)}s` : 'Select a clip'}</strong>{brollActions.length > 0 && <em>B1 · {brollActions.length} B-roll{brollActions.length === 1 ? '' : 's'}</em>}<small>Arrow keys = 1 frame · Shift+Arrow = 1 sec</small></div>
+    <div className={`timelineLibrarySurface ${brollActions.length ? 'withBrollTrack' : ''}`}>
       <Timeline
         ref={timelineRef}
         editorData={editorData as any}
@@ -235,13 +247,17 @@ export default function TimelineEditorPanel({ duration, fps = 30, words, edl, vi
         onClickTimeArea={(time) => { seek(time); return true; }}
         onCursorDrag={(time) => seek(time)}
         onCursorDragEnd={(time) => seek(time)}
-        onClickActionOnly={(_event, { action, time }) => { setSelectedId(action.id); seek(time); }}
-        onActionResizeEnd={({ action, start, end }) => { void resizeClip(action.id, start, end); }}
+        onClickActionOnly={(_event, { action, time }) => { if (!action.id.startsWith('broll:')) setSelectedId(action.id); seek(time); }}
+        onActionResizeEnd={({ action, start, end }) => { if (!action.id.startsWith('broll:')) void resizeClip(action.id, start, end); }}
         getActionRender={(action: any) => {
+          if (action.id.startsWith('broll:')) {
+            const scene = broll?.scenes.find((item) => `broll:${item.id}` === action.id);
+            return <div className="timelineClipBody broll"><strong>{scene?.title || 'B-roll'}</strong><span>{scene?.videoFile ? 'video' : 'image'}</span></div>;
+          }
           const clip = clips.find((item) => item.id === action.id);
           return <div className={`timelineClipBody ${action.selected ? 'selected' : ''}`}><strong>{clip ? `Clip ${clip.index + 1}` : 'Clip'}</strong><span>{Math.max(0, action.end - action.start).toFixed(2)}s</span></div>;
         }}
-        style={{ width: '100%', height: 116 }}
+        style={{ width: '100%', height: brollActions.length ? 174 : 116 }}
       />
     </div>
     <div className="timelineShortcutHint"><span><kbd>S</kbd> split</span><span><kbd>Delete</kbd> remove clip</span><span><kbd>[</kbd>/<kbd>]</kbd> trim to playhead</span><span><kbd>Space</kbd> play/pause</span><span><kbd>⌘Z</kbd>/<kbd>⇧⌘Z</kbd> undo/redo</span><span><kbd>+/-</kbd> zoom</span></div>
