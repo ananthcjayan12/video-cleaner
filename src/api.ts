@@ -59,6 +59,18 @@ export type SystemStatus = {
 };
 
 export type PresenterMatteStatus = { ready: boolean; stale: boolean; generatedAt?: string; analysisSource?: 'proxy' | 'generated-proxy' };
+export type ProjectExportOptions = {
+  talkingHeadVideo: boolean;
+  proxyPreview: boolean;
+  analysisAudio: boolean;
+  subtitles: boolean;
+  transcriptText: boolean;
+  wordTimestamps: boolean;
+  editTimeline: boolean;
+  brollImages: boolean;
+  brollVideos: boolean;
+  brollTiming: boolean;
+};
 export type ProjectZipExportResult = { destination: string; archiveBytes: number; clips: number; words: number; brollImages: number; brollVideos: number; files: number };
 export type ExportStatus = { state: 'idle' | 'running' | 'completed' | 'failed' | 'stopped'; progress: number; outTime: string; speed: string; frame: number; outputPath?: string; encoder?: string; error?: string; checkpointCompleted?: number; checkpointTotal?: number; resumable?: boolean; resumed?: boolean };
 export type BrollPlanSettings = {
@@ -127,7 +139,7 @@ export const api = {
   presenterMatteStatus: (id: string) => request<PresenterMatteStatus>(`/api/projects/${id}/presenter-matte`),
   preparePresenterMatte: (id: string) => request<PresenterMatteStatus>(`/api/projects/${id}/presenter-matte`, { method: 'POST' }),
   exportBrollAssets: (id: string) => request<{ destination: string; sceneCount: number }>(`/api/projects/${id}/broll/export-assets`, { method: 'POST' }),
-  exportProjectZip: (id: string) => request<ProjectZipExportResult>(`/api/projects/${id}/export-project-zip`, { method: 'POST' }),
+  exportProjectZip: (id: string, options: ProjectExportOptions) => request<ProjectZipExportResult>(`/api/projects/${id}/export-project-zip`, { method: 'POST', body: JSON.stringify({ options }) }),
   exportBrollVideo: (id: string, mode: 'fast' | 'quality') => request<{ started: boolean; outputPath: string; encoder: string; hardware: boolean; targetBitRate: number; brollScenes: number; presenterMatte?: boolean; checkpoints?: number }>(`/api/projects/${id}/broll/export-video`, { method: 'POST', body: JSON.stringify({ mode }) }),
   exportVideo: (id: string, mode: 'fast' | 'quality') => request<{ started: boolean; outputPath: string; encoder: string; hardware: boolean; targetBitRate: number }>(`/api/projects/${id}/export`, { method: 'POST', body: JSON.stringify({ mode }) }),
   exportStatus: (id: string) => request<ExportStatus>(`/api/projects/${id}/export-status`),
