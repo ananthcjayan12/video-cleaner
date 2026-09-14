@@ -33,7 +33,7 @@ import {
   type VideoProvider,
 } from './broll.js';
 import { ensurePresenterMatte, mattingSystemStatus, presenterMatteStatus, type PresenterMatteSpecInput } from './presenter.js';
-import { exportProjectZip } from './project-export.js';
+import { exportProjectZip, normalizeProjectExportOptions } from './project-export.js';
 import {
   atomicWriteJson,
   clipAtTimelineTime,
@@ -663,11 +663,15 @@ app.post('/api/projects/:id/broll/export-assets', route(async (req, res) => {
 }));
 
 app.post('/api/projects/:id/export-project-zip', route(async (req, res) => {
-  const project = getProject(routeParam(req.params.id)); await requireSource(project); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir);
+  const project = getProject(routeParam(req.params.id));
+  const exportOptions = normalizeProjectExportOptions(req.body?.options);
+  if (!Object.values(exportOptions).some(Boolean)) throw new Error('Select at least one item to export.');
+  if (exportOptions.talkingHeadVideo) await requireSource(project);
+  const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir);
   const baseName = project.name.replace(/[\\/:*?"<>|]+/g, '-').replace(/\s+/g, ' ').trim() || 'video-cleaner-project';
   const selectedPath = await pickZipPath(`${baseName}.zip`); if (!selectedPath) return void res.status(400).json({ error: 'Export cancelled' });
   const destination = selectedPath.toLowerCase().endsWith('.zip') ? selectedPath : `${selectedPath}.zip`;
-  const result = await exportProjectZip({ project, plan: plan ?? null, destination });
+  const result = await exportProjectZip({ project, plan: plan ?? null, destination, exportOptions });
   res.json(result);
 }));
 
