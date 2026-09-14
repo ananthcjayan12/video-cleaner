@@ -126,3 +126,139 @@ test('buildProjectExportDirectory creates an editor-friendly package', async () 
     await fs.rm(root, { recursive: true, force: true });
   }
 });
+
+test('buildProjectExportDirectory exports only selected asset groups', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'video-cleaner-selective-export-test-'));
+  try {
+    const missingSourcePath = path.join(root, 'missing-source.mov');
+    const imagePath = path.join(root, 'scene.png');
+    const videoPath = path.join(root, 'scene.mp4');
+    const workDir = path.join(root, 'work');
+    const destination = path.join(root, 'bundle');
+    await fs.mkdir(workDir, { recursive: true });
+    await fs.writeFile(imagePath, 'image');
+    await fs.writeFile(videoPath, 'video');
+
+    const media = { duration: 2, size: 12, width: 1080, height: 1920, frameRate: 30, videoCodec: 'h264', audioCodec: 'aac', hdr: false };
+    const project: Project = {
+      id: 'project-selective',
+      name: 'Selective Export',
+      createdAt: '2026-09-14T00:00:00.000Z',
+      updatedAt: '2026-09-14T00:00:00.000Z',
+      sourcePath: missingSourcePath,
+      sourceName: 'missing-source.mov',
+      workDir,
+      media,
+      clips: [{ id: 'clip-001', sourcePath: missingSourcePath, sourceName: 'missing-source.mov', media, timelineStart: 0, timelineEnd: 2 }],
+      transcript: {
+        text: 'Only captions please.',
+        words: [
+          { id: 'w000001', text: 'Only', start: 0.1, end: 0.4 },
+          { id: 'w000002', text: 'captions', start: 0.45, end: 0.8 },
+          { id: 'w000003', text: 'please.', start: 0.85, end: 1.2 },
+        ],
+      },
+      edl: { keepRanges: [{ startWordId: 'w000001', endWordId: 'w000003', reason: 'Keep' }], notes: [] },
+    };
+
+    const plan: BrollPlan = {
+      version: 2,
+      orientation: 'portrait',
+      stylePreset: 'clean',
+      settings: {
+        workflowMode: 'raw-video',
+        provider: 'gemini',
+        videoProvider: 'magnific',
+        countMode: 'exact',
+        targetCount: 1,
+        imagesPerMinute: 1,
+        intervalSeconds: 20,
+        minSceneDuration: 2,
+        maxSceneDuration: 5,
+        aspectRatio: '9:16',
+        displayTemplate: 'full-frame',
+        returnVideoWithAudio: false,
+      },
+      scenes: [{
+        id: 'scene-001',
+        title: 'Example scene',
+        startWordId: 'w000001',
+        endWordId: 'w000003',
+        sourceStart: 0.1,
+        sourceEnd: 1.2,
+        narration: 'Only captions please.',
+        visualIntent: 'Show example',
+        shotType: 'macro',
+        imagePrompt: 'Example image',
+        videoPrompt: 'Example motion',
+        enabled: true,
+        imageFile: imagePath,
+        videoFile: videoPath,
+        videoProvider: 'magnific',
+      }],
+      notes: [],
+    };
+
+    const result = await buildProjectExportDirectory({
+      project,
+      plan,
+      directory: destination,
+      exportOptions: {
+        talkingHeadVideo: false,
+        proxyPreview: false,
+        analysisAudio: false,
+        subtitles: true,
+        transcriptText: false,
+        wordTimestamps: false,
+        editTimeline: false,
+        brollImages: false,
+        brollVideos: false,
+        brollTiming: true,
+      },
+    });
+
+    assert.equal(result.clips, 0);
+    assert.equal(result.words, 0);
+    assert.equal(result.brollImages, 0);
+    assert.equal(result.brollVideos, 0);
+
+    for (const relative of [
+      'captions/captions.srt',
+      'captions/captions.vtt',
+      'timeline/broll-timing.json',
+      'project-manifest.json',
+      'README.txt',
+    ]) {
+      const stat = await fs.stat(path.join(destination, relative));
+      assert.equal(stat.isFile(), true, relative);
+    }
+
+    for (const relative of [
+      'talking-head/001-missing-source.mov',
+      'broll/images/scene-001.png',
+      'broll/videos/scene-001.mp4',
+      'captions/transcript.txt',
+      'captions/word-level-timestamps.json',
+      'timeline/edl.json',
+      'timeline/cleaned-timeline.json',
+    ]) {
+      const stat = await fs.stat(path.join(destination, relative)).catch(() => null);
+      assert.equal(stat, null, relative);
+    }
+
+    const manifest = JSON.parse(await fs.readFile(path.join(destination, 'project-manifest.json'), 'utf8'));
+    assert.equal(manifest.selection.talkingHeadVideo, false);
+    assert.equal(manifest.selection.subtitles, true);
+    assert.equal(manifest.selection.brollTiming, true);
+    assert.equal(manifest.clips[0].file, null);
+
+    const timing = JSON.parse(await fs.readFile(path.join(destination, 'timeline/broll-timing.json'), 'utf8'));
+    assert.equal(timing.scenes[0].imageAvailable, true);
+    assert.equal(timing.scenes[0].videoAvailable, true);
+    assert.equal(timing.scenes[0].imageFile, null);
+    assert.equal(timing.scenes[0].videoFile, null);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
