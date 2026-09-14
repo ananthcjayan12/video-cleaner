@@ -50,7 +50,7 @@ export default function ProjectLibrary({ projects, busy, onNew, onOpen, onRename
         <div className="projectActions">
           <button className="primary" onClick={() => onOpen(project)} disabled={busy}>Open</button>
           {!project.sourceAvailable && <button onClick={() => onRelink(project)} disabled={busy}>Relink source</button>}
-          <button onClick={() => onExport(project)} disabled={busy || !project.sourceAvailable}>Export editable ZIP</button>
+          <button onClick={() => onExport(project)} disabled={busy}>Export editable ZIP</button>
           <button onClick={() => onRename(project)} disabled={busy}>Rename</button>
           <button className="danger" onClick={() => onDelete(project)} disabled={busy}>Delete project</button>
         </div>
