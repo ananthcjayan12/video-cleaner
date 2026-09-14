@@ -15,5 +15,6 @@ jobs:
         with:
           node-version: 22
       - run: npm install --no-audit --no-fund
+      - run: node --import tsx --test server/project-export.test.ts
       - run: npm run typecheck
       - run: npm run build
