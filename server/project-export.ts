@@ -17,6 +17,41 @@ export type ProjectZipExportResult = ProjectExportContents & {
   archiveBytes: number;
 };
 
+export type ProjectExportOptions = {
+  talkingHeadVideo: boolean;
+  proxyPreview: boolean;
+  analysisAudio: boolean;
+  subtitles: boolean;
+  transcriptText: boolean;
+  wordTimestamps: boolean;
+  editTimeline: boolean;
+  brollImages: boolean;
+  brollVideos: boolean;
+  brollTiming: boolean;
+};
+
+export const DEFAULT_PROJECT_EXPORT_OPTIONS: ProjectExportOptions = {
+  talkingHeadVideo: true,
+  proxyPreview: true,
+  analysisAudio: true,
+  subtitles: true,
+  transcriptText: true,
+  wordTimestamps: true,
+  editTimeline: true,
+  brollImages: true,
+  brollVideos: true,
+  brollTiming: true,
+};
+
+export function normalizeProjectExportOptions(value: unknown): ProjectExportOptions {
+  const raw = value && typeof value === 'object' ? value as Record<string, unknown> : {};
+  const result = { ...DEFAULT_PROJECT_EXPORT_OPTIONS };
+  for (const key of Object.keys(result) as Array<keyof ProjectExportOptions>) {
+    if (typeof raw[key] === 'boolean') result[key] = raw[key] as boolean;
+  }
+  return result;
+}
+
 type SubtitleCue = { start: number; end: number; text: string };
 
 async function isFile(filePath?: string) {
@@ -175,8 +210,11 @@ export async function buildProjectExportDirectory(options: {
   project: Project;
   plan: BrollPlan | null;
   directory: string;
+  exportOptions?: Partial<ProjectExportOptions>;
 }): Promise<ProjectExportContents> {
   const { project, plan, directory } = options;
+  const selection = normalizeProjectExportOptions(options.exportOptions);
+  if (!Object.values(selection).some(Boolean)) throw new Error('Select at least one item to export.');
   await fs.rm(directory, { recursive: true, force: true });
   await fs.mkdir(directory, { recursive: true });
 
@@ -187,12 +225,15 @@ export async function buildProjectExportDirectory(options: {
 
   for (let index = 0; index < clips.length; index += 1) {
     const clip = clips[index];
-    if (!await isFile(clip.sourcePath)) throw new Error(`Original talking-head clip is missing: ${clip.sourceName}`);
-    const sourceExt = path.extname(clip.sourceName || clip.sourcePath) || path.extname(clip.sourcePath) || '.mp4';
-    const sourceBase = safeFileName(path.basename(clip.sourceName || clip.sourcePath, sourceExt), `clip-${index + 1}`);
-    const relative = archivePath('talking-head', `${String(index + 1).padStart(3, '0')}-${sourceBase}${sourceExt.toLowerCase()}`);
-    await linkOrCopy(clip.sourcePath, path.join(directory, relative));
-    register();
+    let relative: string | null = null;
+    if (selection.talkingHeadVideo) {
+      if (!await isFile(clip.sourcePath)) throw new Error(`Original talking-head clip is missing: ${clip.sourceName}`);
+      const sourceExt = path.extname(clip.sourceName || clip.sourcePath) || path.extname(clip.sourcePath) || '.mp4';
+      const sourceBase = safeFileName(path.basename(clip.sourceName || clip.sourcePath, sourceExt), `clip-${index + 1}`);
+      relative = archivePath('talking-head', `${String(index + 1).padStart(3, '0')}-${sourceBase}${sourceExt.toLowerCase()}`);
+      await linkOrCopy(clip.sourcePath, path.join(directory, relative));
+      register();
+    }
     clipManifest.push({
       id: clip.id,
       originalName: clip.sourceName,
@@ -209,14 +250,14 @@ export async function buildProjectExportDirectory(options: {
   }
 
   let proxyFile: string | null = null;
-  if (await isFile(project.proxyPath)) {
+  if (selection.proxyPreview && await isFile(project.proxyPath)) {
     proxyFile = archivePath('talking-head', 'proxy-preview.mp4');
     await linkOrCopy(project.proxyPath!, path.join(directory, proxyFile));
     register();
   }
 
   let analysisAudioFile: string | null = null;
-  if (await isFile(project.audioPath)) {
+  if (selection.analysisAudio && await isFile(project.audioPath)) {
     const extension = path.extname(project.audioPath!) || '.m4a';
     analysisAudioFile = archivePath('audio', `analysis${extension.toLowerCase()}`);
     await linkOrCopy(project.audioPath!, path.join(directory, analysisAudioFile));
@@ -226,25 +267,31 @@ export async function buildProjectExportDirectory(options: {
   const transcript = project.transcript;
   const words = transcript?.words ?? [];
   let transcriptFiles: Record<string, string> | null = null;
-  if (words.length) {
-    const cues = subtitleCues(words);
-    transcriptFiles = {
-      text: archivePath('captions', 'transcript.txt'),
-      srt: archivePath('captions', 'captions.srt'),
-      vtt: archivePath('captions', 'captions.vtt'),
-      wordJson: archivePath('captions', 'word-level-timestamps.json'),
-      wordCsv: archivePath('captions', 'word-level-timestamps.csv'),
-    };
-    await writeText(path.join(directory, transcriptFiles.text), `${transcript?.text || words.map((word) => word.text).join(' ')}\n`); register();
-    await writeText(path.join(directory, transcriptFiles.srt), toSrt(cues)); register();
-    await writeText(path.join(directory, transcriptFiles.vtt), toVtt(cues)); register();
-    await writeJson(path.join(directory, transcriptFiles.wordJson), { version: 1, timeline: 'source', words }); register();
-    await writeText(path.join(directory, transcriptFiles.wordCsv), wordCsv(words)); register();
+  if (words.length && (selection.subtitles || selection.transcriptText || selection.wordTimestamps)) {
+    const cues = selection.subtitles ? subtitleCues(words) : [];
+    transcriptFiles = {};
+    if (selection.transcriptText) {
+      transcriptFiles.text = archivePath('captions', 'transcript.txt');
+      await writeText(path.join(directory, transcriptFiles.text), `${transcript?.text || words.map((word) => word.text).join(' ')}\n`);
+      register();
+    }
+    if (selection.subtitles) {
+      transcriptFiles.srt = archivePath('captions', 'captions.srt');
+      transcriptFiles.vtt = archivePath('captions', 'captions.vtt');
+      await writeText(path.join(directory, transcriptFiles.srt), toSrt(cues)); register();
+      await writeText(path.join(directory, transcriptFiles.vtt), toVtt(cues)); register();
+    }
+    if (selection.wordTimestamps) {
+      transcriptFiles.wordJson = archivePath('captions', 'word-level-timestamps.json');
+      transcriptFiles.wordCsv = archivePath('captions', 'word-level-timestamps.csv');
+      await writeJson(path.join(directory, transcriptFiles.wordJson), { version: 1, timeline: 'source', words }); register();
+      await writeText(path.join(directory, transcriptFiles.wordCsv), wordCsv(words)); register();
+    }
   }
 
   let edlFile: string | null = null;
   let cleanedTimelineFile: string | null = null;
-  if (project.edl) {
+  if (selection.editTimeline && project.edl) {
     edlFile = archivePath('timeline', 'edl.json');
     cleanedTimelineFile = archivePath('timeline', 'cleaned-timeline.json');
     await writeJson(path.join(directory, edlFile), project.edl); register();
@@ -259,17 +306,19 @@ export async function buildProjectExportDirectory(options: {
   const brollScenes: Array<Record<string, unknown>> = [];
   let brollImages = 0;
   let brollVideos = 0;
-  if (plan) {
+  if (plan && (selection.brollImages || selection.brollVideos || selection.brollTiming)) {
     for (const scene of plan.scenes) {
       let imageFile: string | null = null;
       let videoFile: string | null = null;
-      if (await isFile(scene.imageFile)) {
+      const imageAvailable = await isFile(scene.imageFile);
+      const videoAvailable = await isFile(scene.videoFile);
+      if (selection.brollImages && imageAvailable) {
         const extension = path.extname(scene.imageFile!) || '.png';
         imageFile = archivePath('broll', 'images', `${safeFileName(scene.id, 'scene')}${extension.toLowerCase()}`);
         await linkOrCopy(scene.imageFile!, path.join(directory, imageFile));
         register(); brollImages += 1;
       }
-      if (await isFile(scene.videoFile)) {
+      if (selection.brollVideos && videoAvailable) {
         const extension = path.extname(scene.videoFile!) || '.mp4';
         videoFile = archivePath('broll', 'videos', `${safeFileName(scene.id, 'scene')}${extension.toLowerCase()}`);
         await linkOrCopy(scene.videoFile!, path.join(directory, videoFile));
@@ -296,6 +345,8 @@ export async function buildProjectExportDirectory(options: {
         imageModel: scene.model ?? null,
         videoProvider: scene.videoProvider || plan.settings.videoProvider,
         videoModel: scene.videoModel ?? null,
+        imageAvailable,
+        videoAvailable,
         imageFile,
         videoFile,
       });
@@ -303,7 +354,7 @@ export async function buildProjectExportDirectory(options: {
   }
 
   let brollTimingFile: string | null = null;
-  if (plan) {
+  if (plan && selection.brollTiming) {
     brollTimingFile = archivePath('timeline', 'broll-timing.json');
     await writeJson(path.join(directory, brollTimingFile), {
       version: 2,
@@ -323,6 +374,7 @@ export async function buildProjectExportDirectory(options: {
     version: 1,
     exportedAt: new Date().toISOString(),
     app: 'Video Cleaner',
+    selection,
     project: {
       id: project.id,
       name: project.name,
@@ -346,7 +398,7 @@ export async function buildProjectExportDirectory(options: {
       timebase: 'seconds on original/source timeline',
     },
     counts: {
-      clips: clips.length,
+      clips: selection.talkingHeadVideo ? clips.length : 0,
       words: words.length,
       brollScenes: plan?.scenes.length ?? 0,
       brollImages,
@@ -355,30 +407,32 @@ export async function buildProjectExportDirectory(options: {
   });
   register();
 
+  const included = [
+    selection.talkingHeadVideo && '- talking-head/ : original source-quality talking-head clip(s).',
+    selection.proxyPreview && proxyFile && '- talking-head/proxy-preview.mp4 : local preview proxy.',
+    selection.analysisAudio && analysisAudioFile && '- audio/ : lightweight analysis audio.',
+    selection.brollImages && '- broll/images/ : generated or manually imported B-roll stills.',
+    selection.brollVideos && '- broll/videos/ : generated or manually imported B-roll video clips.',
+    selection.subtitles && '- captions/captions.srt + captions.vtt : editor-friendly subtitles.',
+    selection.transcriptText && '- captions/transcript.txt : narration transcript.',
+    selection.wordTimestamps && '- captions/word-level-timestamps.json + .csv : exact word timings.',
+    selection.editTimeline && '- timeline/edl.json + cleaned-timeline.json : dialogue edit decisions and kept source ranges.',
+    selection.brollTiming && '- timeline/broll-timing.json : B-roll source timing, prompts, layout and provider/model metadata.',
+  ].filter(Boolean);
   const readme = [
     'VIDEO CLEANER — EDITABLE PROJECT EXPORT',
     '',
     'This ZIP is designed for manual finishing in editors such as DaVinci Resolve, Adobe Premiere Pro, Final Cut Pro or CapCut.',
     '',
-    'Folders:',
-    '- talking-head/ : original source-quality talking-head clip(s), plus proxy-preview.mp4 when available.',
-    '- audio/ : lightweight analysis audio when available.',
-    '- broll/images/ : generated or manually imported B-roll stills.',
-    '- broll/videos/ : generated or manually imported B-roll video clips.',
-    '- captions/ : transcript, SRT, WebVTT and word-level timestamps in JSON + CSV.',
-    '- timeline/edl.json : Video Cleaner keep/remove decisions using transcript word IDs.',
-    '- timeline/cleaned-timeline.json : kept source ranges expressed directly in seconds.',
-    '- timeline/broll-timing.json : B-roll source timing, prompts, layout, provider/model and asset filenames.',
-    '- project-manifest.json : portable index of the package.',
+    'Selected export contents:',
+    ...included,
+    '- project-manifest.json : portable index of this partial/full package.',
     '',
     'Timing convention:',
-    'All exported timestamps use seconds on the original project source timeline. For multi-clip projects, each talking-head clip has timelineStart/timelineEnd in project-manifest.json.',
+    'All exported timestamps use seconds on the original project source timeline. For multi-clip projects, each clip has timelineStart/timelineEnd in project-manifest.json even when source video was not selected.',
     '',
-    'Suggested manual workflow:',
-    '1. Place the talking-head clip(s) on the timeline using their timelineStart values.',
-    '2. Apply the kept ranges from timeline/cleaned-timeline.json if you want the same dialogue cleanup.',
-    '3. Import captions/captions.srt (or captions.vtt) and use word-level-timestamps.json for precise text animation.',
-    '4. Place B-roll files using each scene sourceStart/sourceEnd from timeline/broll-timing.json.',
+    'Tip:',
+    'You can create multiple lightweight ZIPs from the same Video Cleaner project, for example subtitles-only, B-roll-only, or source-video + timing.',
     '',
   ].join('\n');
   await writeText(path.join(directory, 'README.txt'), readme);
@@ -391,12 +445,13 @@ export async function exportProjectZip(options: {
   project: Project;
   plan: BrollPlan | null;
   destination: string;
+  exportOptions?: Partial<ProjectExportOptions>;
 }): Promise<ProjectZipExportResult> {
   const bundleName = `video-cleaner-${safeFileName(options.project.name, 'project').replace(/\s+/g, '-')}-${options.project.id.slice(0, 8)}`;
   const temporaryRoot = await fs.mkdtemp(path.join(options.project.workDir, '.editable-export-'));
   const bundleDirectory = path.join(temporaryRoot, bundleName);
   try {
-    const contents = await buildProjectExportDirectory({ project: options.project, plan: options.plan, directory: bundleDirectory });
+    const contents = await buildProjectExportDirectory({ project: options.project, plan: options.plan, directory: bundleDirectory, exportOptions: options.exportOptions });
     await createZipArchive(bundleDirectory, options.destination);
     const stat = await fs.stat(options.destination);
     return { ...contents, destination: options.destination, archiveBytes: stat.size };
