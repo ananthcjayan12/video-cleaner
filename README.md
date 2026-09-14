@@ -26,6 +26,7 @@ Project actions include:
 - **Rename**
 - **Delete project** — removes only the Video Cleaner project directory; the original master video is never deleted
 - **Relink source** — if the original video was moved, choose it again; duration and dimensions are checked before relinking
+- **Export editable ZIP** — packages the original talking-head clip(s), B-roll media, captions, word timestamps and portable timing metadata for manual editing in another NLE
 - **Generate missing images / Create missing videos** — completed assets are reused after an interrupted generation run
 
 B-roll title, prompt, timing and enabled-state edits debounce-save locally after about 700 ms. Core JSON project writes use temporary files plus atomic rename so a normal save does not partially overwrite the project manifest.
@@ -33,6 +34,23 @@ B-roll title, prompt, timing and enabled-state edits debounce-save locally after
 If a scene PNG/MP4 exists on disk but the app was closed before its metadata finished updating, project recovery reconciles the completed asset back into the B-roll plan when the project is opened again.
 
 No cloud project database is used. Provider calls still send only the media/prompt data required by the configured external provider; the project library itself remains on the user's computer.
+
+## Editable project ZIP export
+
+Use **Export editable ZIP** from either the project library or an open project to create a portable manual-editing package. The archive keeps source-quality talking-head media separate from generated B-roll and exports timing data in open formats instead of requiring another Video Cleaner instance.
+
+The ZIP contains:
+
+- `talking-head/` — original source clip(s), plus the local proxy preview when available
+- `audio/` — analysis audio when available
+- `broll/images/` and `broll/videos/` — generated or manually imported B-roll assets
+- `captions/captions.srt` and `captions/captions.vtt`
+- `captions/word-level-timestamps.json` and `.csv`
+- `timeline/edl.json` and `timeline/cleaned-timeline.json`
+- `timeline/broll-timing.json` with scene timing, prompts, layout and provider/model metadata
+- `project-manifest.json` plus a human-readable `README.txt`
+
+All timing values are seconds on the original project source timeline. Multi-clip exports include each clip's `timelineStart` and `timelineEnd`, which makes the package straightforward to reconstruct in DaVinci Resolve, Premiere Pro, Final Cut Pro, CapCut or another editor.
 
 ## B-roll workflows
 
