@@ -438,7 +438,7 @@ export async function buildProjectExportDirectory(options: {
   await writeText(path.join(directory, 'README.txt'), readme);
   register();
 
-  return { clips: clips.length, words: words.length, brollImages, brollVideos, files: fileCount };
+  return { clips: selection.talkingHeadVideo ? clips.length : 0, words: selection.wordTimestamps ? words.length : 0, brollImages, brollVideos, files: fileCount };
 }
 
 export async function exportProjectZip(options: {
