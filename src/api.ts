@@ -96,7 +96,7 @@ export type GoogleFlowProjectState = { projectId: string; title: string; profile
 export type GoogleFlowCatalogVideo = { mediaId: string; projectId: string; prompt: string; aspect?: string; model?: string; duration?: number; createdAt?: string; localPath?: string };
 export type BrollScene = {
   id: string; title: string; startWordId: string; endWordId: string; sourceStart: number; sourceEnd: number; narration: string; visualIntent: string; shotType: string;
-  imagePrompt: string; videoPrompt?: string; enabled: boolean; beatType?: BrollBeatType; keyPoint?: string; whyThisVisualMatters?: string; viewerTakeaway?: string; visualMode?: BrollVisualMode; animationPlan?: BrollAnimationPlan; imageFile?: string; generatedAt?: string; provider?: ImageProvider | 'manual'; model?: string; imageRevision?: number;
+  imagePrompt: string; videoPrompt?: string; enabled: boolean; beatType?: BrollBeatType; keyPoint?: string; whyThisVisualMatters?: string; viewerTakeaway?: string; visualMode?: BrollVisualMode; animationPlan?: BrollAnimationPlan; imageFile?: string; generatedAt?: string; provider?: ImageProvider | 'manual'; model?: string; imageRevision?: number; imageStatus?: 'none' | 'generating' | 'ready' | 'failed';
   videoFile?: string; videoGeneratedAt?: string; videoModel?: string; videoProvider?: VideoProvider; displayTemplate?: BrollDisplayTemplate; assetAspectRatio?: BrollAssetAspectRatio;
   generatedAspectRatio?: Exclude<BrollAssetAspectRatio, 'auto'>; orientationChanged?: boolean; videoAttempts?: BrollVideoAttempt[]; activeVideoAttemptId?: string; videoSourceImageRevision?: number; videoStatus?: 'none' | 'stale' | 'generating' | 'ready';
 };
