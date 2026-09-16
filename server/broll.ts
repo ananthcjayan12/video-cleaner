@@ -11,6 +11,16 @@ export type VideoProvider = 'grok-cli' | 'google-flow' | 'magnific';
 export type BrollWorkflowMode = 'cleaned-video' | 'raw-video' | 'assets-only';
 export type BrollCountMode = 'auto' | 'exact' | 'per-minute' | 'interval';
 export type BrollAssetAspectRatio = 'auto' | '9:16' | '16:9';
+export type BrollBeatType = 'hook' | 'problem' | 'cause' | 'anatomy' | 'progression' | 'solution' | 'prevention' | 'cta' | 'supporting';
+export type BrollVisualMode = 'hyperreal-clinical' | 'educational-3d' | 'anatomy-cutaway' | 'procedure-closeup' | 'symbolic-medical' | 'clinic-support';
+export type BrollAnimationPlan = {
+  motionType: string;
+  cameraMove: string;
+  subjectMotion: string;
+  revealSequence: string[];
+  highlightTargets: string[];
+  avoidMotion: string[];
+};
 export type BrollDisplayTemplate = 'full-frame' | 'top-card' | 'split-top' | 'picture-in-picture' | 'top-card-presenter' | 'presenter-overlay' | 'stacked-cards-cutout' | 'stacked-talking-top' | 'stacked-broll-top';
 
 export const BROLL_DISPLAY_TEMPLATES: Array<{ id: BrollDisplayTemplate; label: string; needsPresenterMatte: boolean }> = [
@@ -54,6 +64,7 @@ export type BrollVideoAttempt = {
   flowWorkflowId?: string;
   error?: string;
   errorLogFile?: string;
+  sourceImageRevision?: number;
 };
 
 export type GoogleFlowProjectState = {
@@ -79,9 +90,10 @@ export type GoogleFlowCatalogVideo = {
 export type BrollScene = {
   id: string; title: string; startWordId: string; endWordId: string; sourceStart: number; sourceEnd: number;
   narration: string; visualIntent: string; shotType: string; imagePrompt: string; videoPrompt?: string; enabled: boolean;
-  imageFile?: string; generatedAt?: string; provider?: ImageProvider | 'manual'; model?: string;
+  beatType?: BrollBeatType; keyPoint?: string; whyThisVisualMatters?: string; viewerTakeaway?: string; visualMode?: BrollVisualMode; animationPlan?: BrollAnimationPlan;
+  imageFile?: string; generatedAt?: string; provider?: ImageProvider | 'manual'; model?: string; imageRevision?: number; imageStatus?: 'none' | 'generating' | 'ready' | 'failed';
   videoFile?: string; videoGeneratedAt?: string; videoModel?: string; videoProvider?: VideoProvider;
-  videoAttempts?: BrollVideoAttempt[]; activeVideoAttemptId?: string;
+  videoAttempts?: BrollVideoAttempt[]; activeVideoAttemptId?: string; videoSourceImageRevision?: number; videoStatus?: 'none' | 'stale' | 'generating' | 'ready';
   displayTemplate?: BrollDisplayTemplate;
   assetAspectRatio?: BrollAssetAspectRatio;
   generatedAspectRatio?: Exclude<BrollAssetAspectRatio, 'auto'>;
@@ -93,15 +105,15 @@ export type ImageProviderConfig = { openAiApiKey?: string; openAiModel?: string;
 type RunOptions = { cwd?: string; env?: NodeJS.ProcessEnv };
 
 export const BROLL_STYLE_PRESET = [
-  'Hyper-realistic premium commercial photography that looks like a genuine frame from a high-end live-action video, never like illustration or CGI.',
-  'When people are relevant, prefer authentic South-Asian / Indian adults and believable contemporary Indian environments unless the narration clearly requires another context.',
-  'Natural skin texture with pores and fine hair, realistic teeth, hands, eyes, fabrics, food and medical/dental instruments; anatomically and procedurally plausible.',
-  'Soft natural daylight or clean diffused practical lighting, restrained cinematic contrast, neutral accurate skin tones, realistic material response, subtle depth and highlight rolloff.',
-  'Use a modern full-frame camera look with an appropriate 35mm, 50mm or 85mm prime-lens perspective, shallow but believable depth of field and smooth optical bokeh.',
-  'Composition should feel candid and editorial rather than posed stock photography. Keep the main subject and important action inside the central safe area for a social-video crop.',
-  'Premium clean clinic, home or lifestyle production design when appropriate, with convincing small environmental details and no distracting clutter.',
-  'No text, captions, typography, logos, watermarks, brand marks, UI, borders or poster design.',
-  'Avoid plastic skin, excessive beauty retouching, oversharpening, surreal lighting, orange/teal grading, impossible reflections, malformed teeth, extra fingers, duplicated tools, uncanny faces or obviously AI-generated details.',
+  'Story-first B-roll: every visual must earn its place by clarifying, advancing or emotionally supporting the exact spoken idea. Never create filler just to satisfy a B-roll count.',
+  'Use a deliberate mix of visual languages instead of forcing one look on every scene. Choose realistic live-action only when a real person, visible symptom, consultation, environment or tangible action carries the story; use educational 3D, anatomical cutaways, procedure closeups or symbolic medical visuals when explaining mechanisms, progression, treatment or prevention.',
+  'For educational/scientific scenes, create polished clinically believable 3D visualization with readable anatomy, clear spatial relationships, clean depth layers and premium soft lighting. Make the concept understandable at a glance without labels.',
+  'For hyper-real clinical scenes, use authentic premium documentary-style photography with believable people and environments, natural skin/teeth/hands, realistic materials and restrained cinematic lighting. Do not add people merely to make a scene look cinematic.',
+  'Compose the image as the FIRST FRAME of a short image-to-video story: one dominant idea, visually separable foreground/midground/background elements, clean negative space, no baked-in motion blur, and obvious opportunities for reveal, progression, highlighting, object movement or camera movement.',
+  'Keep the essential subject and action inside the social-video safe area. Prefer close, readable compositions over wide generic scenes.',
+  'No text, captions, typography, labels, logos, watermarks, UI, borders, multi-panel layouts, collages, poster design or infographic cards.',
+  'Do not introduce unrelated procedures, products, anatomy or claims. Adjacent B-roll scenes should feel like consecutive visual chapters rather than repeated variants of the same image.',
+  'Avoid gore, horror aesthetics, impossible anatomy, malformed teeth/hands, duplicated tools, decorative sci-fi effects, plastic skin, stock-photo posing, excessive beauty retouching and obviously AI-generated details.',
 ].join(' ');
 
 export const MIN_BROLL_GAP_SECONDS = 5;
@@ -149,7 +161,45 @@ function targetSceneCount(words: BrollWord[], ranges: BrollKeepRange[] | undefin
   if (settings.countMode === 'interval') return Math.max(1, Math.ceil(duration / settings.intervalSeconds));
   return Math.max(1, Math.min(40, Math.round(duration / 60 * Math.max(0.5, settings.imagesPerMinute || 4))));
 }
-function planSchema(exactCount = 0) { return { type: 'object', additionalProperties: false, required: ['scenes', 'notes'], properties: { scenes: { type: 'array', ...(exactCount ? { minItems: exactCount, maxItems: exactCount } : {}), items: { type: 'object', additionalProperties: false, required: ['id', 'title', 'startWordId', 'endWordId', 'narration', 'visualIntent', 'shotType', 'imagePrompt'], properties: { id: { type: 'string' }, title: { type: 'string' }, startWordId: { type: 'string' }, endWordId: { type: 'string' }, narration: { type: 'string' }, visualIntent: { type: 'string' }, shotType: { type: 'string' }, imagePrompt: { type: 'string' } } } }, notes: { type: 'array', items: { type: 'string' } } } }; }
+const BROLL_BEAT_TYPES: BrollBeatType[] = ['hook', 'problem', 'cause', 'anatomy', 'progression', 'solution', 'prevention', 'cta', 'supporting'];
+const BROLL_VISUAL_MODES: BrollVisualMode[] = ['hyperreal-clinical', 'educational-3d', 'anatomy-cutaway', 'procedure-closeup', 'symbolic-medical', 'clinic-support'];
+
+type PlannedStoryBeat = {
+  id: string; title: string; startWordId: string; endWordId: string; sourceStart: number; sourceEnd: number; narration: string;
+  beatType: BrollBeatType; keyPoint: string; whyThisVisualMatters: string; viewerTakeaway: string; visualMode: BrollVisualMode; visualIntent: string; shotType: string;
+};
+
+function storyPlanSchema(exactCount = 0) {
+  return {
+    type: 'object', additionalProperties: false, required: ['scenes', 'notes'], properties: {
+      scenes: {
+        type: 'array', ...(exactCount ? { minItems: exactCount, maxItems: exactCount } : {}),
+        items: {
+          type: 'object', additionalProperties: false,
+          required: ['id', 'title', 'startWordId', 'endWordId', 'beatType', 'keyPoint', 'whyThisVisualMatters', 'viewerTakeaway', 'visualMode', 'visualIntent', 'shotType'],
+          properties: {
+            id: { type: 'string' }, title: { type: 'string' }, startWordId: { type: 'string' }, endWordId: { type: 'string' },
+            beatType: { type: 'string', enum: BROLL_BEAT_TYPES }, keyPoint: { type: 'string' }, whyThisVisualMatters: { type: 'string' }, viewerTakeaway: { type: 'string' },
+            visualMode: { type: 'string', enum: BROLL_VISUAL_MODES }, visualIntent: { type: 'string' }, shotType: { type: 'string' },
+          },
+        },
+      },
+      notes: { type: 'array', items: { type: 'string' } },
+    },
+  };
+}
+function visualPlanSchema(exactCount: number) {
+  return {
+    type: 'object', additionalProperties: false, required: ['scenes'], properties: {
+      scenes: {
+        type: 'array', minItems: exactCount, maxItems: exactCount,
+        items: { type: 'object', additionalProperties: false, required: ['id', 'imagePrompt'], properties: { id: { type: 'string' }, imagePrompt: { type: 'string' } } },
+      },
+    },
+  };
+}
+function normalizeBeatType(value: unknown): BrollBeatType { const candidate = String(value || 'supporting') as BrollBeatType; return BROLL_BEAT_TYPES.includes(candidate) ? candidate : 'supporting'; }
+function normalizeVisualMode(value: unknown): BrollVisualMode { const candidate = String(value || 'educational-3d') as BrollVisualMode; return BROLL_VISUAL_MODES.includes(candidate) ? candidate : 'educational-3d'; }
 function normalizeDisplayTemplate(value: unknown): BrollDisplayTemplate {
   const candidate = String(value || 'full-frame') as BrollDisplayTemplate;
   return BROLL_DISPLAY_TEMPLATES.some((template) => template.id === candidate) ? candidate : 'full-frame';
@@ -162,8 +212,9 @@ function normalizeSettings(raw: Partial<BrollPlanSettings> | undefined): BrollPl
   const aspectRatio = ['auto', '9:16', '16:9'].includes(String(raw?.aspectRatio)) ? raw!.aspectRatio as BrollPlanSettings['aspectRatio'] : 'auto';
   return { workflowMode, provider, videoProvider, countMode, targetCount: Math.max(1, Math.min(40, Number(raw?.targetCount) || 6)), imagesPerMinute: Math.max(0.5, Math.min(20, Number(raw?.imagesPerMinute) || 5)), intervalSeconds: Math.max(10, Math.min(300, Number(raw?.intervalSeconds) || 20)), minSceneDuration: Math.max(1, Math.min(20, Number(raw?.minSceneDuration) || 3)), maxSceneDuration: Math.max(2, Math.min(30, Number(raw?.maxSceneDuration) || 8)), aspectRatio, displayTemplate: normalizeDisplayTemplate(raw?.displayTemplate), returnVideoWithAudio: raw?.returnVideoWithAudio === true };
 }
-function validatePlan(words: BrollWord[], keepRanges: BrollKeepRange[] | undefined, raw: any, orientation: 'portrait' | 'landscape', settings: BrollPlanSettings): BrollPlan {
-  const { index, kept } = keptWordIndexes(words, keepRanges); const { times } = keptTimeline(words, keepRanges); const scenes: BrollScene[] = []; const issues: string[] = []; let previousStart = -1; let previousTimelineEnd = -1; let previousLabel = '';
+function validateStoryPlan(words: BrollWord[], keepRanges: BrollKeepRange[] | undefined, raw: any, settings: BrollPlanSettings) {
+  const { index, kept } = keptWordIndexes(words, keepRanges); const { times } = keptTimeline(words, keepRanges);
+  const beats: PlannedStoryBeat[] = []; const issues: string[] = []; let previousStart = -1; let previousTimelineEnd = -1; let previousLabel = '';
   if (!Array.isArray(raw?.scenes)) issues.push('The response does not contain a scenes array.');
   for (const [candidateIndex, candidate] of (Array.isArray(raw?.scenes) ? raw.scenes : []).entries()) {
     const label = String(candidate?.id || `scene at array position ${candidateIndex + 1}`); const start = index.get(candidate?.startWordId); const end = index.get(candidate?.endWordId);
@@ -172,55 +223,95 @@ function validatePlan(words: BrollWord[], keepRanges: BrollKeepRange[] | undefin
     if (!kept.has(start) || !kept.has(end)) { issues.push(`${label} uses words removed from the final narration.`); continue; }
     if (start < previousStart) { issues.push(`${label} is out of chronological order.`); continue; }
     const narrationWords: string[] = []; for (let position = start; position <= end; position += 1) if (kept.has(position)) narrationWords.push(words[position].text);
-    const imagePrompt = String(candidate?.imagePrompt ?? '').trim();
-    if (!narrationWords.length) { issues.push(`${label} has no kept narration words.`); continue; }
-    if (imagePrompt.length < 40) { issues.push(`${label} has an incomplete image prompt (${imagePrompt.length} characters; at least 40 required).`); continue; }
     const timelineStart = times.get(start)?.start; const timelineEnd = times.get(end)?.end;
+    if (!narrationWords.length) { issues.push(`${label} has no kept narration words.`); continue; }
     if (timelineStart === undefined || timelineEnd === undefined) { issues.push(`${label} cannot be mapped to the final narration timeline.`); continue; }
-    if (scenes.length) {
+    if (beats.length) {
       const gap = timelineStart - previousTimelineEnd;
       if (gap < MIN_BROLL_GAP_SECONDS) issues.push(`${label} starts only ${gap.toFixed(2)} seconds after ${previousLabel} ends on the final narration timeline; at least ${MIN_BROLL_GAP_SECONDS.toFixed(2)} seconds is required.`);
     }
-    const sceneNumber = scenes.length + 1;
-    scenes.push({ id: `scene-${String(sceneNumber).padStart(3, '0')}`, title: String(candidate?.title ?? `Scene ${sceneNumber}`).trim().slice(0, 100) || `Scene ${sceneNumber}`, startWordId: words[start].id, endWordId: words[end].id, sourceStart: words[start].start, sourceEnd: words[end].end, narration: narrationWords.join(' '), visualIntent: String(candidate?.visualIntent ?? '').trim(), shotType: String(candidate?.shotType ?? '').trim(), imagePrompt, enabled: true });
+    const keyPoint = String(candidate?.keyPoint ?? '').trim(); const whyThisVisualMatters = String(candidate?.whyThisVisualMatters ?? '').trim(); const viewerTakeaway = String(candidate?.viewerTakeaway ?? '').trim();
+    if (keyPoint.length < 8) issues.push(`${label} is missing a useful keyPoint.`);
+    if (whyThisVisualMatters.length < 12) issues.push(`${label} does not explain why the visual earns its place.`);
+    if (viewerTakeaway.length < 8) issues.push(`${label} is missing a viewer takeaway.`);
+    const sceneNumber = beats.length + 1;
+    beats.push({
+      id: `scene-${String(sceneNumber).padStart(3, '0')}`, title: String(candidate?.title ?? `Scene ${sceneNumber}`).trim().slice(0, 100) || `Scene ${sceneNumber}`,
+      startWordId: words[start].id, endWordId: words[end].id, sourceStart: words[start].start, sourceEnd: words[end].end, narration: narrationWords.join(' '),
+      beatType: normalizeBeatType(candidate?.beatType), keyPoint, whyThisVisualMatters, viewerTakeaway, visualMode: normalizeVisualMode(candidate?.visualMode),
+      visualIntent: String(candidate?.visualIntent ?? '').trim(), shotType: String(candidate?.shotType ?? '').trim(),
+    });
     previousStart = start; previousTimelineEnd = timelineEnd; previousLabel = label;
   }
   const expected = targetSceneCount(words, keepRanges, settings);
-  if (!scenes.length) issues.push('The response contains no valid B-roll scenes.');
-  else if (expected && scenes.length !== expected) issues.push(`The response contains ${scenes.length} valid scenes, but exactly ${expected} are required.`);
+  if (!beats.length) issues.push('The response contains no valid B-roll story beats.');
+  else if (expected && beats.length !== expected) issues.push(`The response contains ${beats.length} valid beats, but exactly ${expected} are required.`);
   if (issues.length) throw new BrollPlanValidationError(issues);
-  return { version: 2, orientation, stylePreset: BROLL_STYLE_PRESET, settings, scenes, notes: Array.isArray(raw.notes) ? raw.notes.map((note: unknown) => String(note)) : [] };
+  return { beats, notes: Array.isArray(raw?.notes) ? raw.notes.map((note: unknown) => String(note)) : [] };
+}
+async function createVisualPlan(options: { codexBin: string; workDir: string; beats: PlannedStoryBeat[]; targetAspect: string }) {
+  const schemaPath = path.join(options.workDir, 'broll-visual-plan.schema.json'); const outputPath = path.join(options.workDir, 'codex-broll-visual-plan.json');
+  await fs.writeFile(schemaPath, JSON.stringify(visualPlanSchema(options.beats.length), null, 2));
+  const beatPayload = options.beats.map((beat) => ({
+    id: beat.id, narration: beat.narration, beatType: beat.beatType, keyPoint: beat.keyPoint, whyThisVisualMatters: beat.whyThisVisualMatters,
+    viewerTakeaway: beat.viewerTakeaway, visualMode: beat.visualMode, visualIntent: beat.visualIntent, shotType: beat.shotType,
+  }));
+  const basePrompt = `You are the visual-development director for a premium talking-head story. The story editor has already selected the B-roll beats. Your job is to write the strongest possible STARTING-FRAME image prompt for each beat.\n\nDo not add, remove, merge or reorder beats. Return exactly one prompt for every supplied id.\n\nTARGET FRAME: ${options.targetAspect}.\n\nGLOBAL STORYTELLING BAR:\n${BROLL_STYLE_PRESET}\n\nVISUAL MODE RULES:\n- hyperreal-clinical: premium documentary/live-action realism only when a real person, visible symptom, consultation, environment or tangible action is essential to the spoken idea. Natural people; never generic stock posing.\n- educational-3d: polished cinematic 3D/scientific visualization for mechanisms, concepts, progression, prevention or treatment logic.\n- anatomy-cutaway: anatomically plausible sectional/cutaway view that clearly exposes the internal relationship being explained.\n- procedure-closeup: precise close or macro view of a treatment/action/tool interacting with the relevant structure; clinically plausible, clean and non-gory.\n- symbolic-medical: simple premium object-based metaphor for an abstract point such as timing, prevention, protection, risk or recurrence; still grounded in the narration.\n- clinic-support: realistic environment/detail shot only when the clinic, appointment, equipment or consultation itself is part of the story; never use this as filler.\n\nEvery imagePrompt must describe ONE coherent frame, not a collage or infographic. It must be animation-ready: clear depth layers, separated movable elements, readable subject, clean background, no baked-in motion blur. Do not include text, labels, arrows with words, logos, watermarks or poster layouts. The prompt must directly express the key point and viewer takeaway; do not introduce unrelated topics.\n\nSTORY BEATS:\n${JSON.stringify(beatPayload, null, 2)}`;
+  let attemptPrompt = basePrompt; let lastIssues: string[] = [];
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    await run(options.codexBin, ['exec', '--ephemeral', '--output-schema', schemaPath, '--output-last-message', outputPath, '-'], attemptPrompt);
+    let raw: any;
+    try { raw = JSON.parse(await fs.readFile(outputPath, 'utf8')); } catch (error) { raw = null; lastIssues = [`Visual plan was not valid JSON: ${error instanceof Error ? error.message : String(error)}`]; }
+    if (raw?.scenes && Array.isArray(raw.scenes)) {
+      const byId = new Map<string, string>(); const issues: string[] = [];
+      for (const scene of raw.scenes) {
+        const id = String(scene?.id ?? ''); const imagePrompt = String(scene?.imagePrompt ?? '').trim();
+        if (!options.beats.some((beat) => beat.id === id)) { issues.push(`Unknown visual-plan id ${id || '(blank)'}.`); continue; }
+        if (byId.has(id)) { issues.push(`Duplicate visual-plan id ${id}.`); continue; }
+        if (imagePrompt.length < 80) { issues.push(`${id} has an incomplete image prompt (${imagePrompt.length} characters).`); continue; }
+        byId.set(id, imagePrompt);
+      }
+      for (const beat of options.beats) if (!byId.has(beat.id)) issues.push(`Missing image prompt for ${beat.id}.`);
+      if (!issues.length) return options.beats.map((beat): BrollScene => ({ ...beat, imagePrompt: byId.get(beat.id)!, enabled: true }));
+      lastIssues = issues;
+    }
+    if (attempt < 3) attemptPrompt = `${basePrompt}\n\nREPAIR THE VISUAL PLAN. Return a complete replacement for all beats. Fix every issue:\n${lastIssues.map((issue, index) => `${index + 1}. ${issue}`).join('\\n')}`;
+  }
+  throw new Error(`Codex could not produce a complete visual plan. Remaining issues:\n${lastIssues.map((issue) => `- ${issue}`).join('\\n')}`);
 }
 
 export async function createBrollPlan(options: { codexBin: string; workDir: string; words: BrollWord[]; keepRanges?: BrollKeepRange[]; orientation: 'portrait' | 'landscape'; settings?: Partial<BrollPlanSettings> }) {
   const settings = normalizeSettings(options.settings); const { codexBin, workDir, words, keepRanges, orientation } = options; const { kept } = keptWordIndexes(words, keepRanges);
   const { times } = keptTimeline(words, keepRanges);
-  const transcript = words.map((word, index) => ({ word, index })).filter(({ index }) => kept.has(index)).map(({ word, index }) => { const timeline = times.get(index)!; return `[${word.id} source:${word.start.toFixed(3)}-${word.end.toFixed(3)} final:${timeline.start.toFixed(3)}-${timeline.end.toFixed(3)}] ${word.text}`; }).join('\n');
-  const requestedCount = targetSceneCount(words, keepRanges, settings); const schemaPath = path.join(workDir, 'broll-plan.schema.json'); const outputPath = path.join(workDir, 'codex-broll-plan.json'); await fs.writeFile(schemaPath, JSON.stringify(planSchema(requestedCount), null, 2));
+  const transcript = words.map((word, index) => ({ word, index })).filter(({ index }) => kept.has(index)).map(({ word, index }) => { const timeline = times.get(index)!; return `[${word.id} source:${word.start.toFixed(3)}-${word.end.toFixed(3)} final:${timeline.start.toFixed(3)}-${timeline.end.toFixed(3)}] ${word.text}`; }).join('\\n');
+  const requestedCount = targetSceneCount(words, keepRanges, settings); const schemaPath = path.join(workDir, 'broll-story-plan.schema.json'); const outputPath = path.join(workDir, 'codex-broll-story-plan.json');
+  await fs.writeFile(schemaPath, JSON.stringify(storyPlanSchema(requestedCount), null, 2));
   const targetAspect = settings.aspectRatio === 'auto' ? (orientation === 'portrait' ? 'vertical 9:16' : 'landscape 16:9') : settings.aspectRatio;
   const intervalDurationLimit = settings.countMode === 'interval' ? settings.intervalSeconds - MIN_BROLL_GAP_SECONDS : settings.maxSceneDuration;
-  const plannedMaxDuration = Math.min(settings.maxSceneDuration, intervalDurationLimit);
-  const plannedMinDuration = Math.min(settings.minSceneDuration, plannedMaxDuration);
-  const countInstruction = requestedCount ? `Create exactly ${requestedCount} B-roll scenes.` : `Choose the number of scenes automatically from distinct semantic ideas.`;
+  const plannedMaxDuration = Math.min(settings.maxSceneDuration, intervalDurationLimit); const plannedMinDuration = Math.min(settings.minSceneDuration, plannedMaxDuration);
+  const countInstruction = requestedCount ? `Create exactly ${requestedCount} B-roll story beats.` : `Choose only the strongest story beats automatically. Fewer meaningful visuals are better than filler.`;
   const cadenceInstruction = settings.countMode === 'interval'
-    ? `Plan approximately one B-roll scene in every ${settings.intervalSeconds}-second section of the narration. Place each scene near that cadence but align its start and end to a coherent spoken idea and the supplied word boundaries.`
-    : 'Distribute scenes across the narration according to the strongest semantic ideas; do not bunch them together.';
-  const prompt = `You are the B-roll director and image-prompt writer for a polished talking-head video.\n\n${countInstruction}\n${cadenceInstruction}\n\nHARD SCHEDULING RULE: after one B-roll ends, leave at least ${MIN_BROLL_GAP_SECONDS} full seconds of uninterrupted talking-head footage before the next B-roll starts. This is an end-to-next-start gap, not a start-to-start gap. Never overlap or place B-roll scenes back-to-back. Measure cadence and gaps using the final timestamps supplied for each word; source timestamps may contain footage removed by the dialogue edit. These timing rules must be satisfied while choosing the scene word IDs; the renderer will not repair the schedule.\n\nAnalyze ONLY the supplied narration words. Group narration into distinct visual ideas and do not invent unsupported claims. Every scene must use supplied word IDs and stay chronological.\n\nTARGET FRAME: ${targetAspect}.\nTARGET B-ROLL DURATION: normally ${plannedMinDuration}-${plannedMaxDuration} seconds.\n\nREFERENCE VISUAL LANGUAGE:\n${BROLL_STYLE_PRESET}\n\nWrite complete standalone image prompts with exact subject/action/environment/camera/lens/light/composition/realism. Healthcare/dental scenes must be clinically believable. Prefer authentic Indian context when natural. Require natural skin, hands, teeth/anatomy, real-camera photography, and no text/logos/watermarks/CGI. Vary adjacent compositions.\n\nNARRATION WORDS:\n${transcript}`;
-  let attemptPrompt = prompt; let lastIssues: string[] = [];
+    ? `Aim for approximately one beat in every ${settings.intervalSeconds}-second section, but choose the most meaningful spoken idea in that section rather than generic filler.`
+    : 'Distribute beats across the narration according to narrative value. Do not bunch them together and do not illustrate every sentence.';
+  const prompt = `You are the story editor for a polished talking-head video. Decide WHERE B-roll genuinely improves understanding or storytelling before anyone writes image prompts.\n\n${countInstruction}\n${cadenceInstruction}\n\nHARD SCHEDULING RULE: after one B-roll ends, leave at least ${MIN_BROLL_GAP_SECONDS} full seconds of uninterrupted talking-head footage before the next B-roll starts. This is an end-to-next-start gap, not a start-to-start gap. Never overlap or place B-roll scenes back-to-back. Measure gaps using the final timestamps supplied for each word.\n\nAnalyze ONLY the supplied narration. Identify the key story progression: hook, problem, cause, anatomy/mechanism, progression/consequence, solution, prevention, CTA or a genuinely useful supporting beat. Each chosen beat must add new information or emotional clarity. Reject decorative scenes that merely show a generic clinic, smiling person, doctor, tool or object without helping the viewer understand the current sentence.\n\nFor every beat explain:\n- keyPoint: the single spoken idea this visual must communicate.\n- whyThisVisualMatters: why cutting away from the talking head is worth it here.\n- viewerTakeaway: what the viewer should understand after seeing it.\n- visualMode: select the best storytelling language. Use hyperreal-clinical only when real-world human/environment realism carries the idea. Prefer educational-3d/anatomy-cutaway/procedure-closeup for internal mechanisms and treatment logic; symbolic-medical for abstract ideas; clinic-support only when the clinic itself matters.\n\nTARGET FRAME: ${targetAspect}.\nTARGET B-ROLL DURATION: normally ${plannedMinDuration}-${plannedMaxDuration} seconds.\n\nDo NOT write image prompts yet. This pass is only story structure and visual strategy. Every scene must use supplied word IDs and stay chronological.\n\nNARRATION WORDS:\n${transcript}`;
+  let attemptPrompt = prompt; let lastIssues: string[] = []; let story: { beats: PlannedStoryBeat[]; notes: string[] } | null = null;
   for (let attempt = 1; attempt <= MAX_BROLL_PLAN_ATTEMPTS; attempt += 1) {
     await run(codexBin, ['exec', '--ephemeral', '--output-schema', schemaPath, '--output-last-message', outputPath, '-'], attemptPrompt);
     let raw: any;
-    try { raw = JSON.parse(await fs.readFile(outputPath, 'utf8')); }
-    catch (error) { lastIssues = [`The response was not valid JSON: ${error instanceof Error ? error.message : String(error)}`]; raw = null; }
+    try { raw = JSON.parse(await fs.readFile(outputPath, 'utf8')); } catch (error) { raw = null; lastIssues = [`The story plan was not valid JSON: ${error instanceof Error ? error.message : String(error)}`]; }
     if (raw) {
-      try { const plan = validatePlan(words, keepRanges, raw, orientation, settings); await saveBrollPlan(workDir, plan); return plan; }
+      try { story = validateStoryPlan(words, keepRanges, raw, settings); break; }
       catch (error) { if (!(error instanceof BrollPlanValidationError)) throw error; lastIssues = error.issues; }
     }
-    if (attempt === MAX_BROLL_PLAN_ATTEMPTS) break;
-    const previousPlan = raw ? JSON.stringify(raw, null, 2) : '(unparseable response)';
-    attemptPrompt = `${prompt}\n\nREPAIR PASS ${attempt} OF ${MAX_BROLL_PLAN_ATTEMPTS - 1}\nThe previous full plan failed validation. Re-evaluate the entire schedule and return a complete replacement plan, not a partial patch. Correct every issue below together while preserving strong valid scene ideas and prompts where possible. Recalculate all end-to-next-start gaps using the final timestamps.\n\nALL VALIDATION ISSUES:\n${lastIssues.map((issue, index) => `${index + 1}. ${issue}`).join('\n')}\n\nPREVIOUS PLAN TO REPAIR:\n${previousPlan}`;
+    if (attempt < MAX_BROLL_PLAN_ATTEMPTS) {
+      const previousPlan = raw ? JSON.stringify(raw, null, 2) : '(unparseable response)';
+      attemptPrompt = `${prompt}\n\nREPAIR PASS ${attempt} OF ${MAX_BROLL_PLAN_ATTEMPTS - 1}\nThe previous story plan failed validation. Return a complete replacement plan. Correct every issue while keeping only strong storytelling beats.\n\nALL VALIDATION ISSUES:\n${lastIssues.map((issue, index) => `${index + 1}. ${issue}`).join('\\n')}\n\nPREVIOUS STORY PLAN:\n${previousPlan}`;
+    }
   }
-  throw new Error(`Codex could not produce a valid B-roll plan after ${MAX_BROLL_PLAN_ATTEMPTS} attempts. Remaining issues:\n${lastIssues.map((issue) => `- ${issue}`).join('\n')}`);
+  if (!story) throw new Error(`Codex could not produce a valid B-roll story plan after ${MAX_BROLL_PLAN_ATTEMPTS} attempts. Remaining issues:\n${lastIssues.map((issue) => `- ${issue}`).join('\\n')}`);
+  const scenes = await createVisualPlan({ codexBin, workDir, beats: story.beats, targetAspect });
+  const plan: BrollPlan = { version: 2, orientation, stylePreset: BROLL_STYLE_PRESET, settings, scenes, notes: story.notes };
+  await saveBrollPlan(workDir, plan); return plan;
 }
 
 export async function saveBrollPlan(workDir: string, plan: BrollPlan) { await fs.mkdir(path.join(workDir, 'broll'), { recursive: true }); await fs.writeFile(path.join(workDir, 'broll-plan.json'), JSON.stringify(plan, null, 2)); }
@@ -231,15 +322,23 @@ export async function loadBrollPlan(workDir: string): Promise<BrollPlan | null> 
     raw.settings = normalizeSettings(raw.settings);
     if (raw.googleFlow?.projectId) raw.googleFlow.url = flowProjectUrl(raw.googleFlow.projectId);
     for (const scene of raw.scenes ?? []) {
+      if (scene.beatType) scene.beatType = normalizeBeatType(scene.beatType);
+      if (scene.visualMode) scene.visualMode = normalizeVisualMode(scene.visualMode);
       if (scene.displayTemplate && !BROLL_DISPLAY_TEMPLATES.some((template) => template.id === scene.displayTemplate)) delete scene.displayTemplate;
       if (scene.assetAspectRatio && !['auto', '9:16', '16:9'].includes(scene.assetAspectRatio)) delete scene.assetAspectRatio;
       if (scene.generatedAspectRatio && !['9:16', '16:9'].includes(scene.generatedAspectRatio)) delete scene.generatedAspectRatio;
       if (scene.imageFile && !scene.generatedAspectRatio) scene.generatedAspectRatio = resolveSceneAssetAspect(raw, scene);
       scene.orientationChanged = Boolean(scene.imageFile && scene.generatedAspectRatio !== resolveSceneAssetAspect(raw, scene));
+      scene.imageRevision = Math.max(0, Number(scene.imageRevision) || (scene.imageFile ? 1 : 0));
+      if (!scene.imageStatus) scene.imageStatus = scene.imageFile ? 'ready' : 'none';
+      if (scene.imageStatus === 'ready' && !scene.imageFile) scene.imageStatus = 'none';
       scene.videoAttempts = Array.isArray(scene.videoAttempts) ? scene.videoAttempts : [];
+      if (scene.videoFile && scene.videoSourceImageRevision === undefined) scene.videoSourceImageRevision = scene.imageRevision;
+      if (scene.videoFile && !scene.videoStatus) scene.videoStatus = 'ready';
+      if (!scene.videoFile && !scene.videoStatus) scene.videoStatus = scene.imageFile ? 'none' : 'none';
       if (scene.videoFile && !scene.videoAttempts.length) {
         const id = `legacy-${scene.id}`;
-        scene.videoAttempts.push({ id, source: scene.videoProvider === 'google-flow' ? 'google-flow' : 'grok-cli', status: 'completed', startedAt: scene.videoGeneratedAt ?? new Date(0).toISOString(), completedAt: scene.videoGeneratedAt, model: scene.videoModel, localFile: scene.videoFile });
+        scene.videoAttempts.push({ id, source: scene.videoProvider === 'google-flow' ? 'google-flow' : 'grok-cli', status: 'completed', startedAt: scene.videoGeneratedAt ?? new Date(0).toISOString(), completedAt: scene.videoGeneratedAt, model: scene.videoModel, localFile: scene.videoFile, sourceImageRevision: scene.videoSourceImageRevision ?? scene.imageRevision });
         scene.activeVideoAttemptId = id;
       }
       for (const attempt of scene.videoAttempts) {
@@ -281,9 +380,27 @@ export function planNeedsPresenterMatte(plan: BrollPlan) { return plan.scenes.so
 export function displayTemplateUsesHorizontalBroll(template: BrollDisplayTemplate) { return template !== 'full-frame' && template !== 'presenter-overlay'; }
 
 export function resolveSceneAssetAspect(plan: BrollPlan, scene: BrollScene) { if (scene.assetAspectRatio && scene.assetAspectRatio !== 'auto') return scene.assetAspectRatio; if (displayTemplateUsesHorizontalBroll(resolveSceneDisplayTemplate(plan, scene))) return '16:9'; if (plan.settings.aspectRatio !== 'auto') return plan.settings.aspectRatio; return plan.orientation === 'portrait' ? '9:16' : '16:9'; }
+function visualModeDirective(mode: BrollVisualMode | undefined) {
+  if (mode === 'hyperreal-clinical') return 'Render as premium documentary-style live-action clinical photography. Use people only when the story beat genuinely needs them; keep expressions/actions natural and non-stock-like.';
+  if (mode === 'anatomy-cutaway') return 'Render as a polished, anatomically plausible 3D sectional/cutaway medical visualization with clear internal layers and spatial relationships.';
+  if (mode === 'procedure-closeup') return 'Render as a clinically plausible close or macro treatment view with the relevant tool/material/action clearly readable, clean and non-gory.';
+  if (mode === 'symbolic-medical') return 'Render as a simple premium medical/scientific visual metaphor using a few tangible objects or structures; keep it literal enough that the narration makes the meaning obvious.';
+  if (mode === 'clinic-support') return 'Render as a premium realistic clinic/environment/detail shot because the setting or appointment itself is part of this story beat; avoid generic stock-photo staging.';
+  return 'Render as premium educational 3D/scientific visualization with a clear central concept, readable depth and animation-friendly separated elements.';
+}
 function generatedImagePrompt(scene: BrollScene, plan: BrollPlan, regenerationComment?: string) {
   const requestedChange = regenerationComment?.trim() ? `\n\nUSER REQUEST FOR THIS REGENERATION:\n${regenerationComment.trim()}` : '';
-  return `${scene.imagePrompt}${requestedChange}\n\nFINAL QUALITY BAR: ${BROLL_STYLE_PRESET}\n\nDeliver exactly one hyper-realistic photographic still composed for a ${resolveSceneAssetAspect(plan, scene)} B-roll frame. It must look captured on a real premium camera. Keep the essential subject/action safely centered. Absolutely no text, captions, logos, watermark or graphic-design elements.`;
+  return `${scene.imagePrompt}${requestedChange}
+
+STORY BEAT: ${scene.beatType || 'supporting'}
+KEY POINT: ${scene.keyPoint || scene.visualIntent}
+VIEWER TAKEAWAY: ${scene.viewerTakeaway || scene.visualIntent}
+VISUAL MODE: ${scene.visualMode || 'educational-3d'}
+MODE DIRECTION: ${visualModeDirective(scene.visualMode)}
+
+FINAL QUALITY BAR: ${BROLL_STYLE_PRESET}
+
+Deliver exactly ONE ${resolveSceneAssetAspect(plan, scene)} starting frame for a short image-to-video B-roll clip. This is not a finished poster: keep one dominant idea, clean depth layers and visually separable elements that can later move, reveal, highlight or be explored by the camera. Keep the essential subject safely centered. Absolutely no text, captions, labels, logos, watermarks, UI, collage or graphic-design elements.`;
 }
 function findBase64Image(value: any): string | undefined { if (!value) return undefined; if (typeof value === 'object') { if (typeof value.data === 'string' && (value.type === 'image' || value.mime_type?.startsWith?.('image/'))) return value.data; if (typeof value.b64_json === 'string') return value.b64_json; if (value.output_image) { const nested = findBase64Image(value.output_image); if (nested) return nested; } for (const child of Object.values(value)) { const nested = findBase64Image(child); if (nested) return nested; } } if (Array.isArray(value)) for (const child of value) { const nested = findBase64Image(child); if (nested) return nested; } return undefined; }
 async function generateOpenAi(prompt: string, aspect: '9:16' | '16:9', config: ImageProviderConfig, outputPath: string) { if (!config.openAiApiKey) throw new Error('OPENAI_API_KEY is not configured'); const model = config.openAiModel || 'gpt-image-2'; const size = aspect === '9:16' ? '1024x1536' : '1536x1024'; const response = await fetch('https://api.openai.com/v1/images/generations', { method: 'POST', headers: { Authorization: `Bearer ${config.openAiApiKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ model, prompt, size, quality: 'high' }) }); if (!response.ok) throw new Error(`OpenAI image generation failed: ${response.status} ${await response.text()}`); const encoded = (await response.json() as any).data?.[0]?.b64_json; if (!encoded) throw new Error('OpenAI image generation returned no image data'); await fs.writeFile(outputPath, Buffer.from(encoded, 'base64')); return model; }
@@ -316,24 +433,163 @@ async function generateWithAgentCli(provider: 'grok-cli' | 'codex-cli', prompt: 
   const stat = await fs.stat(outputPath).catch(() => null); if (!stat?.isFile() || stat.size < 10_000) throw new Error('Grok CLI completed without creating a usable image.'); return config.grokModel || 'grok-cli';
 }
 
+function currentImageRevision(scene: BrollScene) { return Math.max(0, Number(scene.imageRevision) || (scene.imageFile ? 1 : 0)); }
+export function hasCurrentBrollVideo(scene: BrollScene) {
+  if (!scene.videoFile || scene.videoStatus === 'stale' || scene.imageStatus === 'generating' || scene.imageStatus === 'failed') return false;
+  const imageRevision = currentImageRevision(scene);
+  const videoRevision = scene.videoSourceImageRevision;
+  return videoRevision === undefined || videoRevision === imageRevision;
+}
+function invalidateSceneVideoForImageChange(scene: BrollScene) {
+  scene.videoFile = undefined;
+  scene.activeVideoAttemptId = undefined;
+  scene.videoGeneratedAt = undefined;
+  scene.videoModel = undefined;
+  scene.videoProvider = undefined;
+  scene.videoPrompt = undefined;
+  scene.animationPlan = undefined;
+  scene.videoSourceImageRevision = undefined;
+  scene.videoStatus = 'stale';
+}
+async function beginSceneImageGeneration(workDir: string, plan: BrollPlan, scene: BrollScene) {
+  scene.imageRevision = currentImageRevision(scene) + 1;
+  scene.imageStatus = 'generating';
+  scene.imageFile = undefined;
+  scene.generatedAt = undefined;
+  scene.model = undefined;
+  scene.generatedAspectRatio = undefined;
+  scene.orientationChanged = false;
+  invalidateSceneVideoForImageChange(scene);
+  const brollDir = path.join(workDir, 'broll');
+  await fs.rm(path.join(brollDir, `${scene.id}.raw.png`), { force: true }).catch(() => undefined);
+  await fs.rm(path.join(brollDir, `${scene.id}.png`), { force: true }).catch(() => undefined);
+  await saveBrollPlan(workDir, plan);
+}
+async function failSceneImageGeneration(workDir: string, plan: BrollPlan, scene: BrollScene) {
+  scene.imageStatus = 'failed';
+  scene.imageFile = undefined;
+  scene.generatedAt = undefined;
+  scene.model = undefined;
+  scene.generatedAspectRatio = undefined;
+  scene.orientationChanged = false;
+  await saveBrollPlan(workDir, plan);
+}
+
 async function normalizeImage(rawPath: string, outputPath: string, aspect: '9:16' | '16:9', ffmpegBin?: string, removeSource = true) {
   if (!ffmpegBin) { await fs.copyFile(rawPath, outputPath); if (removeSource && rawPath !== outputPath) await fs.rm(rawPath, { force: true }); return; }
   const filter = aspect === '9:16' ? 'scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,crop=1080:1920' : 'scale=1920:1080:force_original_aspect_ratio=increase:flags=lanczos,crop=1920:1080';
   await run(ffmpegBin, ['-hide_banner', '-loglevel', 'error', '-y', '-i', rawPath, '-vf', filter, '-frames:v', '1', outputPath], undefined, 120000); if (removeSource && rawPath !== outputPath) await fs.rm(rawPath, { force: true });
 }
 export async function importBrollImage(options: { workDir: string; plan: BrollPlan; sceneId: string; sourcePath: string; ffmpegBin?: string }) {
-  const scene = options.plan.scenes.find((candidate) => candidate.id === options.sceneId); if (!scene) throw new Error('B-roll scene not found'); const brollDir = path.join(options.workDir, 'broll'); await fs.mkdir(brollDir, { recursive: true }); const outputPath = path.join(brollDir, `${scene.id}.png`);
-  const aspect = resolveSceneAssetAspect(options.plan, scene); await normalizeImage(options.sourcePath, outputPath, aspect, options.ffmpegBin, false); scene.imageFile = outputPath; scene.generatedAt = new Date().toISOString(); scene.generatedAspectRatio = aspect; scene.orientationChanged = false; scene.provider = 'manual'; scene.model = 'manual-import'; scene.videoFile = undefined; scene.activeVideoAttemptId = undefined; scene.videoGeneratedAt = undefined; scene.videoModel = undefined; scene.videoProvider = undefined; await saveBrollPlan(options.workDir, options.plan); return scene;
+  const scene = options.plan.scenes.find((candidate) => candidate.id === options.sceneId);
+  if (!scene) throw new Error('B-roll scene not found');
+  const brollDir = path.join(options.workDir, 'broll');
+  await fs.mkdir(brollDir, { recursive: true });
+  const outputPath = path.join(brollDir, `${scene.id}.png`);
+  const aspect = resolveSceneAssetAspect(options.plan, scene);
+  await beginSceneImageGeneration(options.workDir, options.plan, scene);
+  try {
+    await normalizeImage(options.sourcePath, outputPath, aspect, options.ffmpegBin, false);
+    scene.imageFile = outputPath;
+    scene.generatedAt = new Date().toISOString();
+    scene.generatedAspectRatio = aspect;
+    scene.orientationChanged = false;
+    scene.provider = 'manual';
+    scene.model = 'manual-import';
+    scene.imageStatus = 'ready';
+    await saveBrollPlan(options.workDir, options.plan);
+    return scene;
+  } catch (error) {
+    await fs.rm(outputPath, { force: true }).catch(() => undefined);
+    await failSceneImageGeneration(options.workDir, options.plan, scene);
+    throw error;
+  }
 }
+
 export async function generateBrollImage(options: { config: ImageProviderConfig; workDir: string; plan: BrollPlan; sceneId: string; regenerationComment?: string }) {
-  const { config, workDir, plan, sceneId } = options; const scene = plan.scenes.find((candidate) => candidate.id === sceneId); if (!scene) throw new Error('B-roll scene not found'); const provider = plan.settings.provider; const aspect = resolveSceneAssetAspect(plan, scene); const prompt = generatedImagePrompt(scene, plan, options.regenerationComment); const brollDir = path.join(workDir, 'broll'); await fs.mkdir(brollDir, { recursive: true }); const rawPath = path.join(brollDir, `${scene.id}.raw.png`); const outputPath = path.join(brollDir, `${scene.id}.png`); let model: string;
-  if (provider === 'openai') model = await generateOpenAi(prompt, aspect, config, rawPath); else if (provider === 'gemini') model = await generateGemini(prompt, aspect, config, rawPath); else model = await generateWithAgentCli(provider, prompt, config, workDir, rawPath); await normalizeImage(rawPath, outputPath, aspect, config.ffmpegBin, true); scene.imageFile = outputPath; scene.generatedAt = new Date().toISOString(); scene.generatedAspectRatio = aspect; scene.orientationChanged = false; scene.provider = provider; scene.model = model; scene.videoFile = undefined; scene.activeVideoAttemptId = undefined; scene.videoGeneratedAt = undefined; scene.videoModel = undefined; scene.videoProvider = undefined; await saveBrollPlan(workDir, plan); return scene;
+  const { config, workDir, plan, sceneId } = options;
+  const scene = plan.scenes.find((candidate) => candidate.id === sceneId);
+  if (!scene) throw new Error('B-roll scene not found');
+  const provider = plan.settings.provider;
+  const aspect = resolveSceneAssetAspect(plan, scene);
+  const prompt = generatedImagePrompt(scene, plan, options.regenerationComment);
+  const brollDir = path.join(workDir, 'broll');
+  await fs.mkdir(brollDir, { recursive: true });
+  const rawPath = path.join(brollDir, `${scene.id}.raw.png`);
+  const outputPath = path.join(brollDir, `${scene.id}.png`);
+  await beginSceneImageGeneration(workDir, plan, scene);
+  try {
+    let model: string;
+    if (provider === 'openai') model = await generateOpenAi(prompt, aspect, config, rawPath);
+    else if (provider === 'gemini') model = await generateGemini(prompt, aspect, config, rawPath);
+    else model = await generateWithAgentCli(provider, prompt, config, workDir, rawPath);
+    await normalizeImage(rawPath, outputPath, aspect, config.ffmpegBin, true);
+    scene.imageFile = outputPath;
+    scene.generatedAt = new Date().toISOString();
+    scene.generatedAspectRatio = aspect;
+    scene.orientationChanged = false;
+    scene.provider = provider;
+    scene.model = model;
+    scene.imageStatus = 'ready';
+    await saveBrollPlan(workDir, plan);
+    return scene;
+  } catch (error) {
+    await fs.rm(rawPath, { force: true }).catch(() => undefined);
+    await fs.rm(outputPath, { force: true }).catch(() => undefined);
+    await failSceneImageGeneration(workDir, plan, scene);
+    throw error;
+  }
 }
 
 export async function createVideoPrompt(options: { codexBin: string; workDir: string; plan: BrollPlan; sceneId: string }) {
-  const scene = options.plan.scenes.find((candidate) => candidate.id === options.sceneId); if (!scene) throw new Error('B-roll scene not found'); if (!scene.imageFile) throw new Error('Add or generate a B-roll image before creating video'); const schemaPath = path.join(options.workDir, `${scene.id}-video-prompt.schema.json`); const outputPath = path.join(options.workDir, `${scene.id}-video-prompt.json`); const schema = { type: 'object', additionalProperties: false, required: ['videoPrompt'], properties: { videoPrompt: { type: 'string' } } }; await fs.writeFile(schemaPath, JSON.stringify(schema, null, 2)); const duration = Math.max(2, Math.min(12, scene.sourceEnd - scene.sourceStart));
-  const prompt = `You are a cinematic image-to-video motion director. Write ONE production-ready motion prompt that animates the existing still image.\n\nNarration: ${scene.narration}\nVisual intent: ${scene.visualIntent}\nShot type: ${scene.shotType}\nStill-image prompt: ${scene.imagePrompt}\nTarget frame: ${resolveSceneAssetAspect(options.plan, scene)}.\nTarget duration: about ${duration.toFixed(1)} seconds.\n\nPreserve exact people, identity, clothing, anatomy, environment, lighting, composition, frame aspect and clinical details. Add subtle believable breathing/blinking/hand/body/environment motion and restrained camera movement. Do not introduce people/objects/tools/text/logos; do not morph faces, hands, teeth or instruments; do not change ethnicity/age/wardrobe/room. Avoid dramatic camera moves, cuts, lip-sync unless required, and AI warping. Make it feel like real premium live action. Return only videoPrompt in the JSON schema.`;
-  await run(options.codexBin, ['exec', '--ephemeral', '--output-schema', schemaPath, '--output-last-message', outputPath, '-'], prompt); const raw = JSON.parse(await fs.readFile(outputPath, 'utf8')); const videoPrompt = String(raw.videoPrompt ?? '').trim(); if (videoPrompt.length < 30) throw new Error('Codex returned an unusable video prompt'); scene.videoPrompt = videoPrompt; await saveBrollPlan(options.workDir, options.plan); return scene;
+  const scene = options.plan.scenes.find((candidate) => candidate.id === options.sceneId); if (!scene) throw new Error('B-roll scene not found'); if (!scene.imageFile) throw new Error('Add or generate a B-roll image before creating video');
+  const schemaPath = path.join(options.workDir, `${scene.id}-video-prompt.schema.json`); const outputPath = path.join(options.workDir, `${scene.id}-video-prompt.json`);
+  const schema = {
+    type: 'object', additionalProperties: false, required: ['animationPlan', 'videoPrompt'], properties: {
+      animationPlan: {
+        type: 'object', additionalProperties: false, required: ['motionType', 'cameraMove', 'subjectMotion', 'revealSequence', 'highlightTargets', 'avoidMotion'], properties: {
+          motionType: { type: 'string' }, cameraMove: { type: 'string' }, subjectMotion: { type: 'string' },
+          revealSequence: { type: 'array', items: { type: 'string' } }, highlightTargets: { type: 'array', items: { type: 'string' } }, avoidMotion: { type: 'array', items: { type: 'string' } },
+        },
+      },
+      videoPrompt: { type: 'string' },
+    },
+  };
+  await fs.writeFile(schemaPath, JSON.stringify(schema, null, 2)); const duration = Math.max(2, Math.min(12, scene.sourceEnd - scene.sourceStart));
+  const prompt = `You are the animation director for one B-roll story beat. The still image is the FIRST FRAME, not the finished idea. Design a short visual micro-story whose motion helps the viewer understand the spoken point.
+
+Narration: ${scene.narration}
+Beat type: ${scene.beatType || 'supporting'}
+Key point: ${scene.keyPoint || scene.visualIntent}
+Why this visual matters: ${scene.whyThisVisualMatters || scene.visualIntent}
+Viewer takeaway: ${scene.viewerTakeaway || scene.visualIntent}
+Visual mode: ${scene.visualMode || 'educational-3d'}
+Visual intent: ${scene.visualIntent}
+Shot type: ${scene.shotType}
+Still-image prompt: ${scene.imagePrompt}
+Target frame: ${resolveSceneAssetAspect(options.plan, scene)}.
+Target duration: about ${duration.toFixed(1)} seconds.
+
+First create a structured animationPlan:
+- motionType: the storytelling mechanism (reveal, progression, transformation, comparison, demonstration, natural live-action motion, etc.).
+- cameraMove: one restrained camera move that improves comprehension.
+- subjectMotion: exactly what should move or change in the subject.
+- revealSequence: ordered visual beats across the clip; use an empty array if no reveal is needed.
+- highlightTargets: structures/objects/regions that should receive attention through focus, light, color, movement or framing; no text labels.
+- avoidMotion: important things that must remain stable to prevent AI warping or factual confusion.
+
+Then write ONE production-ready videoPrompt based on that plan. Motion must advance the idea, not merely add ambience. Educational/3D/cutaway scenes may reveal layers, show progression, move tools/materials, highlight structures or demonstrate cause-and-effect when supported by the narration. Hyperreal scenes should favor believable human/environment motion and restrained camera movement. Preserve identity, anatomy, composition and clinically important details from the starting image. Do not invent unsupported people, objects, tools, procedures, text or logos. No random morphing, dramatic cuts, lip-sync unless explicitly needed, or decorative motion unrelated to the key point.`;
+  await run(options.codexBin, ['exec', '--ephemeral', '--output-schema', schemaPath, '--output-last-message', outputPath, '-'], prompt);
+  const raw = JSON.parse(await fs.readFile(outputPath, 'utf8')); const videoPrompt = String(raw.videoPrompt ?? '').trim(); const animation = raw.animationPlan ?? {};
+  if (videoPrompt.length < 50) throw new Error('Codex returned an unusable video prompt');
+  const animationPlan: BrollAnimationPlan = {
+    motionType: String(animation.motionType ?? '').trim(), cameraMove: String(animation.cameraMove ?? '').trim(), subjectMotion: String(animation.subjectMotion ?? '').trim(),
+    revealSequence: Array.isArray(animation.revealSequence) ? animation.revealSequence.map((item: unknown) => String(item).trim()).filter(Boolean) : [],
+    highlightTargets: Array.isArray(animation.highlightTargets) ? animation.highlightTargets.map((item: unknown) => String(item).trim()).filter(Boolean) : [],
+    avoidMotion: Array.isArray(animation.avoidMotion) ? animation.avoidMotion.map((item: unknown) => String(item).trim()).filter(Boolean) : [],
+  };
+  if (!animationPlan.motionType || !animationPlan.cameraMove || !animationPlan.subjectMotion) throw new Error('Codex returned an incomplete animation plan');
+  scene.animationPlan = animationPlan; scene.videoPrompt = videoPrompt; await saveBrollPlan(options.workDir, options.plan); return scene;
 }
 export async function generateBrollVideoWithGrokCli(options: { config: ImageProviderConfig; workDir: string; plan: BrollPlan; sceneId: string; regenerationComment?: string }) {
   const scene = options.plan.scenes.find((candidate) => candidate.id === options.sceneId); if (!scene) throw new Error('B-roll scene not found'); if (!scene.imageFile) throw new Error('Add or generate a B-roll image first'); if (!scene.videoPrompt) throw new Error('Create a Codex video prompt first'); if (!options.config.grokBin) throw new Error('Grok CLI was not found. Configure GROK_BIN or install Grok Build.'); const duration = Math.max(2, Math.min(12, scene.sourceEnd - scene.sourceStart)); const videoModel = options.config.grokVideoModel || 'grok-imagine-video-1.5';
@@ -429,15 +685,15 @@ export function resolveMagnificVideoConfig(configuredModel?: string, configuredE
 }
 
 function newVideoAttempt(scene: BrollScene, source: BrollVideoAttempt['source'], model: string, prompt: string) {
-  const attempt: BrollVideoAttempt = { id: randomUUID(), source, status: 'submitted', startedAt: new Date().toISOString(), model, prompt };
-  scene.videoAttempts ??= []; scene.videoAttempts.push(attempt); return attempt;
+  const attempt: BrollVideoAttempt = { id: randomUUID(), source, status: 'submitted', startedAt: new Date().toISOString(), model, prompt, sourceImageRevision: currentImageRevision(scene) };
+  scene.videoAttempts ??= []; scene.videoAttempts.push(attempt); scene.videoStatus = 'generating'; return attempt;
 }
 async function videoAttemptPath(workDir: string, sceneId: string, attemptId: string, extension = '.mp4') { const dir = path.join(workDir, 'broll', 'video-attempts'); await fs.mkdir(dir, { recursive: true }); return path.join(dir, `${sceneId}-${attemptId}${extension}`); }
 async function validateVideo(file: string, ffmpegBin: string | undefined, missingMessage: string) { const stat = await fs.stat(file).catch(() => null); if (!stat?.isFile() || stat.size < 50_000) throw new Error(missingMessage); if (ffmpegBin) await run(ffmpegBin, ['-v', 'error', '-i', file, '-f', 'null', '-'], undefined, 120000); }
 async function stripVideoAudio(file: string, ffmpegBin?: string) { if (!ffmpegBin) throw new Error('FFmpeg is required when “Return video with audio” is disabled.'); const extension = path.extname(file) || '.mp4'; const silentPath = `${file}.silent${extension}`; try { await run(ffmpegBin, ['-hide_banner', '-loglevel', 'error', '-y', '-i', file, '-map', '0:v:0', '-c:v', 'copy', '-an', '-movflags', '+faststart', silentPath], undefined, 120000); await fs.rename(silentPath, file); } finally { await fs.rm(silentPath, { force: true }); } }
-function completeVideoAttempt(scene: BrollScene, attempt: BrollVideoAttempt, outputPath: string, model: string, provider: VideoProvider) { const completedAt = new Date().toISOString(); attempt.status = 'completed'; attempt.completedAt = completedAt; attempt.localFile = outputPath; scene.activeVideoAttemptId = attempt.id; scene.videoFile = outputPath; scene.videoGeneratedAt = completedAt; scene.videoModel = model; scene.videoProvider = provider; }
+function completeVideoAttempt(scene: BrollScene, attempt: BrollVideoAttempt, outputPath: string, model: string, provider: VideoProvider) { const completedAt = new Date().toISOString(); attempt.status = 'completed'; attempt.completedAt = completedAt; attempt.localFile = outputPath; attempt.sourceImageRevision ??= currentImageRevision(scene); scene.activeVideoAttemptId = attempt.id; scene.videoFile = outputPath; scene.videoGeneratedAt = completedAt; scene.videoModel = model; scene.videoProvider = provider; scene.videoSourceImageRevision = attempt.sourceImageRevision; scene.videoStatus = 'ready'; }
 function conciseAttemptError(detail: string) { if (/"event": "migrated\.status"[^\n]*"status": 4|"status": 4[^\n]*"event": "migrated\.status"/.test(detail)) return 'Google Flow accepted the submission but the Veo generation failed (Flow status 4). Open the saved Flow project to inspect or create the scene manually.'; const nonLog = detail.split(/\r?\n/).filter((line) => line.trim() && !line.trim().startsWith('{')); return (nonLog.at(-1) || detail.split(/\r?\n/).filter(Boolean).at(-1) || 'Video generation failed').slice(0, 1000); }
-async function failVideoAttempt(workDir: string, plan: BrollPlan, attempt: BrollVideoAttempt, error: unknown) { const detail = error instanceof Error ? error.message : String(error); attempt.status = 'failed'; attempt.completedAt = new Date().toISOString(); attempt.error = conciseAttemptError(detail); const logDir = path.join(workDir, 'broll', 'generation-logs'); await fs.mkdir(logDir, { recursive: true }); attempt.errorLogFile = path.join(logDir, `${attempt.id}.log`); await fs.writeFile(attempt.errorLogFile, detail); await saveBrollPlan(workDir, plan); }
+async function failVideoAttempt(workDir: string, plan: BrollPlan, attempt: BrollVideoAttempt, error: unknown) { const detail = error instanceof Error ? error.message : String(error); attempt.status = 'failed'; attempt.completedAt = new Date().toISOString(); attempt.error = conciseAttemptError(detail); const scene = plan.scenes.find((candidate) => candidate.videoAttempts?.some((candidateAttempt) => candidateAttempt.id === attempt.id)); if (scene && !hasCurrentBrollVideo(scene)) scene.videoStatus = scene.imageFile ? 'stale' : 'none'; const logDir = path.join(workDir, 'broll', 'generation-logs'); await fs.mkdir(logDir, { recursive: true }); attempt.errorLogFile = path.join(logDir, `${attempt.id}.log`); await fs.writeFile(attempt.errorLogFile, detail); await saveBrollPlan(workDir, plan); }
 function parseJsonObject(text: string) { const trimmed = text.trim(); if (!trimmed) return null; try { return JSON.parse(trimmed); } catch { const start = trimmed.indexOf('{'); const end = trimmed.lastIndexOf('}'); if (start >= 0 && end > start) { try { return JSON.parse(trimmed.slice(start, end + 1)); } catch { return null; } } return null; } }
 function flowProjectUrl(projectId: string) { return `https://flow.google.com/project/${projectId}`; }
 function captureFlowAttemptIds(attempt: BrollVideoAttempt, detail: string) { for (const line of detail.split(/\r?\n/)) { const start = line.indexOf('{'); if (start < 0) continue; try { const event = JSON.parse(line.slice(start)); if (event.event === 'migrated.submit_observed') { if (event.media_id) attempt.flowMediaId = String(event.media_id); if (event.workflow_id) attempt.flowWorkflowId = String(event.workflow_id); } } catch { /* Keep parsing later structured log lines. */ } } }

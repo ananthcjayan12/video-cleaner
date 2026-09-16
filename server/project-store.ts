@@ -1,6 +1,6 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { loadBrollPlan, type BrollPlan } from './broll.js';
+import { loadBrollPlan, type BrollPlan, type BrollScene } from './broll.js';
 
 export type Word = { id: string; text: string; start: number; end: number };
 export type KeepRange = { startWordId: string; endWordId: string; reason?: string };
@@ -81,6 +81,68 @@ async function statFile(filePath?: string) {
   return stat?.isFile() ? stat : null;
 }
 async function exists(filePath?: string) { return Boolean(await statFile(filePath)); }
+
+type BrollAssetKind = 'image' | 'video';
+
+function absoluteProjectPath(workDir: string, filePath?: string) {
+  if (!filePath) return undefined;
+  return path.isAbsolute(filePath) ? filePath : path.resolve(workDir, filePath);
+}
+
+async function matchingFiles(directory: string, prefix: string, extensions: Set<string>) {
+  const entries = await fs.readdir(directory, { withFileTypes: true }).catch(() => []);
+  const matches: Array<{ path: string; mtimeMs: number }> = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.startsWith(prefix)) continue;
+    const extension = path.extname(entry.name).toLowerCase();
+    if (!extensions.has(extension)) continue;
+    const filePath = path.join(directory, entry.name);
+    const stat = await statFile(filePath);
+    if (stat) matches.push({ path: filePath, mtimeMs: stat.mtimeMs });
+  }
+  return matches.sort((a, b) => b.mtimeMs - a.mtimeMs).map((match) => match.path);
+}
+
+async function resolvedBrollAsset(workDir: string, scene: BrollScene, kind: BrollAssetKind) {
+  const brollDir = path.join(workDir, 'broll');
+  const candidates: string[] = [];
+  const add = (filePath?: string) => {
+    const absolute = absoluteProjectPath(workDir, filePath);
+    if (absolute && !candidates.includes(absolute)) candidates.push(absolute);
+  };
+
+  const imageRevision = Math.max(0, Number(scene.imageRevision) || (scene.imageFile ? 1 : 0));
+  const currentImage = scene.imageStatus !== 'generating' && scene.imageStatus !== 'failed';
+  const currentVideo = kind === 'video'
+    ? currentImage && scene.videoStatus !== 'stale' && (scene.videoSourceImageRevision === undefined || scene.videoSourceImageRevision === imageRevision)
+    : true;
+
+  if (kind === 'image' && currentImage) add(scene.imageFile);
+  else if (kind === 'video' && currentVideo) add(scene.videoFile);
+
+  if (kind === 'video' && currentVideo) {
+    const attempts = (scene.videoAttempts ?? [])
+      .filter((attempt) => attempt.status === 'completed' && (attempt.sourceImageRevision === undefined || attempt.sourceImageRevision === imageRevision))
+      .sort((a, b) => (a.id === scene.activeVideoAttemptId ? -1 : 0) - (b.id === scene.activeVideoAttemptId ? -1 : 0) || String(b.completedAt ?? b.startedAt).localeCompare(String(a.completedAt ?? a.startedAt)));
+    for (const attempt of attempts) add(attempt.localFile);
+  }
+
+  if ((kind === 'image' && currentImage) || (kind === 'video' && currentVideo)) add(path.join(brollDir, `${scene.id}${kind === 'image' ? '.png' : '.mp4'}`));
+  const extensions = kind === 'image' ? new Set(['.png', '.jpg', '.jpeg', '.webp', '.heic', '.heif']) : new Set(['.mp4', '.mov', '.m4v', '.webm']);
+  const canonicalMatches = (kind === 'image' && !currentImage) || (kind === 'video' && !currentVideo) ? [] : await matchingFiles(brollDir, `${scene.id}.`, extensions);
+  for (const match of canonicalMatches) add(match);
+  if (kind === 'video' && currentVideo) {
+    const attemptMatches = await matchingFiles(path.join(brollDir, 'video-attempts'), `${scene.id}-`, extensions);
+    for (const match of attemptMatches) add(match);
+  }
+
+  for (const candidate of candidates) if (await statFile(candidate)) return candidate;
+  return undefined;
+}
+
+export async function resolveBrollAssetPath(workDir: string, scene: BrollScene, kind: BrollAssetKind) {
+  return resolvedBrollAsset(workDir, scene, kind);
+}
 
 export function projectClips(project: Project): ProjectClip[] {
   if (project.clips?.length) return project.clips;
@@ -222,23 +284,36 @@ export async function scanProjects(projectsDir: string) {
   return loaded.filter((project): project is Project => Boolean(project));
 }
 
-async function reconcileBrollFiles(project: Project, plan: BrollPlan | null) {
+export async function reconcileBrollFiles(project: Project, plan: BrollPlan | null) {
   if (!plan) return null;
   let changed = false;
   for (const scene of plan.scenes) {
-    const imageCandidate = path.join(project.workDir, 'broll', `${scene.id}.png`);
-    const videoCandidate = path.join(project.workDir, 'broll', `${scene.id}.mp4`);
-    const storedImage = await statFile(scene.imageFile);
-    const candidateImage = await statFile(imageCandidate);
-    const diskImage = storedImage ?? candidateImage;
-    if (diskImage && !storedImage) { scene.imageFile = imageCandidate; scene.generatedAt ||= diskImage.mtime.toISOString(); changed = true; }
-    if (!diskImage && scene.imageFile) { scene.imageFile = undefined; scene.generatedAt = undefined; scene.model = undefined; changed = true; }
+    const imagePath = await resolvedBrollAsset(project.workDir, scene, 'image');
+    const imageStat = await statFile(imagePath);
+    if (imagePath && (scene.imageFile !== imagePath || !scene.generatedAt || scene.imageStatus !== 'ready')) {
+      scene.imageFile = imagePath;
+      scene.generatedAt ||= imageStat?.mtime.toISOString();
+      scene.imageStatus = 'ready';
+      changed = true;
+    } else if (!imagePath && scene.imageFile) {
+      scene.imageFile = undefined; scene.generatedAt = undefined; scene.model = undefined;
+      if (scene.imageStatus !== 'generating' && scene.imageStatus !== 'failed') scene.imageStatus = 'none';
+      changed = true;
+    }
 
-    const storedVideo = await statFile(scene.videoFile);
-    const candidateVideo = await statFile(videoCandidate);
-    const diskVideo = storedVideo ?? candidateVideo;
-    if (diskVideo && !storedVideo) { scene.videoFile = videoCandidate; scene.videoGeneratedAt ||= diskVideo.mtime.toISOString(); changed = true; }
-    if (!diskVideo && scene.videoFile) { scene.videoFile = undefined; scene.videoGeneratedAt = undefined; scene.videoModel = undefined; changed = true; }
+    scene.imageRevision = Math.max(0, Number(scene.imageRevision) || (scene.imageFile ? 1 : 0));
+    if (!scene.imageStatus) scene.imageStatus = scene.imageFile ? 'ready' : 'none';
+    const videoPath = await resolvedBrollAsset(project.workDir, scene, 'video');
+    const videoStat = await statFile(videoPath);
+    if (videoPath && (scene.videoFile !== videoPath || !scene.videoGeneratedAt || scene.videoStatus !== 'ready')) {
+      scene.videoFile = videoPath;
+      scene.videoGeneratedAt ||= videoStat?.mtime.toISOString();
+      scene.videoSourceImageRevision ??= scene.imageRevision;
+      scene.videoStatus = 'ready';
+      changed = true;
+    } else if (!videoPath && scene.videoFile) {
+      scene.videoFile = undefined; scene.videoGeneratedAt = undefined; scene.videoModel = undefined; scene.videoProvider = undefined; scene.activeVideoAttemptId = undefined; scene.videoSourceImageRevision = undefined; scene.videoStatus = scene.imageFile ? 'stale' : 'none'; changed = true;
+    }
   }
   if (changed) await atomicWriteJson(path.join(project.workDir, 'broll-plan.json'), plan);
   return plan;
@@ -255,9 +330,9 @@ export async function summarizeProject(project: Project, brollPlan?: BrollPlan |
   const loadedPlan = brollPlan === undefined ? await loadBrollPlan(project.workDir) : brollPlan;
   const plan = await reconcileBrollFiles(project, loadedPlan ?? null);
   const scenes = plan?.scenes ?? [];
-  const brollImages = scenes.filter((scene) => Boolean(scene.imageFile)).length;
-  const brollVideos = scenes.filter((scene) => Boolean(scene.videoFile)).length;
-  const videoEligible = scenes.filter((scene) => Boolean(scene.imageFile)).length;
+  const brollImages = scenes.filter((scene) => Boolean(scene.imageFile) && scene.imageStatus !== 'generating' && scene.imageStatus !== 'failed').length;
+  const brollVideos = scenes.filter((scene) => Boolean(scene.videoFile) && scene.imageStatus !== 'generating' && scene.imageStatus !== 'failed' && scene.videoStatus !== 'stale' && (scene.videoSourceImageRevision === undefined || scene.videoSourceImageRevision === scene.imageRevision)).length;
+  const videoEligible = scenes.filter((scene) => Boolean(scene.imageFile) && scene.imageStatus !== 'generating' && scene.imageStatus !== 'failed').length;
   const sourceName = clips.length > 1 ? `${clips.length} clips · ${clips[0].sourceName}${clips.length > 1 ? ` + ${clips.length - 1} more` : ''}` : project.sourceName;
   return {
     id: project.id,

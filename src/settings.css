@@ -119,6 +119,37 @@ button.danger:hover:not(:disabled) { background:rgba(127,29,29,.28); border-colo
 .sceneMeta { display:flex; gap:6px; flex-wrap:wrap; }
 .sceneMeta span { font-size:10px; color:#a1a1aa; background:#18181b; border-radius:999px; padding:5px 7px; }
 .sceneMeta .videoBadge { color:#93c5fd; border:1px solid #1e3a8a; background:rgba(30,58,138,.22); }
+.sceneMeta .staleBadge { color:#fde68a; border:1px solid #854d0e; background:rgba(133,77,14,.18); }
+.sceneMeta .imageGeneratingBadge { color:#67e8f9; border:1px solid #155e75; background:rgba(21,94,117,.2); }
+.sceneMeta .imageFailedBadge { color:#fca5a5; border:1px solid #7f1d1d; background:rgba(127,29,29,.18); }
+.brollPlaceholder.generatingAsset small,.brollPlaceholder.failedAsset small { max-width:220px; text-align:center; line-height:1.45; }
+.brollPlaceholder.failedAsset span { color:#fca5a5; }
+.thumbnailPanel { display:flex; flex-direction:column; gap:12px; margin:0 0 16px; padding:14px; border:1px solid #155e75; border-radius:14px; background:linear-gradient(135deg,rgba(8,47,73,.22),rgba(13,78,74,.12)); }
+.thumbnailHead { display:flex; align-items:flex-start; justify-content:space-between; gap:14px; }
+.thumbnailHead > div:first-child { display:flex; flex-direction:column; gap:4px; min-width:0; }
+.thumbnailHead strong { color:#f4f4f5; font-size:13px; }
+.thumbnailHead small { color:#a1a1aa; font-size:10px; line-height:1.45; max-width:760px; }
+.thumbnailActions { display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; }
+.thumbnailHook { display:flex; flex-direction:column; gap:6px; color:#a1a1aa; font-size:11px; }
+.thumbnailWarning { margin:0; color:#fde68a; font-size:10px; line-height:1.45; }
+.thumbnailRefs { display:flex; gap:9px; flex-wrap:wrap; }
+.thumbnailRefs figure { width:92px; margin:0; }
+.thumbnailRefs img { width:92px; aspect-ratio:9/16; object-fit:cover; display:block; border:1px solid #3f3f46; border-radius:9px; background:#09090b; }
+.thumbnailRefs figcaption { margin-top:4px; color:#71717a; font-size:8px; line-height:1.25; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.thumbnailResult { display:grid; grid-template-columns:minmax(140px,220px) minmax(0,1fr); gap:14px; align-items:start; padding-top:12px; border-top:1px solid #164e63; }
+.thumbnailResult > img { width:100%; aspect-ratio:9/16; object-fit:cover; border-radius:12px; border:1px solid #3f3f46; background:#000; }
+.thumbnailResult > div { display:flex; flex-direction:column; gap:5px; padding-top:4px; }
+.thumbnailResult strong { color:#e4e4e7; font-size:12px; }
+.thumbnailResult small { color:#a1a1aa; font-size:10px; line-height:1.45; }
+.sceneMeta .storyBadge { color:#c4b5fd; border:1px solid #4c1d95; background:rgba(76,29,149,.2); text-transform:uppercase; }
+.sceneMeta .modeBadge { color:#67e8f9; border:1px solid #155e75; background:rgba(21,94,117,.2); }
+.storyBrief { display:grid; gap:6px; padding:10px; border:1px solid #27272a; border-radius:10px; background:#111113; }
+.storyBrief > div,.animationBrief > div { display:grid; grid-template-columns:110px minmax(0,1fr); gap:8px; align-items:start; }
+.storyBrief strong,.animationBrief strong { color:#a1a1aa; font-size:9px; text-transform:uppercase; letter-spacing:.05em; }
+.storyBrief span,.animationBrief span { color:#d4d4d8; font-size:10px; line-height:1.45; }
+.animationBrief { border:1px solid #27272a; background:#151517; border-radius:10px; padding:9px; }
+.animationBrief summary { cursor:pointer; color:#c4b5fd; font-size:10px; font-weight:700; margin-bottom:7px; }
+.animationBrief > div + div { margin-top:5px; }
 .videoAttempts { border:1px solid #27272a; background:#151517; border-radius:10px; padding:8px; }
 .videoAttempts summary { cursor:pointer; color:#a1a1aa; font-size:10px; font-weight:700; }
 .videoAttempt { display:flex; flex-direction:column; gap:3px; margin-top:7px; padding-top:7px; border-top:1px solid #27272a; font-size:9px; color:#a1a1aa; overflow-wrap:anywhere; }
@@ -182,4 +213,8 @@ textarea:focus { border-color:#71717a; }
   .clipTimelineHead{align-items:flex-start;flex-direction:column}
   .sourceWarning{align-items:flex-start;flex-direction:column}
   .exportOptionsGrid{grid-template-columns:1fr}
+  .thumbnailHead{flex-direction:column}
+  .thumbnailActions{justify-content:flex-start}
+  .thumbnailResult{grid-template-columns:1fr}
+  .thumbnailResult>img{max-width:240px}
 }

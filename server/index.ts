@@ -34,12 +34,15 @@ import {
 } from './broll.js';
 import { ensurePresenterMatte, mattingSystemStatus, presenterMatteStatus, type PresenterMatteSpecInput } from './presenter.js';
 import { exportProjectZip, normalizeProjectExportOptions } from './project-export.js';
+import { generateProjectThumbnail, loadThumbnailState, replaceThumbnailReferences, thumbnailImageFile, thumbnailReferenceFile, thumbnailStateView } from './thumbnail.js';
 import {
   atomicWriteJson,
   clipAtTimelineTime,
   loadProjectDirectory,
   loadProjectSnapshot,
   projectClips,
+  reconcileBrollFiles,
+  resolveBrollAssetPath,
   saveProject,
   scanProjects,
   splitTimelineRange,
@@ -247,6 +250,26 @@ async function pickNativeImageFile() {
   const { stdout } = await run('zenity', ['--file-selection', '--title=Choose a B-roll image', '--file-filter=Images | *.png *.jpg *.jpeg *.webp *.heic *.heif']); return stdout.trim();
 }
 
+async function pickNativeImageFiles(prompt = 'Choose thumbnail style / brand references') {
+  if (process.platform === 'darwin') {
+    const script = `set chosenFiles to choose file with prompt ${JSON.stringify(prompt)} with multiple selections allowed
+set output to ""
+repeat with chosenFile in chosenFiles
+set output to output & POSIX path of chosenFile & linefeed
+end repeat
+return output`;
+    const { stdout } = await run('osascript', ['-e', script]);
+    return stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+  }
+  if (process.platform === 'win32') {
+    const script = ['Add-Type -AssemblyName System.Windows.Forms;', '$d = New-Object System.Windows.Forms.OpenFileDialog;', '$d.Filter = "Image files|*.png;*.jpg;*.jpeg;*.webp;*.heic;*.heif|All files|*.*";', '$d.Multiselect = $true;', 'if ($d.ShowDialog() -eq "OK") { $d.FileNames | ForEach-Object { Write-Output $_ } }'].join(' ');
+    const { stdout } = await run('powershell', ['-NoProfile', '-Command', script]);
+    return stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+  }
+  const { stdout } = await run('zenity', ['--file-selection', '--multiple', '--separator=\n', `--title=${prompt}`, '--file-filter=Images | *.png *.jpg *.jpeg *.webp *.heic *.heif']);
+  return stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+}
+
 async function pickExportPath(defaultName = 'cleaned-video.mp4', prompt = 'Export video') {
   if (process.platform === 'darwin') { const script = `POSIX path of (choose file name with prompt ${JSON.stringify(prompt)} default name ${JSON.stringify(defaultName)})`; const { stdout } = await run('osascript', ['-e', script]); return stdout.trim(); }
   if (process.platform === 'win32') { const script = ['Add-Type -AssemblyName System.Windows.Forms;', '$d = New-Object System.Windows.Forms.SaveFileDialog;', '$d.Filter = "MP4 video|*.mp4";', `$d.FileName = ${JSON.stringify(defaultName)};`, 'if ($d.ShowDialog() -eq "OK") { Write-Output $d.FileName }'].join(' '); const { stdout } = await run('powershell', ['-NoProfile', '-Command', script]); return stdout.trim(); }
@@ -386,6 +409,118 @@ async function renderBrollScenePreview(project: Project, plan: BrollPlan, sceneI
   await run(ffmpegBin, ['-hide_banner', '-loglevel', 'error', '-y', '-i', segmentPath, ...brollInputs, ...presenterInput, '-filter_complex', filter, '-map', '[vout]', '-map', '[aout]', '-t', duration.toFixed(6), '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p', ...bt709ColorArgs(), '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', previewPath], undefined, 600_000);
   const resultStat = await fs.stat(previewPath).catch(() => null); if (!resultStat?.isFile() || resultStat.size < 10_000) throw new Error('Scene preview finished without creating a playable video');
   await atomicWriteJson(metaPath, { cacheKey, generatedAt: new Date().toISOString(), duration, template }); return { previewPath, cacheKey, duration, cached: false };
+}
+
+async function renderBrollProjectPreview(project: Project, plan: BrollPlan, ffmpegBin: string) {
+  const proxyCandidate = project.proxyPath ? (path.isAbsolute(project.proxyPath) ? project.proxyPath : path.resolve(project.workDir, project.proxyPath)) : '';
+  const proxyStat = await fs.stat(proxyCandidate).catch(() => null);
+  if (!proxyCandidate || !proxyStat?.isFile() || proxyStat.size < 10_000) throw new Error('Create or restore the proxy video before previewing the complete B-roll video.');
+
+  const resolvedScenes = await Promise.all(plan.scenes.map(async (scene) => {
+    const [imageFile, videoFile] = await Promise.all([
+      resolveBrollAssetPath(project.workDir, scene, 'image'),
+      resolveBrollAssetPath(project.workDir, scene, 'video'),
+    ]);
+    return { ...scene, imageFile, videoFile };
+  }));
+  const activeScenes = resolvedScenes.filter((scene) => scene.enabled && (scene.videoFile || scene.imageFile));
+  if (!activeScenes.length) throw new Error('Add at least one enabled B-roll image or video before previewing');
+
+  const proxyMedia = await probe(proxyCandidate);
+  const dimensions = proxySize(proxyMedia, 720);
+  const fps = Math.min(30, Math.max(15, proxyMedia.frameRate || project.media.frameRate || 30));
+  const cleanedSegments = plan.settings.workflowMode === 'cleaned-video' && project.transcript?.words.length && project.edl?.keepRanges.length ? rangesToSeconds(project) : undefined;
+  const previewDuration = cleanedSegments?.length
+    ? cleanedSegments.reduce((total, segment) => total + Math.max(0, segment.end - segment.start), 0)
+    : proxyMedia.duration;
+  if (!Number.isFinite(previewDuration) || previewDuration <= 0) throw new Error('The proxy video has no usable duration for previewing.');
+
+  const assetStats = await Promise.all(activeScenes.map(async (scene) => {
+    const assetPath = scene.videoFile || scene.imageFile!;
+    const stat = await fs.stat(assetPath);
+    return { id: scene.id, path: assetPath, size: stat.size, mtime: stat.mtimeMs };
+  }));
+  const cacheKey = createHash('sha256').update(JSON.stringify({
+    previewPipeline: 1,
+    proxyPath: proxyCandidate,
+    proxySize: proxyStat.size,
+    proxyMtime: proxyStat.mtimeMs,
+    duration: proxyMedia.duration,
+    width: dimensions.width,
+    height: dimensions.height,
+    fps,
+    cleanedSegments,
+    workflowMode: plan.settings.workflowMode,
+    displayTemplate: plan.settings.displayTemplate,
+    scenes: activeScenes.map((scene) => ({
+      id: scene.id,
+      sourceStart: scene.sourceStart,
+      sourceEnd: scene.sourceEnd,
+      displayTemplate: scene.displayTemplate,
+      imageFile: scene.imageFile,
+      videoFile: scene.videoFile,
+      generatedAt: scene.generatedAt,
+      videoGeneratedAt: scene.videoGeneratedAt,
+    })),
+    assetStats,
+  })).digest('hex').slice(0, 16);
+  const previewDir = path.join(project.workDir, 'previews', 'project');
+  const previewPath = path.join(previewDir, 'preview.mp4');
+  const metaPath = path.join(previewDir, 'preview.json');
+  await fs.mkdir(previewDir, { recursive: true });
+  const [previewOutputStat, cachedMeta] = await Promise.all([
+    fs.stat(previewPath).catch(() => null),
+    fs.readFile(metaPath, 'utf8').then((value) => JSON.parse(value)).catch(() => null),
+  ]);
+  if (previewOutputStat?.isFile() && previewOutputStat.size > 10_000 && cachedMeta?.cacheKey === cacheKey) {
+    return { previewPath, cacheKey, duration: Number(cachedMeta.duration) || previewDuration, cached: true, sceneCount: activeScenes.length };
+  }
+
+  const previewPlan: BrollPlan = {
+    ...plan,
+    settings: { ...plan.settings, workflowMode: 'raw-video' },
+    scenes: resolvedScenes,
+  };
+  let mattePath: string | undefined;
+  if (planNeedsPresenterMatte(previewPlan)) {
+    const matte = await ensurePresenterMatte({ workDir: previewDir, sourcePath: proxyCandidate, proxyPath: proxyCandidate, width: dimensions.width, height: dimensions.height, ffmpegBin });
+    mattePath = matte.maskPath;
+    if (!mattePath) throw new Error('Presenter cutout preview could not prepare its alpha mask');
+  }
+  const assetColors: Record<string, MediaProfile> = {};
+  for (const scene of activeScenes) assetColors[scene.id] = await probe((scene.videoFile || scene.imageFile)!);
+  const includeAudio = Boolean(proxyMedia.audioCodec);
+  const baseVideoFilter = sdrBt709VideoFilter(proxyMedia, [rotationFilter(proxyMedia.rotation), `scale=${dimensions.width}:${dimensions.height}:flags=fast_bilinear`, `fps=${fps.toFixed(6)}`].filter(Boolean));
+  const { filter, activeScenes: filterScenes } = buildBrollOverlayFilter({
+    plan: previewPlan,
+    width: dimensions.width,
+    height: dimensions.height,
+    fps,
+    cleanedSegments: cleanedSegments?.length ? cleanedSegments : undefined,
+    presenterInputIndex: mattePath ? activeScenes.length + 1 : undefined,
+    includeAudio,
+    baseVideoFilter,
+    assetColors,
+  });
+  const brollInputs = filterScenes.flatMap((scene) => scene.videoFile
+    ? ['-stream_loop', '-1', '-i', scene.videoFile]
+    : ['-loop', '1', '-framerate', String(fps), '-i', scene.imageFile!]);
+  const presenterInput = mattePath ? ['-i', mattePath] : [];
+  const audioOutput = includeAudio ? ['-map', '[aout]', '-c:a', 'aac', '-b:a', '96k'] : ['-an'];
+  await run(ffmpegBin, [
+    '-hide_banner', '-loglevel', 'error', '-y',
+    '-noautorotate', '-display_rotation:v', '0', '-i', proxyCandidate,
+    ...brollInputs, ...presenterInput,
+    '-filter_complex', filter,
+    '-map', '[vout]', ...audioOutput,
+    '-t', previewDuration.toFixed(6),
+    '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '30', '-pix_fmt', 'yuv420p',
+    ...bt709ColorArgs(), '-movflags', '+faststart', previewPath,
+  ], undefined, 900_000);
+  const resultStat = await fs.stat(previewPath).catch(() => null);
+  if (!resultStat?.isFile() || resultStat.size < 10_000) throw new Error('Complete B-roll preview finished without creating a playable video');
+  await atomicWriteJson(metaPath, { cacheKey, generatedAt: new Date().toISOString(), duration: previewDuration, sceneCount: activeScenes.length });
+  return { previewPath, cacheKey, duration: previewDuration, cached: false, sceneCount: activeScenes.length };
 }
 
 async function ensureAnalysisAudio(project: Project) {
@@ -606,7 +741,7 @@ app.post('/api/projects/:id/clean', route(async (req, res) => {
 app.put('/api/projects/:id/edl', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); if (!project.transcript) throw new Error('Missing transcript'); project.edl = validateEdl(project.transcript.words, { keepRanges: req.body?.keepRanges, notes: ['Manually adjusted'] }); await invalidateBroll(project); await atomicWriteJson(path.join(project.workDir, 'edl.json'), project.edl); res.json(project.edl); }));
 
 app.post('/api/projects/:id/broll/plan', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const settings = await resolvedSettings(); if (!settings.codexBin) throw new Error('Codex CLI was not found; it is required for B-roll scene planning.'); const transcript = await transcribeProject(project); const requested = (req.body?.settings ?? {}) as Partial<BrollPlanSettings>; const workflowMode = ['cleaned-video', 'raw-video', 'assets-only'].includes(String(requested.workflowMode)) ? requested.workflowMode : 'cleaned-video'; const keepRanges = workflowMode === 'cleaned-video' ? project.edl?.keepRanges : undefined; const orientation = (project.media.height || 0) > (project.media.width || 0) ? 'portrait' : 'landscape'; const plan = await createBrollPlan({ codexBin: settings.codexBin, workDir: project.workDir, words: transcript.words, keepRanges, orientation, settings: { ...requested, provider: requested.provider || settings.imageProvider } }); brollPlans.set(project.id, plan); await touchProject(project); res.json({ plan, transcript, edl: project.edl }); }));
-app.get('/api/projects/:id/broll', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const cached = brollPlans.get(project.id); if (cached) return void res.json(cached); const plan = await loadBrollPlan(project.workDir); if (!plan) return void res.status(404).json({ error: 'B-roll plan has not been created yet' }); brollPlans.set(project.id, plan); res.json(plan); }));
+app.get('/api/projects/:id/broll', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const cached = brollPlans.get(project.id); const plan = await reconcileBrollFiles(project, cached ?? await loadBrollPlan(project.workDir)); if (!plan) return void res.status(404).json({ error: 'B-roll plan has not been created yet' }); brollPlans.set(project.id, plan); res.json(plan); }));
 app.put('/api/projects/:id/broll/settings', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet'); const patch: Partial<Pick<BrollPlanSettings, 'videoProvider' | 'returnVideoWithAudio'>> = {}; if (typeof req.body?.videoProvider === 'string') patch.videoProvider = videoProviderValue(req.body.videoProvider); if (typeof req.body?.returnVideoWithAudio === 'boolean') patch.returnVideoWithAudio = req.body.returnVideoWithAudio; const updated = await updateBrollSettings(project.workDir, plan, patch); brollPlans.set(project.id, updated); await touchProject(project); res.json(updated); }));
 app.put('/api/projects/:id/broll/scenes/:sceneId', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id)); const sceneId = routeParam(req.params.sceneId); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet');
@@ -615,6 +750,57 @@ app.put('/api/projects/:id/broll/scenes/:sceneId', route(async (req, res) => {
   const scene = await updateBrollScene(project.workDir, plan, sceneId, { title: typeof req.body?.title === 'string' ? req.body.title : undefined, imagePrompt: typeof req.body?.imagePrompt === 'string' ? req.body.imagePrompt : undefined, videoPrompt: typeof req.body?.videoPrompt === 'string' ? req.body.videoPrompt : undefined, sourceStart: Number.isFinite(Number(req.body?.sourceStart)) ? Number(req.body.sourceStart) : undefined, sourceEnd: Number.isFinite(Number(req.body?.sourceEnd)) ? Number(req.body.sourceEnd) : undefined, enabled: typeof req.body?.enabled === 'boolean' ? req.body.enabled : undefined, displayTemplate, assetAspectRatio }); brollPlans.set(project.id, plan); await touchProject(project); res.json(scene);
 }));
 app.delete('/api/projects/:id/broll/scenes/:sceneId', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet'); const updated = await deleteBrollScene(project.workDir, plan, routeParam(req.params.sceneId)); brollPlans.set(project.id, updated); await touchProject(project); res.json(updated); }));
+
+app.get('/api/projects/:id/thumbnail', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id));
+  res.json(thumbnailStateView(await loadThumbnailState(project.workDir)));
+}));
+app.post('/api/projects/:id/thumbnail/references', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id));
+  const settings = await resolvedSettings();
+  const sourcePaths = await pickNativeImageFiles();
+  if (!sourcePaths.length) return void res.status(400).json({ error: 'No thumbnail references selected' });
+  const state = await replaceThumbnailReferences({ workDir: project.workDir, sourcePaths, ffmpegBin: settings.ffmpegBin });
+  await touchProject(project);
+  res.json(thumbnailStateView(state));
+}));
+app.post('/api/projects/:id/thumbnail/generate', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id));
+  const settings = await resolvedSettings();
+  const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir);
+  const provider = plan?.settings.provider || settings.imageProvider;
+  const hook = typeof req.body?.hook === 'string' ? req.body.hook.trim().slice(0, 200) : undefined;
+  const transcript = project.transcript?.text || project.transcript?.words?.map((word) => word.text).join(' ') || project.name;
+  const state = await generateProjectThumbnail({
+    workDir: project.workDir,
+    projectName: project.name,
+    transcript,
+    hook,
+    provider,
+    config: {
+      geminiApiKey: settings.geminiApiKey,
+      geminiModel: settings.geminiImageModel,
+      codexBin: settings.codexBin,
+      ffmpegBin: settings.ffmpegBin,
+    },
+  });
+  await touchProject(project);
+  res.json(thumbnailStateView(state));
+}));
+app.get('/api/projects/:id/thumbnail/image', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id));
+  const file = await thumbnailImageFile(project.workDir);
+  if (!file) return void res.status(404).json({ error: 'Thumbnail has not been generated yet' });
+  res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
+  res.sendFile(file);
+}));
+app.get('/api/projects/:id/thumbnail/references/:referenceId', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id));
+  const file = await thumbnailReferenceFile(project.workDir, routeParam(req.params.referenceId));
+  if (!file) return void res.status(404).json({ error: 'Thumbnail reference not found' });
+  res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
+  res.sendFile(file);
+}));
 
 app.get('/api/projects/:id/presenter-matte', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id)); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan || !planNeedsPresenterMatte(plan)) return void res.json({ ready: false, stale: false }); const statuses = [];
@@ -632,7 +818,7 @@ app.post('/api/projects/:id/broll/scenes/:sceneId/generate', route(async (req, r
 }));
 app.post('/api/projects/:id/broll/scenes/:sceneId/manual-image', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const settings = await resolvedSettings(); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet'); const sourcePath = await pickNativeImageFile(); if (!sourcePath) return void res.status(400).json({ error: 'No image selected' }); const scene = await importBrollImage({ workDir: project.workDir, plan, sceneId: routeParam(req.params.sceneId), sourcePath, ffmpegBin: settings.ffmpegBin }); brollPlans.set(project.id, plan); await touchProject(project); res.json({ scene, imageUrl: `/api/projects/${project.id}/broll/scenes/${scene.id}/image?v=${encodeURIComponent(scene.generatedAt ?? '')}` }); }));
 app.post('/api/projects/:id/broll/scenes/:sceneId/manual-video', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const settings = await resolvedSettings(); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet'); const sourcePath = await pickNativeFile('Choose a completed B-roll video'); if (!sourcePath) return void res.status(400).json({ error: 'No video selected' }); const media = await probe(sourcePath); if (!media.videoCodec) throw new Error('The selected file does not contain a video stream.'); const scene = await importBrollVideo({ workDir: project.workDir, plan, sceneId: routeParam(req.params.sceneId), sourcePath, ffmpegBin: settings.ffmpegBin }); brollPlans.set(project.id, plan); await touchProject(project); res.json({ scene, videoUrl: `/api/projects/${project.id}/broll/scenes/${scene.id}/video?v=${encodeURIComponent(scene.videoGeneratedAt ?? '')}` }); }));
-app.get('/api/projects/:id/broll/scenes/:sceneId/image', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); const scene = plan?.scenes.find((candidate) => candidate.id === routeParam(req.params.sceneId)); if (!scene?.imageFile) return void res.status(404).json({ error: 'B-roll image has not been generated yet' }); res.setHeader('Cache-Control', 'private, max-age=31536000, immutable'); res.sendFile(scene.imageFile); }));
+app.get('/api/projects/:id/broll/scenes/:sceneId/image', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const loaded = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); const plan = await reconcileBrollFiles(project, loaded); const scene = plan?.scenes.find((candidate) => candidate.id === routeParam(req.params.sceneId)); const imagePath = scene ? await resolveBrollAssetPath(project.workDir, scene, 'image') : undefined; if (!plan || !scene || !imagePath) return void res.status(404).json({ error: 'B-roll image has not been generated yet' }); brollPlans.set(project.id, plan); res.setHeader('Cache-Control', 'private, max-age=31536000, immutable'); res.sendFile(imagePath); }));
 
 app.post('/api/projects/:id/broll/scenes/:sceneId/video-prompt', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const settings = await resolvedSettings(); if (!settings.codexBin) throw new Error('Codex CLI was not found'); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet'); const scene = await createVideoPrompt({ codexBin: settings.codexBin, workDir: project.workDir, plan, sceneId: routeParam(req.params.sceneId) }); brollPlans.set(project.id, plan); await touchProject(project); res.json(scene); }));
 app.post('/api/projects/:id/broll/scenes/:sceneId/video', route(async (req, res) => {
@@ -647,7 +833,7 @@ app.post('/api/projects/:id/broll/scenes/:sceneId/video', route(async (req, res)
 }));
 app.post('/api/projects/:id/broll/google-flow/sync', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const settings = await resolvedSettings(); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet'); const unmatched = await listGoogleFlowProjectVideos({ workDir: project.workDir, plan, config: { gflowBin: settings.gflowBin, gflowProfile: settings.gflowProfile, ffmpegBin: settings.ffmpegBin } }); brollPlans.set(project.id, plan); res.json({ plan, unmatched }); }));
 app.post('/api/projects/:id/broll/google-flow/assign', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const settings = await resolvedSettings(); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet'); const mediaId = String(req.body?.mediaId ?? ''); const sceneId = String(req.body?.sceneId ?? ''); const videos = await listGoogleFlowProjectVideos({ workDir: project.workDir, plan, config: { gflowBin: settings.gflowBin, gflowProfile: settings.gflowProfile, ffmpegBin: settings.ffmpegBin } }); const video = videos.find((candidate) => candidate.mediaId === mediaId); if (!video) throw new Error('That Flow video is already assigned or was not found in this project. Sync and try again.'); if (!video.localPath || !(await fs.stat(video.localPath).catch(() => null))?.isFile()) throw new Error('This Flow video is not downloaded locally. Download it from Flow, then use “Add video manually” on the scene.'); const scene = await importBrollVideo({ workDir: project.workDir, plan, sceneId, sourcePath: video.localPath, ffmpegBin: settings.ffmpegBin, source: 'flow-catalog', flowMediaId: video.mediaId }); brollPlans.set(project.id, plan); await touchProject(project); res.json({ scene, videoUrl: `/api/projects/${project.id}/broll/scenes/${scene.id}/video?v=${encodeURIComponent(scene.videoGeneratedAt ?? '')}` }); }));
-app.get('/api/projects/:id/broll/scenes/:sceneId/video', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); const scene = plan?.scenes.find((candidate) => candidate.id === routeParam(req.params.sceneId)); if (!scene?.videoFile) return void res.status(404).json({ error: 'B-roll video has not been created yet' }); res.setHeader('Cache-Control', 'private, max-age=31536000, immutable'); res.sendFile(scene.videoFile); }));
+app.get('/api/projects/:id/broll/scenes/:sceneId/video', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const loaded = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); const plan = await reconcileBrollFiles(project, loaded); const scene = plan?.scenes.find((candidate) => candidate.id === routeParam(req.params.sceneId)); const videoPath = scene ? await resolveBrollAssetPath(project.workDir, scene, 'video') : undefined; if (!plan || !scene || !videoPath) return void res.status(404).json({ error: 'B-roll video has not been created yet' }); brollPlans.set(project.id, plan); res.setHeader('Cache-Control', 'private, max-age=31536000, immutable'); res.sendFile(videoPath); }));
 app.post('/api/projects/:id/broll/scenes/:sceneId/preview', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id)); await requireSource(project); const settings = await resolvedSettings(); if (!settings.ffmpegBin) throw new Error('FFmpeg was not found'); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet');
   const sceneId = routeParam(req.params.sceneId); const result = await renderBrollScenePreview(project, plan, sceneId, settings.ffmpegBin); res.json({ previewUrl: `/api/projects/${project.id}/broll/scenes/${sceneId}/preview?v=${result.cacheKey}`, duration: result.duration, cached: result.cached });
@@ -655,10 +841,21 @@ app.post('/api/projects/:id/broll/scenes/:sceneId/preview', route(async (req, re
 app.get('/api/projects/:id/broll/scenes/:sceneId/preview', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id)); const previewPath = path.join(project.workDir, 'previews', routeParam(req.params.sceneId), 'preview.mp4'); const stat = await fs.stat(previewPath).catch(() => null); if (!stat?.isFile() || stat.size < 10_000) return void res.status(404).json({ error: 'B-roll scene preview has not been rendered yet' }); res.setHeader('Cache-Control', 'private, no-cache'); res.sendFile(previewPath);
 }));
+app.post('/api/projects/:id/broll/preview', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id)); const settings = await resolvedSettings(); if (!settings.ffmpegBin) throw new Error('FFmpeg was not found');
+  const loaded = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); const plan = await reconcileBrollFiles(project, loaded); if (!plan) throw new Error('B-roll plan has not been created yet');
+  brollPlans.set(project.id, plan); const result = await renderBrollProjectPreview(project, plan, settings.ffmpegBin);
+  res.json({ previewUrl: `/api/projects/${project.id}/broll/preview?v=${result.cacheKey}`, duration: result.duration, cached: result.cached, sceneCount: result.sceneCount });
+}));
+app.get('/api/projects/:id/broll/preview', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id)); const previewPath = path.join(project.workDir, 'previews', 'project', 'preview.mp4'); const stat = await fs.stat(previewPath).catch(() => null);
+  if (!stat?.isFile() || stat.size < 10_000) return void res.status(404).json({ error: 'Complete B-roll preview has not been rendered yet' });
+  res.setHeader('Cache-Control', 'private, no-cache'); res.sendFile(previewPath);
+}));
 
 app.post('/api/projects/:id/broll/export-assets', route(async (req, res) => {
-  const project = getProject(routeParam(req.params.id)); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet'); const selectedFolder = await pickFolderPath(); if (!selectedFolder) return void res.status(400).json({ error: 'Export cancelled' }); const destination = path.join(selectedFolder, `video-cleaner-broll-${project.id.slice(0, 8)}`); await fs.mkdir(destination, { recursive: true }); const scenes = [];
-  for (const scene of plan.scenes) { let imageFile: string | null = null; let videoFile: string | null = null; if (scene.imageFile) { imageFile = `${scene.id}.png`; await fs.copyFile(scene.imageFile, path.join(destination, imageFile)); } if (scene.videoFile) { videoFile = `${scene.id}.mp4`; await fs.copyFile(scene.videoFile, path.join(destination, videoFile)); } scenes.push({ id: scene.id, title: scene.title, enabled: scene.enabled, sourceStart: scene.sourceStart, sourceEnd: scene.sourceEnd, startWordId: scene.startWordId, endWordId: scene.endWordId, narration: scene.narration, visualIntent: scene.visualIntent, shotType: scene.shotType, imagePrompt: scene.imagePrompt, videoPrompt: scene.videoPrompt || null, displayTemplate: scene.displayTemplate || plan.settings.displayTemplate || 'full-frame', assetAspectRatio: scene.assetAspectRatio || 'auto', generatedAspectRatio: scene.generatedAspectRatio || null, orientationChanged: Boolean(scene.orientationChanged), provider: scene.provider || plan.settings.provider, model: scene.model || null, imageFile, videoFile, videoModel: scene.videoModel || null }); }
+  const project = getProject(routeParam(req.params.id)); const loaded = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); const plan = await reconcileBrollFiles(project, loaded); if (!plan) throw new Error('B-roll plan has not been created yet'); brollPlans.set(project.id, plan); const selectedFolder = await pickFolderPath(); if (!selectedFolder) return void res.status(400).json({ error: 'Export cancelled' }); const destination = path.join(selectedFolder, `video-cleaner-broll-${project.id.slice(0, 8)}`); await fs.mkdir(destination, { recursive: true }); const scenes = [];
+  for (const scene of plan.scenes) { let imageFile: string | null = null; let videoFile: string | null = null; const imagePath = await resolveBrollAssetPath(project.workDir, scene, 'image'); const videoPath = await resolveBrollAssetPath(project.workDir, scene, 'video'); if (imagePath) { imageFile = `${scene.id}${path.extname(imagePath).toLowerCase() || '.png'}`; await fs.copyFile(imagePath, path.join(destination, imageFile)); } if (videoPath) { videoFile = `${scene.id}${path.extname(videoPath).toLowerCase() || '.mp4'}`; await fs.copyFile(videoPath, path.join(destination, videoFile)); } scenes.push({ id: scene.id, title: scene.title, enabled: scene.enabled, sourceStart: scene.sourceStart, sourceEnd: scene.sourceEnd, startWordId: scene.startWordId, endWordId: scene.endWordId, narration: scene.narration, visualIntent: scene.visualIntent, shotType: scene.shotType, imagePrompt: scene.imagePrompt, videoPrompt: scene.videoPrompt || null, displayTemplate: scene.displayTemplate || plan.settings.displayTemplate || 'full-frame', assetAspectRatio: scene.assetAspectRatio || 'auto', generatedAspectRatio: scene.generatedAspectRatio || null, orientationChanged: Boolean(scene.orientationChanged), provider: scene.provider || plan.settings.provider, model: scene.model || null, imageFile, videoFile, videoModel: scene.videoModel || null }); }
   const timing = { version: 2, sourceName: project.sourceName, clips: projectClips(project).map((clip) => ({ id: clip.id, sourceName: clip.sourceName, timelineStart: clip.timelineStart, timelineEnd: clip.timelineEnd })), workflowMode: plan.settings.workflowMode, orientation: plan.orientation, settings: plan.settings, scenes }; await atomicWriteJson(path.join(destination, 'broll-timing.json'), timing); await fs.writeFile(path.join(destination, 'README.txt'), 'B-roll images/videos and editable timing data exported by Video Cleaner. Edit broll-timing.json or import the files into any editor.\n'); res.json({ destination, sceneCount: scenes.length });
 }));
 

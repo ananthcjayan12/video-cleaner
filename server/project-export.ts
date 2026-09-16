@@ -60,6 +60,50 @@ async function isFile(filePath?: string) {
   return Boolean(stat?.isFile());
 }
 
+function projectAssetPath(project: Project, value?: string) {
+  if (!value) return undefined;
+  return path.isAbsolute(value) ? value : path.join(project.workDir, value);
+}
+
+async function firstExistingProjectAsset(project: Project, candidates: Array<string | undefined>) {
+  const seen = new Set<string>();
+  for (const candidate of candidates) {
+    const resolved = projectAssetPath(project, candidate);
+    if (!resolved || seen.has(resolved)) continue;
+    seen.add(resolved);
+    if (await isFile(resolved)) return resolved;
+  }
+  return null;
+}
+
+async function resolveBrollImagePath(project: Project, scene: BrollPlan['scenes'][number]) {
+  if (scene.imageStatus === 'generating' || scene.imageStatus === 'failed') return null;
+  return firstExistingProjectAsset(project, [
+    scene.imageFile,
+    path.join('broll', `${scene.id}.png`),
+    path.join('broll', `${scene.id}.jpg`),
+    path.join('broll', `${scene.id}.jpeg`),
+    path.join('broll', `${scene.id}.webp`),
+  ]);
+}
+
+async function resolveBrollVideoPath(project: Project, scene: BrollPlan['scenes'][number]) {
+  const imageRevision = Math.max(0, Number(scene.imageRevision) || (scene.imageFile ? 1 : 0));
+  if (scene.imageStatus === 'generating' || scene.imageStatus === 'failed') return null;
+  if (scene.videoStatus === 'stale') return null;
+  if (scene.videoSourceImageRevision !== undefined && scene.videoSourceImageRevision !== imageRevision) return null;
+  const attempts = [...(scene.videoAttempts ?? [])]
+    .filter((attempt) => attempt.status === 'completed' && attempt.localFile && (attempt.sourceImageRevision === undefined || attempt.sourceImageRevision === imageRevision))
+    .sort((a, b) => String(b.completedAt || b.startedAt).localeCompare(String(a.completedAt || a.startedAt)));
+  const active = scene.activeVideoAttemptId ? attempts.find((attempt) => attempt.id === scene.activeVideoAttemptId)?.localFile : undefined;
+  return firstExistingProjectAsset(project, [
+    scene.videoFile,
+    active,
+    ...attempts.map((attempt) => attempt.localFile),
+    path.join('broll', `${scene.id}.mp4`),
+  ]);
+}
+
 function safeFileName(value: string, fallback = 'project') {
   const cleaned = value
     .normalize('NFKC')
@@ -316,20 +360,22 @@ export async function buildProjectExportDirectory(options: {
     for (const scene of plan.scenes) {
       let imageFile: string | null = null;
       let videoFile: string | null = null;
-      const imageAvailable = await isFile(scene.imageFile);
-      const videoAvailable = await isFile(scene.videoFile);
+      const resolvedImagePath = await resolveBrollImagePath(project, scene);
+      const resolvedVideoPath = await resolveBrollVideoPath(project, scene);
+      const imageAvailable = Boolean(resolvedImagePath);
+      const videoAvailable = Boolean(resolvedVideoPath);
       if (selection.brollImages && !imageAvailable) missingBrollImages.push(scene.id);
       if (selection.brollVideos && !videoAvailable) missingBrollVideos.push(scene.id);
-      if (selection.brollImages && imageAvailable) {
-        const extension = path.extname(scene.imageFile!) || '.png';
+      if (selection.brollImages && resolvedImagePath) {
+        const extension = path.extname(resolvedImagePath) || '.png';
         imageFile = archivePath('broll', 'images', `${safeFileName(scene.id, 'scene')}${extension.toLowerCase()}`);
-        await linkOrCopy(scene.imageFile!, path.join(directory, imageFile));
+        await linkOrCopy(resolvedImagePath, path.join(directory, imageFile));
         register(); brollImages += 1;
       }
-      if (selection.brollVideos && videoAvailable) {
-        const extension = path.extname(scene.videoFile!) || '.mp4';
+      if (selection.brollVideos && resolvedVideoPath) {
+        const extension = path.extname(resolvedVideoPath) || '.mp4';
         videoFile = archivePath('broll', 'videos', `${safeFileName(scene.id, 'scene')}${extension.toLowerCase()}`);
-        await linkOrCopy(scene.videoFile!, path.join(directory, videoFile));
+        await linkOrCopy(resolvedVideoPath, path.join(directory, videoFile));
         register(); brollVideos += 1;
       }
       brollScenes.push({
@@ -341,9 +387,15 @@ export async function buildProjectExportDirectory(options: {
         startWordId: scene.startWordId,
         endWordId: scene.endWordId,
         narration: scene.narration,
+        beatType: scene.beatType ?? null,
+        keyPoint: scene.keyPoint ?? null,
+        whyThisVisualMatters: scene.whyThisVisualMatters ?? null,
+        viewerTakeaway: scene.viewerTakeaway ?? null,
+        visualMode: scene.visualMode ?? null,
         visualIntent: scene.visualIntent,
         shotType: scene.shotType,
         imagePrompt: scene.imagePrompt,
+        animationPlan: scene.animationPlan ?? null,
         videoPrompt: scene.videoPrompt ?? null,
         displayTemplate: scene.displayTemplate || plan.settings.displayTemplate || 'full-frame',
         assetAspectRatio: scene.assetAspectRatio || 'auto',
