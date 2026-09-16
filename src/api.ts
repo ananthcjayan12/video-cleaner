@@ -140,6 +140,7 @@ export const api = {
   getEditorProject: <T = unknown>(id: string) => request<{ project: T | null }>(`/api/projects/${id}/editor-project`),
   saveEditorProject: <T = unknown>(id: string, project: T) => request<{ project: T; savedAt: string }>(`/api/projects/${id}/editor-project`, { method: 'PUT', body: JSON.stringify({ project }) }),
   editorBaseVideoUrl: (id: string, version?: string) => `/api/projects/${id}/editor/base-video${version ? `?v=${encodeURIComponent(version)}` : ''}`,
+  editorBaseClipUrl: (id: string, clipId: string, version?: string) => `/api/projects/${id}/editor/base-clips/${encodeURIComponent(clipId)}${version ? `?v=${encodeURIComponent(version)}` : ''}`,
   getThumbnail: (id: string) => request<ThumbnailState>(`/api/projects/${id}/thumbnail`),
   selectThumbnailReferences: (id: string) => request<ThumbnailState>(`/api/projects/${id}/thumbnail/references`, { method: 'POST' }),
   generateThumbnail: (id: string, hook?: string) => request<ThumbnailState>(`/api/projects/${id}/thumbnail/generate`, { method: 'POST', body: JSON.stringify({ hook }) }),
