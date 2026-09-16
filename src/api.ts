@@ -5,6 +5,9 @@ export type ImageProvider = 'openai' | 'gemini' | 'grok-cli' | 'codex-cli';
 export type VideoProvider = 'grok-cli' | 'google-flow' | 'magnific';
 export type BrollWorkflowMode = 'cleaned-video' | 'raw-video' | 'assets-only';
 export type BrollAssetAspectRatio = 'auto' | '9:16' | '16:9';
+export type BrollBeatType = 'hook' | 'problem' | 'cause' | 'anatomy' | 'progression' | 'solution' | 'prevention' | 'cta' | 'supporting';
+export type BrollVisualMode = 'hyperreal-clinical' | 'educational-3d' | 'anatomy-cutaway' | 'procedure-closeup' | 'symbolic-medical' | 'clinic-support';
+export type BrollAnimationPlan = { motionType: string; cameraMove: string; subjectMotion: string; revealSequence: string[]; highlightTargets: string[]; avoidMotion: string[] };
 export type BrollCountMode = 'auto' | 'exact' | 'per-minute' | 'interval';
 export type BrollDisplayTemplate = 'full-frame' | 'top-card' | 'split-top' | 'picture-in-picture' | 'top-card-presenter' | 'presenter-overlay' | 'stacked-cards-cutout' | 'stacked-talking-top' | 'stacked-broll-top';
 
@@ -82,7 +85,7 @@ export type GoogleFlowProjectState = { projectId: string; title: string; profile
 export type GoogleFlowCatalogVideo = { mediaId: string; projectId: string; prompt: string; aspect?: string; model?: string; duration?: number; createdAt?: string; localPath?: string };
 export type BrollScene = {
   id: string; title: string; startWordId: string; endWordId: string; sourceStart: number; sourceEnd: number; narration: string; visualIntent: string; shotType: string;
-  imagePrompt: string; videoPrompt?: string; enabled: boolean; imageFile?: string; generatedAt?: string; provider?: ImageProvider | 'manual'; model?: string;
+  imagePrompt: string; videoPrompt?: string; enabled: boolean; beatType?: BrollBeatType; keyPoint?: string; whyThisVisualMatters?: string; viewerTakeaway?: string; visualMode?: BrollVisualMode; animationPlan?: BrollAnimationPlan; imageFile?: string; generatedAt?: string; provider?: ImageProvider | 'manual'; model?: string;
   videoFile?: string; videoGeneratedAt?: string; videoModel?: string; videoProvider?: VideoProvider; displayTemplate?: BrollDisplayTemplate; assetAspectRatio?: BrollAssetAspectRatio;
   generatedAspectRatio?: Exclude<BrollAssetAspectRatio, 'auto'>; orientationChanged?: boolean; videoAttempts?: BrollVideoAttempt[]; activeVideoAttemptId?: string;
 };
@@ -134,7 +137,6 @@ export const api = {
   syncGoogleFlow: (id: string) => request<{ plan: BrollPlan; unmatched: GoogleFlowCatalogVideo[] }>(`/api/projects/${id}/broll/google-flow/sync`, { method: 'POST' }),
   assignGoogleFlowVideo: (id: string, sceneId: string, mediaId: string) => request<{ scene: BrollScene; videoUrl: string }>(`/api/projects/${id}/broll/google-flow/assign`, { method: 'POST', body: JSON.stringify({ sceneId, mediaId }) }),
   previewBrollScene: (id: string, sceneId: string) => request<{ previewUrl: string; duration: number; cached: boolean }>(`/api/projects/${id}/broll/scenes/${sceneId}/preview`, { method: 'POST' }),
-  previewBrollProject: (id: string) => request<{ previewUrl: string; duration: number; cached: boolean; sceneCount: number }>(`/api/projects/${id}/broll/preview`, { method: 'POST' }),
   brollImageUrl: (id: string, sceneId: string, version?: string) => `/api/projects/${id}/broll/scenes/${sceneId}/image${version ? `?v=${encodeURIComponent(version)}` : ''}`,
   brollVideoUrl: (id: string, sceneId: string, version?: string) => `/api/projects/${id}/broll/scenes/${sceneId}/video${version ? `?v=${encodeURIComponent(version)}` : ''}`,
   presenterMatteStatus: (id: string) => request<PresenterMatteStatus>(`/api/projects/${id}/presenter-matte`),
