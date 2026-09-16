@@ -120,6 +120,10 @@ button.danger:hover:not(:disabled) { background:rgba(127,29,29,.28); border-colo
 .sceneMeta span { font-size:10px; color:#a1a1aa; background:#18181b; border-radius:999px; padding:5px 7px; }
 .sceneMeta .videoBadge { color:#93c5fd; border:1px solid #1e3a8a; background:rgba(30,58,138,.22); }
 .sceneMeta .staleBadge { color:#fde68a; border:1px solid #854d0e; background:rgba(133,77,14,.18); }
+.sceneMeta .imageGeneratingBadge { color:#67e8f9; border:1px solid #155e75; background:rgba(21,94,117,.2); }
+.sceneMeta .imageFailedBadge { color:#fca5a5; border:1px solid #7f1d1d; background:rgba(127,29,29,.18); }
+.brollPlaceholder.generatingAsset small,.brollPlaceholder.failedAsset small { max-width:220px; text-align:center; line-height:1.45; }
+.brollPlaceholder.failedAsset span { color:#fca5a5; }
 .thumbnailPanel { display:flex; flex-direction:column; gap:12px; margin:0 0 16px; padding:14px; border:1px solid #155e75; border-radius:14px; background:linear-gradient(135deg,rgba(8,47,73,.22),rgba(13,78,74,.12)); }
 .thumbnailHead { display:flex; align-items:flex-start; justify-content:space-between; gap:14px; }
 .thumbnailHead > div:first-child { display:flex; flex-direction:column; gap:4px; min-width:0; }
