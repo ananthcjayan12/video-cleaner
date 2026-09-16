@@ -311,11 +311,16 @@ function App() {
     const nextDraft = draftFromScene(scene); draftRef.current = { ...draftRef.current, [scene.id]: nextDraft }; setSceneDrafts((current) => ({ ...current, [scene.id]: nextDraft }));
   }
 
-  function optimisticallyInvalidateSceneVideo(sceneId: string) {
+  function optimisticallyBeginSceneImageGeneration(sceneId: string) {
     setBroll((current) => current ? {
       ...current,
       scenes: current.scenes.map((scene) => scene.id === sceneId ? {
         ...scene,
+        imageFile: undefined,
+        generatedAt: undefined,
+        model: undefined,
+        generatedAspectRatio: undefined,
+        imageStatus: 'generating',
         videoFile: undefined,
         activeVideoAttemptId: undefined,
         videoGeneratedAt: undefined,
@@ -384,13 +389,13 @@ function App() {
 
   async function generateScene(scene: BrollScene, regenerationComment?: string) {
     if (!project || brollGenerating || generatingAll) return;
-    try { setError(''); setBrollGenerating(scene.id); setStatus(`Generating ${scene.title} with ${providerLabel(broll?.settings.provider ?? brollSettings.provider)}…`); const saved = await saveScene(scene); optimisticallyInvalidateSceneVideo(scene.id); const result = await api.generateBrollScene(project.id, saved.id, regenerationComment?.trim() || undefined); replaceScene(result.scene); setStatus(`Generated ${result.scene.title}. Previous video invalidated; create a new video for this image. Saved locally ✓`); }
+    try { setError(''); setBrollGenerating(scene.id); setStatus(`Generating ${scene.title} with ${providerLabel(broll?.settings.provider ?? brollSettings.provider)}…`); const saved = await saveScene(scene); optimisticallyBeginSceneImageGeneration(scene.id); const result = await api.generateBrollScene(project.id, saved.id, regenerationComment?.trim() || undefined); replaceScene(result.scene); setStatus(`Generated ${result.scene.title}. Previous video invalidated; create a new video for this image. Saved locally ✓`); }
     catch (err) { setError(message(err)); try { applyBrollPlan(await api.getBroll(project.id)); } catch { /* Keep original generation error visible. */ } } finally { setBrollGenerating(null); }
   }
 
   async function importSceneImage(scene: BrollScene) {
     if (!project || brollGenerating || generatingAll) return;
-    try { setError(''); setBrollGenerating(scene.id); setStatus(`Choose a local image for ${scene.title}…`); const saved = await saveScene(scene); optimisticallyInvalidateSceneVideo(scene.id); const result = await api.importBrollImage(project.id, saved.id); replaceScene(result.scene); setStatus(`Manual B-roll image added for ${result.scene.title}. Previous video invalidated. Saved locally ✓`); }
+    try { setError(''); setBrollGenerating(scene.id); setStatus(`Choose a local image for ${scene.title}…`); const saved = await saveScene(scene); optimisticallyBeginSceneImageGeneration(scene.id); const result = await api.importBrollImage(project.id, saved.id); replaceScene(result.scene); setStatus(`Manual B-roll image added for ${result.scene.title}. Previous video invalidated. Saved locally ✓`); }
     catch (err) { setError(message(err)); try { applyBrollPlan(await api.getBroll(project.id)); } catch { /* Keep original import error visible. */ } } finally { setBrollGenerating(null); }
   }
 
@@ -452,7 +457,7 @@ function App() {
       const savedScenes: BrollScene[] = []; for (const scene of scenes) savedScenes.push(await saveScene(scene));
       const failures = await runParallel(savedScenes, concurrency, async (scene) => {
         setParallelRunning((current) => current.includes(scene.id) ? current : [...current, scene.id]);
-        optimisticallyInvalidateSceneVideo(scene.id);
+        optimisticallyBeginSceneImageGeneration(scene.id);
         try { const result = await withTransientRetry(() => api.generateBrollScene(project.id, scene.id)); replaceScene(result.scene); }
         finally { setParallelRunning((current) => current.filter((id) => id !== scene.id)); }
       }, (completed, total, failed) => setStatus(`Generating images in parallel · ${completed}/${total} finished${failed ? ` · ${failed} failed` : ''}`));
@@ -465,7 +470,7 @@ function App() {
   }
 
   async function generateAllBroll() { if (broll) await runImageBatch(broll.scenes, 'all'); }
-  async function generateMissingBroll() { if (broll) await runImageBatch(broll.scenes.filter((scene) => !scene.imageFile), 'missing'); }
+  async function generateMissingBroll() { if (broll) await runImageBatch(broll.scenes.filter((scene) => !scene.imageFile && scene.imageStatus !== 'generating'), 'missing'); }
   async function regenerateSelectedBroll(scenes: BrollScene[]) { return runImageBatch(scenes, 'selected'); }
 
   async function generateAllVideoPrompts() {
@@ -678,16 +683,16 @@ function BrollWorkspace({ project, system, plan, settings, setSettings, drafts, 
     {!plan ? <div className="brollEmpty"><strong>No B-roll plan yet</strong><p>Choose the workflow and image count, then plan scenes. Codex creates semantic scene boundaries, timestamps and hyper-real prompts.</p></div> : <>
       <div className="styleStrip"><strong>{plan.scenes.length} scenes</strong><span>{plan.orientation}</span><span>{providerLabel(plan.settings.provider)}</span><span>Video: {videoProviderLabel(plan.settings.videoProvider || 'grok-cli')}</span><span>{plan.settings.workflowMode}</span>{missingImages > 0 && <span>{missingImages} images missing</span>}{missingVideos > 0 && <span>{missingVideos} videos missing</span>}{generatingAll && <span>{parallelRunning.length} active workers</span>}</div>
       <div className="brollGrid">{plan.scenes.map((scene: BrollScene) => {
-        const draft = drafts[scene.id] ?? draftFromScene(scene); const isWorking = generating === scene.id || parallelRunning.includes(scene.id);
+        const draft = drafts[scene.id] ?? draftFromScene(scene); const isWorking = generating === scene.id || parallelRunning.includes(scene.id) || scene.imageStatus === 'generating';
         const selectedForBatch = selectedForRegeneration.includes(scene.id);
         return <article className={`brollCard ${draft.enabled ? '' : 'disabledScene'} ${selectedForBatch ? 'selectedForBatch' : ''}`} key={scene.id}>
           <div className="brollMediaColumn">
-            <div className={`brollImage ${plan.orientation}`}>{hasCurrentSceneVideo(scene) ? <video src={api.brollVideoUrl(project.id, scene.id, scene.videoGeneratedAt)} controls muted playsInline /> : scene.imageFile ? <img src={api.brollImageUrl(project.id, scene.id, scene.generatedAt)} alt={scene.title} /> : <div className="brollPlaceholder"><span>{isWorking ? 'WORKING…' : scene.id.toUpperCase()}</span><small>{scene.shotType || 'B-roll still'}</small></div>}</div>
+            <div className={`brollImage ${plan.orientation}`}>{scene.imageStatus === 'generating' ? <div className="brollPlaceholder generatingAsset"><span>GENERATING IMAGE…</span><small>Previous image and video are hidden until the new image is ready.</small></div> : scene.imageStatus === 'failed' ? <div className="brollPlaceholder failedAsset"><span>IMAGE GENERATION FAILED</span><small>Retry generation — the previous media will not be reused automatically.</small></div> : hasCurrentSceneVideo(scene) ? <video src={api.brollVideoUrl(project.id, scene.id, scene.videoGeneratedAt)} controls muted playsInline /> : scene.imageFile ? <img src={api.brollImageUrl(project.id, scene.id, scene.generatedAt)} alt={scene.title} /> : <div className="brollPlaceholder"><span>{isWorking ? 'WORKING…' : scene.id.toUpperCase()}</span><small>{scene.shotType || 'B-roll still'}</small></div>}</div>
             <div className="assetActions"><button onClick={() => importSceneImage(scene)} disabled={busy || generatingAll || !!generating}>{scene.imageFile ? 'Replace image manually' : 'Add image manually'}</button><button onClick={() => importSceneVideo(scene)} disabled={busy || generatingAll || !!generating}>Add video manually</button><button className="danger" onClick={() => deleteScene(scene)} disabled={busy || generatingAll || !!generating}>Delete B-roll</button></div>
           </div>
           <div className="brollBody">
             <label className="toggleRow batchSelect"><input type="checkbox" checked={selectedForBatch} onChange={(e) => toggleRegenerationSelection(scene.id, e.target.checked)} disabled={busy || generatingAll || !!generating} /> Select for image regeneration</label>
-            <div className="sceneMeta"><span>{scene.id}</span>{scene.beatType && <span className="storyBadge">{scene.beatType}</span>}{scene.visualMode && <span className="modeBadge">{scene.visualMode}</span>}<span>{scene.shotType || 'shot'}</span>{scene.provider && <span>{providerLabel(scene.provider)}</span>}{isWorking && <span>WORKING</span>}{hasCurrentSceneVideo(scene) && <span className="videoBadge">VIDEO</span>}{scene.videoStatus === 'stale' && <span className="staleBadge">VIDEO STALE</span>}{scene.videoProvider && <span>{videoProviderLabel(scene.videoProvider)}</span>}{scene.videoModel && <span>{scene.videoModel}</span>}</div>
+            <div className="sceneMeta"><span>{scene.id}</span>{scene.beatType && <span className="storyBadge">{scene.beatType}</span>}{scene.visualMode && <span className="modeBadge">{scene.visualMode}</span>}<span>{scene.shotType || 'shot'}</span>{scene.provider && <span>{providerLabel(scene.provider)}</span>}{scene.imageStatus === 'generating' && <span className="imageGeneratingBadge">IMAGE GENERATING</span>}{scene.imageStatus === 'failed' && <span className="imageFailedBadge">IMAGE FAILED</span>}{isWorking && scene.imageStatus !== 'generating' && <span>WORKING</span>}{hasCurrentSceneVideo(scene) && <span className="videoBadge">VIDEO</span>}{scene.videoStatus === 'stale' && <span className="staleBadge">VIDEO STALE</span>}{scene.videoProvider && <span>{videoProviderLabel(scene.videoProvider)}</span>}{scene.videoModel && <span>{scene.videoModel}</span>}</div>
             {scene.videoAttempts?.length ? <details className="videoAttempts" open={scene.videoAttempts.some((attempt) => attempt.status !== 'completed')}><summary>Video attempts ({scene.videoAttempts.length})</summary>{[...scene.videoAttempts].reverse().map((attempt) => <div className={`videoAttempt ${attempt.status}`} key={attempt.id}><span>{attempt.status.toUpperCase()} · {attempt.source} · {new Date(attempt.startedAt).toLocaleString()}</span>{attempt.flowMediaId && <small>Flow media: {attempt.flowMediaId}</small>}{attempt.error && <small className="attemptError">{attempt.error}</small>}{attempt.errorLogFile && <small>Full log: {attempt.errorLogFile}</small>}</div>)}</details> : null}
             <label className="toggleRow"><input type="checkbox" checked={draft.enabled} onChange={(e) => changeDraft(scene.id, { enabled: e.target.checked })} /> Use this B-roll scene</label>
             <label className="sceneLayout">B-roll layout<select value={scene.displayTemplate ?? plan.settings.displayTemplate ?? 'full-frame'} onChange={(e) => void changeSceneLayout(scene, e.target.value as BrollDisplayTemplate)} disabled={busy || generatingAll || !!generating || !!layoutSaving}>{BROLL_LAYOUTS.map((layout) => <option key={layout.value} value={layout.value}>{layout.label}</option>)}</select><small>{layoutSaving === scene.id ? 'Saving layout…' : HORIZONTAL_BROLL_LAYOUTS.has(scene.displayTemplate ?? plan.settings.displayTemplate ?? 'full-frame') && (!scene.assetAspectRatio || scene.assetAspectRatio === 'auto') ? 'Auto orientation uses horizontal 16:9 for this card layout.' : 'Applied only to this B-roll when the final video is rendered.'}</small></label>
