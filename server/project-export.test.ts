@@ -204,7 +204,7 @@ test('buildProjectExportDirectory exports only selected asset groups', async () 
       plan,
       directory: destination,
       exportOptions: {
-        talkingHeadVideo: false,
+        talkingHeadVideo: true,
         proxyPreview: false,
         analysisAudio: false,
         subtitles: true,
@@ -247,10 +247,12 @@ test('buildProjectExportDirectory exports only selected asset groups', async () 
     }
 
     const manifest = JSON.parse(await fs.readFile(path.join(destination, 'project-manifest.json'), 'utf8'));
-    assert.equal(manifest.selection.talkingHeadVideo, false);
+    assert.equal(manifest.selection.talkingHeadVideo, true);
     assert.equal(manifest.selection.subtitles, true);
     assert.equal(manifest.selection.brollTiming, true);
     assert.equal(manifest.clips[0].file, null);
+    assert.equal(manifest.clips[0].sourceAvailable, false);
+    assert.deepEqual(manifest.missing.talkingHeadClips, ['missing-source.mov']);
 
     const timing = JSON.parse(await fs.readFile(path.join(destination, 'timeline/broll-timing.json'), 'utf8'));
     assert.equal(timing.scenes[0].imageAvailable, true);
