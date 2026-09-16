@@ -39,9 +39,9 @@ No cloud project database is used. Provider calls still send only the media/prom
 
 Use **Export editable ZIP** from either the project library or an open project to create a portable manual-editing package. Before choosing the destination, an export dialog lets you check exactly which asset groups should be included. This makes it possible to create anything from a full handoff package to a tiny subtitles-only or B-roll-timing-only ZIP.
 
-Selectable groups include talking-head source video, proxy preview, analysis audio, B-roll images, B-roll videos, B-roll timestamps/metadata, SRT/WebVTT subtitles, word-level JSON/CSV timestamps, transcript text, and cleaned edit/EDL timing. **Select all available** and **Clear all** make common selections quick. The manifest and README are always included.
+Selectable groups include talking-head source video, proxy preview, analysis audio, B-roll images, B-roll videos, B-roll timestamps/metadata, SRT/WebVTT subtitles, word-level JSON/CSV timestamps, transcript text, and cleaned edit/EDL timing. **Select all** and **Clear all** make common selections quick. The manifest and README are always included.
 
-If the original talking-head source has moved or is unavailable, source video is disabled in the selector while already-saved subtitles, B-roll and timing data can still be exported without relinking the source.
+Missing items stay selectable instead of disabling the export. If a selected file is unavailable—for example a moved talking-head clip or only some B-roll assets have been generated—Video Cleaner skips the missing file, exports everything else that exists, and records the skipped items in `project-manifest.json`.
 
 The ZIP contains only the selected groups:
 
