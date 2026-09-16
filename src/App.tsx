@@ -698,15 +698,14 @@ function projectExportOptionAvailable(project: Project, key: keyof ProjectExport
   if (key === 'brollImages') return project.state.brollImages > 0;
   if (key === 'brollVideos') return project.state.brollVideos > 0;
   if (key === 'brollTiming') return project.state.brollPlanned;
+  if (key === 'editTimeline') return project.state.cleaned;
   return project.state.transcriptReady;
 }
 function emptyProjectExportOptions(): ProjectExportOptions {
   return { talkingHeadVideo: false, proxyPreview: false, analysisAudio: false, subtitles: false, transcriptText: false, wordTimestamps: false, editTimeline: false, brollImages: false, brollVideos: false, brollTiming: false };
 }
-function defaultProjectExportOptions(project: Project): ProjectExportOptions {
-  const options = emptyProjectExportOptions();
-  for (const item of PROJECT_EXPORT_ITEMS) options[item.key] = projectExportOptionAvailable(project, item.key);
-  return options;
+function defaultProjectExportOptions(_project: Project): ProjectExportOptions {
+  return { talkingHeadVideo: true, proxyPreview: true, analysisAudio: true, subtitles: true, transcriptText: true, wordTimestamps: true, editTimeline: true, brollImages: true, brollVideos: true, brollTiming: true };
 }
 function ProjectExportModal({ dialog, busy, changeOption, selectAll, clearAll, cancel, confirm }: {
   dialog: ProjectExportDialog;
@@ -726,20 +725,20 @@ function ProjectExportModal({ dialog, busy, changeOption, selectAll, clearAll, c
         <span className="exportSelectionCount">{selectedCount} selected</span>
       </div>
       <p className="muted">Create a full project package or a lightweight ZIP containing only the assets you need. Manifest + README are always included.</p>
-      <div className="exportPresetActions"><button onClick={selectAll} disabled={busy}>Select all available</button><button onClick={clearAll} disabled={busy}>Clear all</button></div>
+      <div className="exportPresetActions"><button onClick={selectAll} disabled={busy}>Select all</button><button onClick={clearAll} disabled={busy}>Clear all</button></div>
       {groups.map((group) => <div className="exportOptionGroup" key={group}>
         <strong>{group}</strong>
         <div className="exportOptionsGrid">
           {PROJECT_EXPORT_ITEMS.filter((item) => item.group === group).map((item) => {
             const available = projectExportOptionAvailable(dialog.project, item.key);
-            return <label className={`exportOptionCard ${available ? '' : 'unavailable'}`} key={item.key}>
-              <input type="checkbox" checked={dialog.options[item.key]} disabled={busy || !available} onChange={(event) => changeOption(item.key, event.target.checked)} />
-              <span><b>{item.label}</b><small>{item.description}</small>{!available && <em>Not currently available</em>}</span>
+            return <label className={`exportOptionCard ${available ? '' : 'missingAsset'}`} key={item.key}>
+              <input type="checkbox" checked={dialog.options[item.key]} disabled={busy} onChange={(event) => changeOption(item.key, event.target.checked)} />
+              <span><b>{item.label}</b><small>{item.description}</small>{!available && <em>Currently missing — export will skip it if it is still unavailable.</em>}</span>
             </label>;
           })}
         </div>
       </div>)}
-      {!dialog.project.sourceAvailable && <p className="exportSourceNote">Original source is missing, but you can still export available subtitles, B-roll and timing data without relinking it.</p>}
+      {!dialog.project.sourceAvailable && <p className="exportSourceNote">Original source is missing. You can still leave it selected: the ZIP will be created with the other selected assets, and the missing source will be recorded in project-manifest.json.</p>}
       <div className="modalActions"><button onClick={cancel} disabled={busy}>Cancel</button><button className="primary" onClick={confirm} disabled={busy || selectedCount === 0}>{busy ? 'Exporting…' : `Export ZIP (${selectedCount})`}</button></div>
     </section>
   </div>;
