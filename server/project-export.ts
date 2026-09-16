@@ -77,6 +77,7 @@ async function firstExistingProjectAsset(project: Project, candidates: Array<str
 }
 
 async function resolveBrollImagePath(project: Project, scene: BrollPlan['scenes'][number]) {
+  if (scene.imageStatus === 'generating' || scene.imageStatus === 'failed') return null;
   return firstExistingProjectAsset(project, [
     scene.imageFile,
     path.join('broll', `${scene.id}.png`),
@@ -88,6 +89,7 @@ async function resolveBrollImagePath(project: Project, scene: BrollPlan['scenes'
 
 async function resolveBrollVideoPath(project: Project, scene: BrollPlan['scenes'][number]) {
   const imageRevision = Math.max(0, Number(scene.imageRevision) || (scene.imageFile ? 1 : 0));
+  if (scene.imageStatus === 'generating' || scene.imageStatus === 'failed') return null;
   if (scene.videoStatus === 'stale') return null;
   if (scene.videoSourceImageRevision !== undefined && scene.videoSourceImageRevision !== imageRevision) return null;
   const attempts = [...(scene.videoAttempts ?? [])]
