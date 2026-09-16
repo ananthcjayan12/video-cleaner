@@ -742,6 +742,15 @@ app.get('/api/projects/:id/editor/base-video', route(async (req, res) => {
   if (!source?.isFile()) throw new Error('Base video is not available. Relink the source clip first.');
   res.sendFile(clips[0].sourcePath);
 }));
+app.get('/api/projects/:id/editor/base-clips/:clipId', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id));
+  const clipId = routeParam(req.params.clipId);
+  const clip = projectClips(project).find((candidate) => candidate.id === clipId);
+  if (!clip) throw new Error('Base clip not found');
+  const source = await fs.stat(clip.sourcePath).catch(() => null);
+  if (!source?.isFile()) throw new Error('Base clip is not available. Relink the source media first.');
+  res.sendFile(clip.sourcePath);
+}));
 app.get('/api/projects/:id/editor-project', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id));
   const file = path.join(project.workDir, 'editor-project.json');
