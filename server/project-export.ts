@@ -308,6 +308,8 @@ export async function buildProjectExportDirectory(options: {
   }
 
   const brollScenes: Array<Record<string, unknown>> = [];
+  const missingBrollImages: string[] = [];
+  const missingBrollVideos: string[] = [];
   let brollImages = 0;
   let brollVideos = 0;
   if (plan && (selection.brollImages || selection.brollVideos || selection.brollTiming)) {
@@ -316,6 +318,8 @@ export async function buildProjectExportDirectory(options: {
       let videoFile: string | null = null;
       const imageAvailable = await isFile(scene.imageFile);
       const videoAvailable = await isFile(scene.videoFile);
+      if (selection.brollImages && !imageAvailable) missingBrollImages.push(scene.id);
+      if (selection.brollVideos && !videoAvailable) missingBrollVideos.push(scene.id);
       if (selection.brollImages && imageAvailable) {
         const extension = path.extname(scene.imageFile!) || '.png';
         imageFile = archivePath('broll', 'images', `${safeFileName(scene.id, 'scene')}${extension.toLowerCase()}`);
@@ -415,8 +419,8 @@ export async function buildProjectExportDirectory(options: {
       transcript: (selection.subtitles || selection.transcriptText || selection.wordTimestamps) && words.length === 0,
       editTimeline: selection.editTimeline && !project.edl,
       brollPlan: (selection.brollImages || selection.brollVideos || selection.brollTiming) && !plan,
-      brollImages: selection.brollImages && plan ? plan.scenes.filter((scene) => !scene.imageFile).map((scene) => scene.id) : [],
-      brollVideos: selection.brollVideos && plan ? plan.scenes.filter((scene) => !scene.videoFile).map((scene) => scene.id) : [],
+      brollImages: missingBrollImages,
+      brollVideos: missingBrollVideos,
     },
   });
   register();
