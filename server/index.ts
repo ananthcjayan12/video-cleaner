@@ -34,6 +34,7 @@ import {
 } from './broll.js';
 import { ensurePresenterMatte, mattingSystemStatus, presenterMatteStatus, type PresenterMatteSpecInput } from './presenter.js';
 import { exportProjectZip, normalizeProjectExportOptions } from './project-export.js';
+import { generateProjectThumbnail, loadThumbnailState, replaceThumbnailReferences, thumbnailImageFile, thumbnailReferenceFile, thumbnailStateView } from './thumbnail.js';
 import {
   atomicWriteJson,
   clipAtTimelineTime,
@@ -247,6 +248,26 @@ async function pickNativeImageFile() {
   if (process.platform === 'darwin') { const { stdout } = await run('osascript', ['-e', 'POSIX path of (choose file with prompt "Choose a B-roll image")']); return stdout.trim(); }
   if (process.platform === 'win32') { const script = ['Add-Type -AssemblyName System.Windows.Forms;', '$d = New-Object System.Windows.Forms.OpenFileDialog;', '$d.Filter = "Image files|*.png;*.jpg;*.jpeg;*.webp;*.heic;*.heif|All files|*.*";', 'if ($d.ShowDialog() -eq "OK") { Write-Output $d.FileName }'].join(' '); const { stdout } = await run('powershell', ['-NoProfile', '-Command', script]); return stdout.trim(); }
   const { stdout } = await run('zenity', ['--file-selection', '--title=Choose a B-roll image', '--file-filter=Images | *.png *.jpg *.jpeg *.webp *.heic *.heif']); return stdout.trim();
+}
+
+async function pickNativeImageFiles(prompt = 'Choose thumbnail style / brand references') {
+  if (process.platform === 'darwin') {
+    const script = `set chosenFiles to choose file with prompt ${JSON.stringify(prompt)} with multiple selections allowed
+set output to ""
+repeat with chosenFile in chosenFiles
+set output to output & POSIX path of chosenFile & linefeed
+end repeat
+return output`;
+    const { stdout } = await run('osascript', ['-e', script]);
+    return stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+  }
+  if (process.platform === 'win32') {
+    const script = ['Add-Type -AssemblyName System.Windows.Forms;', '$d = New-Object System.Windows.Forms.OpenFileDialog;', '$d.Filter = "Image files|*.png;*.jpg;*.jpeg;*.webp;*.heic;*.heif|All files|*.*";', '$d.Multiselect = $true;', 'if ($d.ShowDialog() -eq "OK") { $d.FileNames | ForEach-Object { Write-Output $_ } }'].join(' ');
+    const { stdout } = await run('powershell', ['-NoProfile', '-Command', script]);
+    return stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+  }
+  const { stdout } = await run('zenity', ['--file-selection', '--multiple', '--separator=\n', `--title=${prompt}`, '--file-filter=Images | *.png *.jpg *.jpeg *.webp *.heic *.heif']);
+  return stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
 }
 
 async function pickExportPath(defaultName = 'cleaned-video.mp4', prompt = 'Export video') {
@@ -729,6 +750,57 @@ app.put('/api/projects/:id/broll/scenes/:sceneId', route(async (req, res) => {
   const scene = await updateBrollScene(project.workDir, plan, sceneId, { title: typeof req.body?.title === 'string' ? req.body.title : undefined, imagePrompt: typeof req.body?.imagePrompt === 'string' ? req.body.imagePrompt : undefined, videoPrompt: typeof req.body?.videoPrompt === 'string' ? req.body.videoPrompt : undefined, sourceStart: Number.isFinite(Number(req.body?.sourceStart)) ? Number(req.body.sourceStart) : undefined, sourceEnd: Number.isFinite(Number(req.body?.sourceEnd)) ? Number(req.body.sourceEnd) : undefined, enabled: typeof req.body?.enabled === 'boolean' ? req.body.enabled : undefined, displayTemplate, assetAspectRatio }); brollPlans.set(project.id, plan); await touchProject(project); res.json(scene);
 }));
 app.delete('/api/projects/:id/broll/scenes/:sceneId', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet'); const updated = await deleteBrollScene(project.workDir, plan, routeParam(req.params.sceneId)); brollPlans.set(project.id, updated); await touchProject(project); res.json(updated); }));
+
+app.get('/api/projects/:id/thumbnail', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id));
+  res.json(thumbnailStateView(await loadThumbnailState(project.workDir)));
+}));
+app.post('/api/projects/:id/thumbnail/references', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id));
+  const settings = await resolvedSettings();
+  const sourcePaths = await pickNativeImageFiles();
+  if (!sourcePaths.length) return void res.status(400).json({ error: 'No thumbnail references selected' });
+  const state = await replaceThumbnailReferences({ workDir: project.workDir, sourcePaths, ffmpegBin: settings.ffmpegBin });
+  await touchProject(project);
+  res.json(thumbnailStateView(state));
+}));
+app.post('/api/projects/:id/thumbnail/generate', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id));
+  const settings = await resolvedSettings();
+  const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir);
+  const provider = plan?.settings.provider || settings.imageProvider;
+  const hook = typeof req.body?.hook === 'string' ? req.body.hook.trim().slice(0, 200) : undefined;
+  const transcript = project.transcript?.text || project.transcript?.words?.map((word) => word.text).join(' ') || project.name;
+  const state = await generateProjectThumbnail({
+    workDir: project.workDir,
+    projectName: project.name,
+    transcript,
+    hook,
+    provider,
+    config: {
+      geminiApiKey: settings.geminiApiKey,
+      geminiModel: settings.geminiImageModel,
+      codexBin: settings.codexBin,
+      ffmpegBin: settings.ffmpegBin,
+    },
+  });
+  await touchProject(project);
+  res.json(thumbnailStateView(state));
+}));
+app.get('/api/projects/:id/thumbnail/image', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id));
+  const file = await thumbnailImageFile(project.workDir);
+  if (!file) return void res.status(404).json({ error: 'Thumbnail has not been generated yet' });
+  res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
+  res.sendFile(file);
+}));
+app.get('/api/projects/:id/thumbnail/references/:referenceId', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id));
+  const file = await thumbnailReferenceFile(project.workDir, routeParam(req.params.referenceId));
+  if (!file) return void res.status(404).json({ error: 'Thumbnail reference not found' });
+  res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
+  res.sendFile(file);
+}));
 
 app.get('/api/projects/:id/presenter-matte', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id)); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan || !planNeedsPresenterMatte(plan)) return void res.json({ ready: false, stale: false }); const statuses = [];
