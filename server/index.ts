@@ -732,6 +732,30 @@ app.post('/api/projects/:id/prepare', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id)); const result = await prepareProjectMedia(project, true); res.json({ proxyUrl: `/api/projects/${project.id}/proxy`, proxy: { width: result.dimensions.width, height: result.dimensions.height, fps: 30, hardware: result.hardware } });
 }));
 app.get('/api/projects/:id/proxy', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); if (!project.proxyPath) throw new Error('Proxy has not been generated yet'); res.sendFile(project.proxyPath); }));
+app.get('/api/projects/:id/editor/base-video', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id));
+  const proxy = project.proxyPath && await fs.stat(project.proxyPath).catch(() => null);
+  if (proxy?.isFile()) return void res.sendFile(project.proxyPath!);
+  const clips = projectClips(project);
+  if (clips.length !== 1) throw new Error('Create the project proxy before using the live editor with multiple base clips.');
+  const source = await fs.stat(clips[0].sourcePath).catch(() => null);
+  if (!source?.isFile()) throw new Error('Base video is not available. Relink the source clip first.');
+  res.sendFile(clips[0].sourcePath);
+}));
+app.get('/api/projects/:id/editor-project', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id));
+  const file = path.join(project.workDir, 'editor-project.json');
+  const saved = await fs.readFile(file, 'utf8').then((value) => JSON.parse(value)).catch(() => null);
+  res.json({ project: saved });
+}));
+app.put('/api/projects/:id/editor-project', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id));
+  const editorProject = req.body?.project;
+  if (!editorProject || typeof editorProject !== 'object' || !Array.isArray(editorProject.tracks)) throw new Error('Invalid CJCut editor project');
+  const safe = JSON.parse(JSON.stringify(editorProject));
+  await atomicWriteJson(path.join(project.workDir, 'editor-project.json'), safe);
+  res.json({ project: safe, savedAt: new Date().toISOString() });
+}));
 app.post('/api/projects/:id/transcribe', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const transcript = await transcribeProject(project); res.json({ transcript, edl: project.edl }); }));
 app.post('/api/projects/:id/clean', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id)); const settings = await resolvedSettings(); const intensity = ['light', 'balanced', 'aggressive'].includes(req.body?.intensity) ? req.body.intensity : 'balanced'; if (!project.transcript) await transcribeProject(project); if (!settings.codexBin) throw new Error('Codex CLI was not found.');
