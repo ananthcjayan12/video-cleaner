@@ -91,7 +91,7 @@ export type BrollScene = {
   id: string; title: string; startWordId: string; endWordId: string; sourceStart: number; sourceEnd: number;
   narration: string; visualIntent: string; shotType: string; imagePrompt: string; videoPrompt?: string; enabled: boolean;
   beatType?: BrollBeatType; keyPoint?: string; whyThisVisualMatters?: string; viewerTakeaway?: string; visualMode?: BrollVisualMode; animationPlan?: BrollAnimationPlan;
-  imageFile?: string; generatedAt?: string; provider?: ImageProvider | 'manual'; model?: string; imageRevision?: number;
+  imageFile?: string; generatedAt?: string; provider?: ImageProvider | 'manual'; model?: string; imageRevision?: number; imageStatus?: 'none' | 'generating' | 'ready' | 'failed';
   videoFile?: string; videoGeneratedAt?: string; videoModel?: string; videoProvider?: VideoProvider;
   videoAttempts?: BrollVideoAttempt[]; activeVideoAttemptId?: string; videoSourceImageRevision?: number; videoStatus?: 'none' | 'stale' | 'generating' | 'ready';
   displayTemplate?: BrollDisplayTemplate;
@@ -330,6 +330,8 @@ export async function loadBrollPlan(workDir: string): Promise<BrollPlan | null> 
       if (scene.imageFile && !scene.generatedAspectRatio) scene.generatedAspectRatio = resolveSceneAssetAspect(raw, scene);
       scene.orientationChanged = Boolean(scene.imageFile && scene.generatedAspectRatio !== resolveSceneAssetAspect(raw, scene));
       scene.imageRevision = Math.max(0, Number(scene.imageRevision) || (scene.imageFile ? 1 : 0));
+      if (!scene.imageStatus) scene.imageStatus = scene.imageFile ? 'ready' : 'none';
+      if (scene.imageStatus === 'ready' && !scene.imageFile) scene.imageStatus = 'none';
       scene.videoAttempts = Array.isArray(scene.videoAttempts) ? scene.videoAttempts : [];
       if (scene.videoFile && scene.videoSourceImageRevision === undefined) scene.videoSourceImageRevision = scene.imageRevision;
       if (scene.videoFile && !scene.videoStatus) scene.videoStatus = 'ready';
@@ -433,13 +435,12 @@ async function generateWithAgentCli(provider: 'grok-cli' | 'codex-cli', prompt: 
 
 function currentImageRevision(scene: BrollScene) { return Math.max(0, Number(scene.imageRevision) || (scene.imageFile ? 1 : 0)); }
 export function hasCurrentBrollVideo(scene: BrollScene) {
-  if (!scene.videoFile || scene.videoStatus === 'stale') return false;
+  if (!scene.videoFile || scene.videoStatus === 'stale' || scene.imageStatus === 'generating' || scene.imageStatus === 'failed') return false;
   const imageRevision = currentImageRevision(scene);
   const videoRevision = scene.videoSourceImageRevision;
   return videoRevision === undefined || videoRevision === imageRevision;
 }
 function invalidateSceneVideoForImageChange(scene: BrollScene) {
-  scene.imageRevision = currentImageRevision(scene) + 1;
   scene.videoFile = undefined;
   scene.activeVideoAttemptId = undefined;
   scene.videoGeneratedAt = undefined;
@@ -450,6 +451,29 @@ function invalidateSceneVideoForImageChange(scene: BrollScene) {
   scene.videoSourceImageRevision = undefined;
   scene.videoStatus = 'stale';
 }
+async function beginSceneImageGeneration(workDir: string, plan: BrollPlan, scene: BrollScene) {
+  scene.imageRevision = currentImageRevision(scene) + 1;
+  scene.imageStatus = 'generating';
+  scene.imageFile = undefined;
+  scene.generatedAt = undefined;
+  scene.model = undefined;
+  scene.generatedAspectRatio = undefined;
+  scene.orientationChanged = false;
+  invalidateSceneVideoForImageChange(scene);
+  const brollDir = path.join(workDir, 'broll');
+  await fs.rm(path.join(brollDir, `${scene.id}.raw.png`), { force: true }).catch(() => undefined);
+  await fs.rm(path.join(brollDir, `${scene.id}.png`), { force: true }).catch(() => undefined);
+  await saveBrollPlan(workDir, plan);
+}
+async function failSceneImageGeneration(workDir: string, plan: BrollPlan, scene: BrollScene) {
+  scene.imageStatus = 'failed';
+  scene.imageFile = undefined;
+  scene.generatedAt = undefined;
+  scene.model = undefined;
+  scene.generatedAspectRatio = undefined;
+  scene.orientationChanged = false;
+  await saveBrollPlan(workDir, plan);
+}
 
 async function normalizeImage(rawPath: string, outputPath: string, aspect: '9:16' | '16:9', ffmpegBin?: string, removeSource = true) {
   if (!ffmpegBin) { await fs.copyFile(rawPath, outputPath); if (removeSource && rawPath !== outputPath) await fs.rm(rawPath, { force: true }); return; }
@@ -457,12 +481,64 @@ async function normalizeImage(rawPath: string, outputPath: string, aspect: '9:16
   await run(ffmpegBin, ['-hide_banner', '-loglevel', 'error', '-y', '-i', rawPath, '-vf', filter, '-frames:v', '1', outputPath], undefined, 120000); if (removeSource && rawPath !== outputPath) await fs.rm(rawPath, { force: true });
 }
 export async function importBrollImage(options: { workDir: string; plan: BrollPlan; sceneId: string; sourcePath: string; ffmpegBin?: string }) {
-  const scene = options.plan.scenes.find((candidate) => candidate.id === options.sceneId); if (!scene) throw new Error('B-roll scene not found'); const brollDir = path.join(options.workDir, 'broll'); await fs.mkdir(brollDir, { recursive: true }); const outputPath = path.join(brollDir, `${scene.id}.png`);
-  const aspect = resolveSceneAssetAspect(options.plan, scene); await normalizeImage(options.sourcePath, outputPath, aspect, options.ffmpegBin, false); invalidateSceneVideoForImageChange(scene); scene.imageFile = outputPath; scene.generatedAt = new Date().toISOString(); scene.generatedAspectRatio = aspect; scene.orientationChanged = false; scene.provider = 'manual'; scene.model = 'manual-import'; await saveBrollPlan(options.workDir, options.plan); return scene;
+  const scene = options.plan.scenes.find((candidate) => candidate.id === options.sceneId);
+  if (!scene) throw new Error('B-roll scene not found');
+  const brollDir = path.join(options.workDir, 'broll');
+  await fs.mkdir(brollDir, { recursive: true });
+  const outputPath = path.join(brollDir, `${scene.id}.png`);
+  const aspect = resolveSceneAssetAspect(options.plan, scene);
+  await beginSceneImageGeneration(options.workDir, options.plan, scene);
+  try {
+    await normalizeImage(options.sourcePath, outputPath, aspect, options.ffmpegBin, false);
+    scene.imageFile = outputPath;
+    scene.generatedAt = new Date().toISOString();
+    scene.generatedAspectRatio = aspect;
+    scene.orientationChanged = false;
+    scene.provider = 'manual';
+    scene.model = 'manual-import';
+    scene.imageStatus = 'ready';
+    await saveBrollPlan(options.workDir, options.plan);
+    return scene;
+  } catch (error) {
+    await fs.rm(outputPath, { force: true }).catch(() => undefined);
+    await failSceneImageGeneration(options.workDir, options.plan, scene);
+    throw error;
+  }
 }
+
 export async function generateBrollImage(options: { config: ImageProviderConfig; workDir: string; plan: BrollPlan; sceneId: string; regenerationComment?: string }) {
-  const { config, workDir, plan, sceneId } = options; const scene = plan.scenes.find((candidate) => candidate.id === sceneId); if (!scene) throw new Error('B-roll scene not found'); const provider = plan.settings.provider; const aspect = resolveSceneAssetAspect(plan, scene); const prompt = generatedImagePrompt(scene, plan, options.regenerationComment); const brollDir = path.join(workDir, 'broll'); await fs.mkdir(brollDir, { recursive: true }); const rawPath = path.join(brollDir, `${scene.id}.raw.png`); const outputPath = path.join(brollDir, `${scene.id}.png`); let model: string;
-  if (provider === 'openai') model = await generateOpenAi(prompt, aspect, config, rawPath); else if (provider === 'gemini') model = await generateGemini(prompt, aspect, config, rawPath); else model = await generateWithAgentCli(provider, prompt, config, workDir, rawPath); await normalizeImage(rawPath, outputPath, aspect, config.ffmpegBin, true); invalidateSceneVideoForImageChange(scene); scene.imageFile = outputPath; scene.generatedAt = new Date().toISOString(); scene.generatedAspectRatio = aspect; scene.orientationChanged = false; scene.provider = provider; scene.model = model; await saveBrollPlan(workDir, plan); return scene;
+  const { config, workDir, plan, sceneId } = options;
+  const scene = plan.scenes.find((candidate) => candidate.id === sceneId);
+  if (!scene) throw new Error('B-roll scene not found');
+  const provider = plan.settings.provider;
+  const aspect = resolveSceneAssetAspect(plan, scene);
+  const prompt = generatedImagePrompt(scene, plan, options.regenerationComment);
+  const brollDir = path.join(workDir, 'broll');
+  await fs.mkdir(brollDir, { recursive: true });
+  const rawPath = path.join(brollDir, `${scene.id}.raw.png`);
+  const outputPath = path.join(brollDir, `${scene.id}.png`);
+  await beginSceneImageGeneration(workDir, plan, scene);
+  try {
+    let model: string;
+    if (provider === 'openai') model = await generateOpenAi(prompt, aspect, config, rawPath);
+    else if (provider === 'gemini') model = await generateGemini(prompt, aspect, config, rawPath);
+    else model = await generateWithAgentCli(provider, prompt, config, workDir, rawPath);
+    await normalizeImage(rawPath, outputPath, aspect, config.ffmpegBin, true);
+    scene.imageFile = outputPath;
+    scene.generatedAt = new Date().toISOString();
+    scene.generatedAspectRatio = aspect;
+    scene.orientationChanged = false;
+    scene.provider = provider;
+    scene.model = model;
+    scene.imageStatus = 'ready';
+    await saveBrollPlan(workDir, plan);
+    return scene;
+  } catch (error) {
+    await fs.rm(rawPath, { force: true }).catch(() => undefined);
+    await fs.rm(outputPath, { force: true }).catch(() => undefined);
+    await failSceneImageGeneration(workDir, plan, scene);
+    throw error;
+  }
 }
 
 export async function createVideoPrompt(options: { codexBin: string; workDir: string; plan: BrollPlan; sceneId: string }) {
