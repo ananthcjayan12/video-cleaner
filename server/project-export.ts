@@ -87,8 +87,11 @@ async function resolveBrollImagePath(project: Project, scene: BrollPlan['scenes'
 }
 
 async function resolveBrollVideoPath(project: Project, scene: BrollPlan['scenes'][number]) {
+  const imageRevision = Math.max(0, Number(scene.imageRevision) || (scene.imageFile ? 1 : 0));
+  if (scene.videoStatus === 'stale') return null;
+  if (scene.videoSourceImageRevision !== undefined && scene.videoSourceImageRevision !== imageRevision) return null;
   const attempts = [...(scene.videoAttempts ?? [])]
-    .filter((attempt) => attempt.status === 'completed' && attempt.localFile)
+    .filter((attempt) => attempt.status === 'completed' && attempt.localFile && (attempt.sourceImageRevision === undefined || attempt.sourceImageRevision === imageRevision))
     .sort((a, b) => String(b.completedAt || b.startedAt).localeCompare(String(a.completedAt || a.startedAt)));
   const active = scene.activeVideoAttemptId ? attempts.find((attempt) => attempt.id === scene.activeVideoAttemptId)?.localFile : undefined;
   return firstExistingProjectAsset(project, [
