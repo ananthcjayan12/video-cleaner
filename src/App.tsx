@@ -13,6 +13,7 @@ import {
   type VideoProvider,
   type KeepRange,
   type Project,
+  type ProjectExportOptions,
   type SystemStatus,
   type Word,
 } from './api';
@@ -23,6 +24,20 @@ type SceneDraft = { title: string; imagePrompt: string; videoPrompt: string; sou
 type ParallelFailure<T> = { item: T; error: string };
 type SceneDialog = { kind: 'image-prompt' | 'video-prompt' | 'image-regeneration' | 'video-regeneration'; sceneId: string; value: string };
 type ScenePreview = { sceneId: string; title: string; url: string; duration: number };
+type ProjectExportDialog = { project: Project; options: ProjectExportOptions };
+
+const PROJECT_EXPORT_ITEMS: Array<{ key: keyof ProjectExportOptions; label: string; description: string; group: 'Media' | 'B-roll' | 'Text & timing' }> = [
+  { key: 'talkingHeadVideo', label: 'Talking-head source video', description: 'Original source-quality base clip(s).', group: 'Media' },
+  { key: 'proxyPreview', label: 'Proxy preview video', description: 'Smaller preview copy, when already available.', group: 'Media' },
+  { key: 'analysisAudio', label: 'Analysis audio', description: 'Lightweight narration audio, when available.', group: 'Media' },
+  { key: 'brollImages', label: 'B-roll images', description: 'Generated and manually imported still images.', group: 'B-roll' },
+  { key: 'brollVideos', label: 'B-roll videos', description: 'Generated and manually imported B-roll video clips.', group: 'B-roll' },
+  { key: 'brollTiming', label: 'B-roll timestamps & metadata', description: 'Scene start/end times, prompts, layouts and provider/model metadata.', group: 'B-roll' },
+  { key: 'subtitles', label: 'Subtitles', description: 'SRT and WebVTT caption files.', group: 'Text & timing' },
+  { key: 'wordTimestamps', label: 'Word-level timestamps', description: 'Precise word timing in JSON and CSV.', group: 'Text & timing' },
+  { key: 'transcriptText', label: 'Transcript text', description: 'Plain-text narration transcript.', group: 'Text & timing' },
+  { key: 'editTimeline', label: 'Cleaned edit / EDL timing', description: 'Keep ranges and source-time edit decisions for rebuilding the cleaned cut.', group: 'Text & timing' },
+];
 
 const DEFAULT_BROLL: BrollPlanSettings = {
   workflowMode: 'cleaned-video', provider: 'gemini', videoProvider: 'grok-cli', countMode: 'auto', targetCount: 6, imagesPerMinute: 5, intervalSeconds: 20,
@@ -72,6 +87,7 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [exportJob, setExportJob] = useState<ExportStatus | null>(null);
+  const [projectExportDialog, setProjectExportDialog] = useState<ProjectExportDialog | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const previewFrameRef = useRef<number | null>(null);
   const previewSegmentsRef = useRef<Array<{ start: number; end: number }>>([]);
@@ -482,6 +498,29 @@ function App() {
   }
   async function stopExport() { if (!project || !exportRunning) return; try { setStatus('Stopping export safely…'); await api.stopExport(project.id); } catch (err) { setError(message(err)); } }
   async function exportAssets() { if (!project || !broll) return; await action('Choose a folder for B-roll assets + timing data…', async () => { const result = await api.exportBrollAssets(project.id); setStatus(`B-roll package exported: ${result.destination}`); }); }
+  function exportEditableProject(target?: Project) {
+    const selected = target ?? project; if (!selected) return;
+    setProjectExportDialog({ project: selected, options: defaultProjectExportOptions(selected) });
+  }
+  function changeProjectExportOption(key: keyof ProjectExportOptions, value: boolean) {
+    setProjectExportDialog((current) => current ? { ...current, options: { ...current.options, [key]: value } } : current);
+  }
+  function setAllProjectExportOptions(enabled: boolean) {
+    setProjectExportDialog((current) => current ? {
+      ...current,
+      options: enabled ? defaultProjectExportOptions(current.project) : emptyProjectExportOptions(),
+    } : current);
+  }
+  async function confirmEditableProjectExport() {
+    const dialog = projectExportDialog; if (!dialog) return;
+    if (!Object.values(dialog.options).some(Boolean)) { setError('Select at least one item to export.'); return; }
+    try {
+      setBusy(true); setError(''); setStatus('Choose destination for editable project ZIP…');
+      const result = await api.exportProjectZip(dialog.project.id, dialog.options);
+      setStatus(`Editable project ZIP exported: ${result.destination} · ${result.files} packaged file${result.files === 1 ? '' : 's'}`);
+      setProjectExportDialog(null);
+    } catch (err) { setError(message(err)); } finally { setBusy(false); }
+  }
 
   const ready = Boolean(system?.ffmpeg.installed && system?.ffprobe.installed && system?.codex.installed && system?.codex.authenticated && system?.elevenLabs.configured);
   const capabilities = system?.ffmpeg.capabilities;
@@ -502,9 +541,9 @@ function App() {
 
       {settingsOpen && <SettingsPanel system={system} form={settingsForm} setForm={setSettingsForm} save={saveSettings} refresh={refreshSystem} disabled={busy || exportRunning || generatingAll} ffmpegDetail={ffmpegDetail} />}
 
-      {!project ? <ProjectLibrary projects={recentProjects} busy={busy} onNew={pick} onOpen={(saved) => void openProject(saved)} onRename={(saved) => void renameProject(saved)} onDelete={(saved) => void deleteProject(saved)} onRelink={(saved) => void relinkProject(saved)} onRefresh={() => void refreshProjects()} /> : <>
+      {!project ? <ProjectLibrary projects={recentProjects} busy={busy} onNew={pick} onOpen={(saved) => void openProject(saved)} onRename={(saved) => void renameProject(saved)} onDelete={(saved) => void deleteProject(saved)} onRelink={(saved) => void relinkProject(saved)} onExport={(saved) => void exportEditableProject(saved)} onRefresh={() => void refreshProjects()} /> : <>
         <section className={`source panel ${project.sourceAvailable ? '' : 'missingSourcePanel'}`}>
-          <div className="sourceSummary"><div><span className="label">{project.sourceAvailable ? 'BASE VIDEO TIMELINE' : 'BASE CLIP MISSING'}</span><strong>{project.name}</strong><small>{sourceClips.length > 1 ? `${sourceClips.length} clips play continuously in the order below.` : `${project.sourceName} · Add more clips at any time.`} Original media stays untouched.</small></div><div className="sourceRight"><div className="chips"><span>{project.media.width}×{project.media.height}</span><span>{String(project.media.videoCodec).toUpperCase()}</span>{project.media.frameRate ? <span>{project.media.frameRate.toFixed(2)} fps</span> : null}<span>{(project.media.size / 1024 / 1024 / 1024).toFixed(2)} GB</span>{project.media.hdr && <span className="warn">HDR</span>}</div><div className="sourceActions"><button className="primary" onClick={() => void addProjectClips()} disabled={busy || exportRunning || generatingAll || !system?.ffprobe.installed}>+ Add base clips</button>{!project.sourceAvailable && <button className="danger" onClick={() => void relinkProject(project)} disabled={busy || generatingAll}>Relink missing clip</button>}</div></div></div>
+          <div className="sourceSummary"><div><span className="label">{project.sourceAvailable ? 'BASE VIDEO TIMELINE' : 'BASE CLIP MISSING'}</span><strong>{project.name}</strong><small>{sourceClips.length > 1 ? `${sourceClips.length} clips play continuously in the order below.` : `${project.sourceName} · Add more clips at any time.`} Original media stays untouched.</small></div><div className="sourceRight"><div className="chips"><span>{project.media.width}×{project.media.height}</span><span>{String(project.media.videoCodec).toUpperCase()}</span>{project.media.frameRate ? <span>{project.media.frameRate.toFixed(2)} fps</span> : null}<span>{(project.media.size / 1024 / 1024 / 1024).toFixed(2)} GB</span>{project.media.hdr && <span className="warn">HDR</span>}</div><div className="sourceActions"><button className="primary" onClick={() => void addProjectClips()} disabled={busy || exportRunning || generatingAll || !system?.ffprobe.installed}>+ Add base clips</button><button onClick={() => exportEditableProject()} disabled={busy || exportRunning || generatingAll}>Export editable ZIP</button>{!project.sourceAvailable && <button className="danger" onClick={() => void relinkProject(project)} disabled={busy || generatingAll}>Relink missing clip</button>}</div></div></div>
           {sourceClips.length > 0 && <div className="clipTimeline"><div className="clipTimelineHead"><strong>Playback order</strong><span>Add clips in separate selections, then arrange them here.</span></div>{sourceClips.map((clip, index) => <div className="clipTimelineRow" key={clip.id}><span className="clipOrder">{index + 1}</span><div><strong>{clip.sourceName}</strong><small>{formatTime(clip.duration)} · timeline {formatTime(clip.timelineStart)}–{formatTime(clip.timelineEnd)}</small></div><div className="clipOrderActions"><button onClick={() => void moveProjectClip(index, -1)} disabled={busy || exportRunning || generatingAll || index === 0} aria-label={`Move ${clip.sourceName} earlier`}>↑</button><button onClick={() => void moveProjectClip(index, 1)} disabled={busy || exportRunning || generatingAll || index === sourceClips.length - 1} aria-label={`Move ${clip.sourceName} later`}>↓</button>{sourceClips.length > 1 && <button className="danger" onClick={() => void removeProjectClip(clip)} disabled={busy || exportRunning || generatingAll} aria-label={`Remove ${clip.sourceName}`}>Remove</button>}</div></div>)}</div>}
         </section>
         {!project.sourceAvailable && <div className="sourceWarning panel"><strong>Your project data is safe.</strong><span>Transcript, EDL and B-roll assets can still be resumed locally. Relink the original video before proxy creation or final render.</span></div>}
@@ -515,6 +554,7 @@ function App() {
       </>}
       <footer className="statusbar"><span className={busy || exportRunning || generatingAll ? 'pulse' : ''}>{busy || exportRunning || generatingAll ? '●' : '○'}</span> {status}{error && <strong className="error">{error}</strong>}</footer>
       {scenePreview && <ScenePreviewModal preview={scenePreview} close={() => setScenePreview(null)} />}
+      {projectExportDialog && <ProjectExportModal dialog={projectExportDialog} busy={busy} changeOption={changeProjectExportOption} selectAll={() => setAllProjectExportOptions(true)} clearAll={() => setAllProjectExportOptions(false)} cancel={() => setProjectExportDialog(null)} confirm={() => void confirmEditableProjectExport()} />}
     </main>
   );
 }
@@ -651,6 +691,59 @@ function videoProviderLabel(provider: VideoProvider) { if (provider === 'google-
 function resolveConcurrency(requested: number, defaultConcurrency: number, maxConcurrency: number) { if (!Number.isFinite(requested) || requested <= 0) return defaultConcurrency; return Math.max(1, Math.min(maxConcurrency, Math.round(requested))); }
 function draftPatch(draft: SceneDraft) { return { title: draft.title.trim(), imagePrompt: draft.imagePrompt.trim(), videoPrompt: draft.videoPrompt.trim(), sourceStart: Number(draft.sourceStart), sourceEnd: Number(draft.sourceEnd), enabled: draft.enabled }; }
 function sameDraft(a: SceneDraft | undefined, b: SceneDraft) { return Boolean(a && a.title === b.title && a.imagePrompt === b.imagePrompt && a.videoPrompt === b.videoPrompt && a.sourceStart === b.sourceStart && a.sourceEnd === b.sourceEnd && a.enabled === b.enabled); }
+function projectExportOptionAvailable(project: Project, key: keyof ProjectExportOptions) {
+  if (key === 'talkingHeadVideo') return project.sourceAvailable;
+  if (key === 'proxyPreview') return project.state.proxyReady;
+  if (key === 'analysisAudio') return project.state.proxyReady || project.state.transcriptReady;
+  if (key === 'brollImages') return project.state.brollImages > 0;
+  if (key === 'brollVideos') return project.state.brollVideos > 0;
+  if (key === 'brollTiming') return project.state.brollPlanned;
+  if (key === 'editTimeline') return project.state.cleaned;
+  return project.state.transcriptReady;
+}
+function emptyProjectExportOptions(): ProjectExportOptions {
+  return { talkingHeadVideo: false, proxyPreview: false, analysisAudio: false, subtitles: false, transcriptText: false, wordTimestamps: false, editTimeline: false, brollImages: false, brollVideos: false, brollTiming: false };
+}
+function defaultProjectExportOptions(_project: Project): ProjectExportOptions {
+  return { talkingHeadVideo: true, proxyPreview: true, analysisAudio: true, subtitles: true, transcriptText: true, wordTimestamps: true, editTimeline: true, brollImages: true, brollVideos: true, brollTiming: true };
+}
+function ProjectExportModal({ dialog, busy, changeOption, selectAll, clearAll, cancel, confirm }: {
+  dialog: ProjectExportDialog;
+  busy: boolean;
+  changeOption: (key: keyof ProjectExportOptions, value: boolean) => void;
+  selectAll: () => void;
+  clearAll: () => void;
+  cancel: () => void;
+  confirm: () => void;
+}) {
+  const selectedCount = Object.values(dialog.options).filter(Boolean).length;
+  const groups = ['Media', 'B-roll', 'Text & timing'] as const;
+  return <div className="modalBackdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) cancel(); }}>
+    <section className="sceneModal exportProjectModal" role="dialog" aria-modal="true" aria-label="Choose project export contents">
+      <div className="sectionTitle">
+        <div><span className="label">EDITABLE PROJECT ZIP</span><h3>Choose what to export</h3></div>
+        <span className="exportSelectionCount">{selectedCount} selected</span>
+      </div>
+      <p className="muted">Create a full project package or a lightweight ZIP containing only the assets you need. Manifest + README are always included.</p>
+      <div className="exportPresetActions"><button onClick={selectAll} disabled={busy}>Select all</button><button onClick={clearAll} disabled={busy}>Clear all</button></div>
+      {groups.map((group) => <div className="exportOptionGroup" key={group}>
+        <strong>{group}</strong>
+        <div className="exportOptionsGrid">
+          {PROJECT_EXPORT_ITEMS.filter((item) => item.group === group).map((item) => {
+            const available = projectExportOptionAvailable(dialog.project, item.key);
+            return <label className={`exportOptionCard ${available ? '' : 'missingAsset'}`} key={item.key}>
+              <input type="checkbox" checked={dialog.options[item.key]} disabled={busy} onChange={(event) => changeOption(item.key, event.target.checked)} />
+              <span><b>{item.label}</b><small>{item.description}</small>{!available && <em>Currently missing — export will skip it if it is still unavailable.</em>}</span>
+            </label>;
+          })}
+        </div>
+      </div>)}
+      {!dialog.project.sourceAvailable && <p className="exportSourceNote">Original source is missing. You can still leave it selected: the ZIP will be created with the other selected assets, and the missing source will be recorded in project-manifest.json.</p>}
+      <div className="modalActions"><button onClick={cancel} disabled={busy}>Cancel</button><button className="primary" onClick={confirm} disabled={busy || selectedCount === 0}>{busy ? 'Exporting…' : `Export ZIP (${selectedCount})`}</button></div>
+    </section>
+  </div>;
+}
+
 function ExportProgress({ job, onStop }: { job: ExportStatus; onStop: () => void }) { const progress = Math.max(0, Math.min(100, job.progress || 0)); const preparing = job.state === 'running' && job.speed.startsWith('Preparing'); const title = job.state === 'completed' ? 'Export complete' : job.state === 'failed' ? 'Export failed' : job.state === 'stopped' ? 'Export paused' : preparing ? 'Preparing export' : job.resumed ? 'Resuming master' : 'Rendering master'; return <div className={`exportProgress ${job.state}`}><div className="exportProgressHead"><strong>{title}</strong><span>{progress.toFixed(1)}%</span></div><div className="progressTrack"><span style={{ width: `${progress}%` }} /></div><div className="exportMeta"><span>{job.encoder || 'FFmpeg'}</span>{job.speed && <span>{job.speed}</span>}{job.checkpointTotal ? <span>{job.checkpointCompleted || 0}/{job.checkpointTotal} checkpoints</span> : null}{job.frame > 0 && <span>{job.frame.toLocaleString()} frames</span>}</div>{job.state === 'running' && !preparing && <button className="danger exportStop" onClick={onStop}>{job.resumable ? 'Stop and keep checkpoints' : 'Stop rendering'}</button>}{job.state === 'stopped' && job.resumable && <small>Choose Render final video again to resume.</small>}</div>; }
 function SystemItem({ label, ok, detail }: { label: string; ok: boolean; detail: string }) { return <div className="systemItem"><span className={ok ? 'ok' : 'bad'}>{ok ? '✓' : '×'}</span><div><strong>{label}</strong><small>{detail}</small></div></div>; }
 function providerReady(system: SystemStatus | null, provider: ImageProvider) { if (!system) return false; if (provider === 'gemini') return system.imageProviders.gemini.configured; if (provider === 'openai') return system.imageProviders.openai.configured; if (provider === 'grok-cli') return system.imageProviders.grokCli.configured; return system.imageProviders.codexCli.configured; }

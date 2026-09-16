@@ -33,6 +33,7 @@ import {
   type VideoProvider,
 } from './broll.js';
 import { ensurePresenterMatte, mattingSystemStatus, presenterMatteStatus, type PresenterMatteSpecInput } from './presenter.js';
+import { exportProjectZip, normalizeProjectExportOptions } from './project-export.js';
 import {
   atomicWriteJson,
   clipAtTimelineTime,
@@ -255,6 +256,11 @@ async function pickFolderPath() {
   if (process.platform === 'darwin') { const { stdout } = await run('osascript', ['-e', 'POSIX path of (choose folder with prompt "Choose folder for B-roll assets")']); return stdout.trim(); }
   if (process.platform === 'win32') { const script = ['Add-Type -AssemblyName System.Windows.Forms;', '$d = New-Object System.Windows.Forms.FolderBrowserDialog;', 'if ($d.ShowDialog() -eq "OK") { Write-Output $d.SelectedPath }'].join(' '); const { stdout } = await run('powershell', ['-NoProfile', '-Command', script]); return stdout.trim(); }
   const { stdout } = await run('zenity', ['--file-selection', '--directory', '--title=Choose folder for B-roll assets']); return stdout.trim();
+}
+async function pickZipPath(defaultName = 'video-cleaner-project.zip') {
+  if (process.platform === 'darwin') { const script = `POSIX path of (choose file name with prompt "Export editable project ZIP" default name ${JSON.stringify(defaultName)})`; const { stdout } = await run('osascript', ['-e', script]); return stdout.trim(); }
+  if (process.platform === 'win32') { const script = ['Add-Type -AssemblyName System.Windows.Forms;', '$d = New-Object System.Windows.Forms.SaveFileDialog;', '$d.Filter = "ZIP archive|*.zip";', `$d.FileName = ${JSON.stringify(defaultName)};`, 'if ($d.ShowDialog() -eq "OK") { Write-Output $d.FileName }'].join(' '); const { stdout } = await run('powershell', ['-NoProfile', '-Command', script]); return stdout.trim(); }
+  const { stdout } = await run('zenity', ['--file-selection', '--save', '--confirm-overwrite', `--filename=${defaultName}`]); return stdout.trim();
 }
 
 function parseRate(value: unknown) { if (typeof value !== 'string' || !value) return 0; if (!value.includes('/')) return Number(value) || 0; const [n, d] = value.split('/').map(Number); return d ? n / d : 0; }
@@ -654,6 +660,18 @@ app.post('/api/projects/:id/broll/export-assets', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id)); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet'); const selectedFolder = await pickFolderPath(); if (!selectedFolder) return void res.status(400).json({ error: 'Export cancelled' }); const destination = path.join(selectedFolder, `video-cleaner-broll-${project.id.slice(0, 8)}`); await fs.mkdir(destination, { recursive: true }); const scenes = [];
   for (const scene of plan.scenes) { let imageFile: string | null = null; let videoFile: string | null = null; if (scene.imageFile) { imageFile = `${scene.id}.png`; await fs.copyFile(scene.imageFile, path.join(destination, imageFile)); } if (scene.videoFile) { videoFile = `${scene.id}.mp4`; await fs.copyFile(scene.videoFile, path.join(destination, videoFile)); } scenes.push({ id: scene.id, title: scene.title, enabled: scene.enabled, sourceStart: scene.sourceStart, sourceEnd: scene.sourceEnd, startWordId: scene.startWordId, endWordId: scene.endWordId, narration: scene.narration, visualIntent: scene.visualIntent, shotType: scene.shotType, imagePrompt: scene.imagePrompt, videoPrompt: scene.videoPrompt || null, displayTemplate: scene.displayTemplate || plan.settings.displayTemplate || 'full-frame', assetAspectRatio: scene.assetAspectRatio || 'auto', generatedAspectRatio: scene.generatedAspectRatio || null, orientationChanged: Boolean(scene.orientationChanged), provider: scene.provider || plan.settings.provider, model: scene.model || null, imageFile, videoFile, videoModel: scene.videoModel || null }); }
   const timing = { version: 2, sourceName: project.sourceName, clips: projectClips(project).map((clip) => ({ id: clip.id, sourceName: clip.sourceName, timelineStart: clip.timelineStart, timelineEnd: clip.timelineEnd })), workflowMode: plan.settings.workflowMode, orientation: plan.orientation, settings: plan.settings, scenes }; await atomicWriteJson(path.join(destination, 'broll-timing.json'), timing); await fs.writeFile(path.join(destination, 'README.txt'), 'B-roll images/videos and editable timing data exported by Video Cleaner. Edit broll-timing.json or import the files into any editor.\n'); res.json({ destination, sceneCount: scenes.length });
+}));
+
+app.post('/api/projects/:id/export-project-zip', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id));
+  const exportOptions = normalizeProjectExportOptions(req.body?.options);
+  if (!Object.values(exportOptions).some(Boolean)) throw new Error('Select at least one item to export.');
+  const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir);
+  const baseName = project.name.replace(/[\\/:*?"<>|]+/g, '-').replace(/\s+/g, ' ').trim() || 'video-cleaner-project';
+  const selectedPath = await pickZipPath(`${baseName}.zip`); if (!selectedPath) return void res.status(400).json({ error: 'Export cancelled' });
+  const destination = selectedPath.toLowerCase().endsWith('.zip') ? selectedPath : `${selectedPath}.zip`;
+  const result = await exportProjectZip({ project, plan: plan ?? null, destination, exportOptions });
+  res.json(result);
 }));
 
 app.post('/api/projects/:id/broll/export-video', route(async (req, res) => {

@@ -146,6 +146,22 @@ textarea:focus { border-color:#71717a; }
 .previewModal video { display:block; width:100%; max-height:72vh; object-fit:contain; border-radius:12px; background:#000; }
 .previewModal > .muted { margin:12px 0 0; }
 .sceneModal label { display:flex; flex-direction:column; gap:7px; color:#a1a1aa; font-size:11px; }
+.exportProjectModal { width:min(860px,100%); }
+.exportSelectionCount { border:1px solid #3f3f46; background:#111113; color:#d4d4d8; border-radius:999px; padding:6px 9px; font-size:10px; white-space:nowrap; }
+.exportPresetActions { display:flex; gap:8px; flex-wrap:wrap; margin:0 0 16px; }
+.exportOptionGroup { margin-top:16px; }
+.exportOptionGroup > strong { display:block; margin-bottom:8px; color:#d4d4d8; font-size:11px; letter-spacing:.06em; text-transform:uppercase; }
+.exportOptionsGrid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+.exportOptionCard { min-height:78px; padding:11px 12px; border:1px solid #27272a; background:#0f0f11; border-radius:12px; display:grid !important; grid-template-columns:auto minmax(0,1fr); align-items:flex-start; gap:10px !important; cursor:pointer; }
+.exportOptionCard:hover { border-color:#3f3f46; background:#151517; }
+.exportOptionCard input { width:auto; margin:2px 0 0; accent-color:#f4f4f5; }
+.exportOptionCard span { display:flex; flex-direction:column; gap:4px; min-width:0; }
+.exportOptionCard b { color:#e4e4e7; font-size:11px; }
+.exportOptionCard small { color:#71717a; line-height:1.4; }
+.exportOptionCard em { color:#fbbf24; font-size:9px; font-style:normal; }
+.exportOptionCard.missingAsset { border-color:#713f12; background:rgba(113,63,18,.08); }
+.exportOptionCard.missingAsset:hover { border-color:#a16207; background:rgba(113,63,18,.14); }
+.exportSourceNote { margin:16px 0 0; border:1px solid #713f12; background:rgba(113,63,18,.12); color:#fde68a; border-radius:10px; padding:10px 12px; font-size:10px; line-height:1.5; }
 .modalActions { justify-content:flex-end; margin-top:16px; }
 
 @media (max-width:1000px) {
@@ -165,4 +181,5 @@ textarea:focus { border-color:#71717a; }
   .sourceActions{justify-content:flex-start}
   .clipTimelineHead{align-items:flex-start;flex-direction:column}
   .sourceWarning{align-items:flex-start;flex-direction:column}
+  .exportOptionsGrid{grid-template-columns:1fr}
 }
