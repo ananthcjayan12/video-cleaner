@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { BrollPlan } from './broll.js';
-import { projectClips, reconcileBrollFiles, resolveBrollAssetPath, type Project, type Word } from './project-store.js';
+import { projectClips, type Project, type Word } from './project-store.js';
 
 export type ProjectExportContents = {
   clips: number;
@@ -212,8 +212,7 @@ export async function buildProjectExportDirectory(options: {
   directory: string;
   exportOptions?: Partial<ProjectExportOptions>;
 }): Promise<ProjectExportContents> {
-  const { project, directory } = options;
-  const plan = options.plan ? await reconcileBrollFiles(project, options.plan) : null;
+  const { project, plan, directory } = options;
   const selection = normalizeProjectExportOptions(options.exportOptions);
   if (!Object.values(selection).some(Boolean)) throw new Error('Select at least one item to export.');
   await fs.rm(directory, { recursive: true, force: true });
@@ -317,22 +316,20 @@ export async function buildProjectExportDirectory(options: {
     for (const scene of plan.scenes) {
       let imageFile: string | null = null;
       let videoFile: string | null = null;
-      const imagePath = await resolveBrollAssetPath(project.workDir, scene, 'image');
-      const videoPath = await resolveBrollAssetPath(project.workDir, scene, 'video');
-      const imageAvailable = Boolean(imagePath);
-      const videoAvailable = Boolean(videoPath);
+      const imageAvailable = await isFile(scene.imageFile);
+      const videoAvailable = await isFile(scene.videoFile);
       if (selection.brollImages && !imageAvailable) missingBrollImages.push(scene.id);
       if (selection.brollVideos && !videoAvailable) missingBrollVideos.push(scene.id);
       if (selection.brollImages && imageAvailable) {
-        const extension = path.extname(imagePath!) || '.png';
+        const extension = path.extname(scene.imageFile!) || '.png';
         imageFile = archivePath('broll', 'images', `${safeFileName(scene.id, 'scene')}${extension.toLowerCase()}`);
-        await linkOrCopy(imagePath!, path.join(directory, imageFile));
+        await linkOrCopy(scene.imageFile!, path.join(directory, imageFile));
         register(); brollImages += 1;
       }
       if (selection.brollVideos && videoAvailable) {
-        const extension = path.extname(videoPath!) || '.mp4';
+        const extension = path.extname(scene.videoFile!) || '.mp4';
         videoFile = archivePath('broll', 'videos', `${safeFileName(scene.id, 'scene')}${extension.toLowerCase()}`);
-        await linkOrCopy(videoPath!, path.join(directory, videoFile));
+        await linkOrCopy(scene.videoFile!, path.join(directory, videoFile));
         register(); brollVideos += 1;
       }
       brollScenes.push({
@@ -344,9 +341,15 @@ export async function buildProjectExportDirectory(options: {
         startWordId: scene.startWordId,
         endWordId: scene.endWordId,
         narration: scene.narration,
+        beatType: scene.beatType ?? null,
+        keyPoint: scene.keyPoint ?? null,
+        whyThisVisualMatters: scene.whyThisVisualMatters ?? null,
+        viewerTakeaway: scene.viewerTakeaway ?? null,
+        visualMode: scene.visualMode ?? null,
         visualIntent: scene.visualIntent,
         shotType: scene.shotType,
         imagePrompt: scene.imagePrompt,
+        animationPlan: scene.animationPlan ?? null,
         videoPrompt: scene.videoPrompt ?? null,
         displayTemplate: scene.displayTemplate || plan.settings.displayTemplate || 'full-frame',
         assetAspectRatio: scene.assetAspectRatio || 'auto',
