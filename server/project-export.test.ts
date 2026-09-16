@@ -264,3 +264,95 @@ test('buildProjectExportDirectory exports only selected asset groups', async () 
   }
 });
 
+test('buildProjectExportDirectory keeps B-roll assets exportable when the source clip is missing', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'video-cleaner-broll-recovery-export-test-'));
+  try {
+    const workDir = path.join(root, 'work');
+    const destination = path.join(root, 'bundle');
+    const imagePath = path.join(workDir, 'broll', 'scene-001.png');
+    const videoPath = path.join(workDir, 'broll', 'video-attempts', 'scene-001-attempt.mp4');
+    await fs.mkdir(path.dirname(videoPath), { recursive: true });
+    await fs.writeFile(imagePath, 'image');
+    await fs.writeFile(videoPath, 'video');
+
+    const media = { duration: 2, size: 12, width: 1080, height: 1920, frameRate: 30, videoCodec: 'h264', audioCodec: 'aac', hdr: false };
+    const project: Project = {
+      id: 'project-broll-recovery',
+      name: 'B-roll Recovery',
+      createdAt: '2026-09-14T00:00:00.000Z',
+      updatedAt: '2026-09-14T00:00:00.000Z',
+      sourcePath: path.join(root, 'missing-source.mov'),
+      sourceName: 'missing-source.mov',
+      workDir,
+      media,
+      clips: [{ id: 'clip-001', sourcePath: path.join(root, 'missing-source.mov'), sourceName: 'missing-source.mov', media, timelineStart: 0, timelineEnd: 2 }],
+      transcript: { text: 'B-roll recovery.', words: [] },
+    };
+    const plan: BrollPlan = {
+      version: 2,
+      orientation: 'portrait',
+      stylePreset: 'clean',
+      settings: {
+        workflowMode: 'assets-only',
+        provider: 'gemini',
+        videoProvider: 'magnific',
+        countMode: 'exact',
+        targetCount: 1,
+        imagesPerMinute: 1,
+        intervalSeconds: 20,
+        minSceneDuration: 2,
+        maxSceneDuration: 5,
+        aspectRatio: '9:16',
+        displayTemplate: 'full-frame',
+        returnVideoWithAudio: false,
+      },
+      scenes: [{
+        id: 'scene-001',
+        title: 'Recovered scene',
+        startWordId: 'w000001',
+        endWordId: 'w000001',
+        sourceStart: 0,
+        sourceEnd: 2,
+        narration: 'B-roll recovery.',
+        visualIntent: 'Recover assets',
+        shotType: 'macro',
+        imagePrompt: 'A complete recovery test image prompt.',
+        enabled: true,
+        imageFile: 'broll/old-scene-001.png',
+        videoFile: 'broll/old-scene-001.mp4',
+        videoAttempts: [{ id: 'attempt-001', source: 'magnific', status: 'completed', startedAt: '2026-09-14T00:00:00.000Z', completedAt: '2026-09-14T00:00:01.000Z', localFile: 'broll/video-attempts/scene-001-attempt.mp4' }],
+      }],
+      notes: [],
+    };
+
+    const result = await buildProjectExportDirectory({
+      project,
+      plan,
+      directory: destination,
+      exportOptions: {
+        talkingHeadVideo: true,
+        proxyPreview: false,
+        analysisAudio: false,
+        subtitles: false,
+        transcriptText: false,
+        wordTimestamps: false,
+        editTimeline: false,
+        brollImages: true,
+        brollVideos: true,
+        brollTiming: true,
+      },
+    });
+
+    assert.equal(result.clips, 0);
+    assert.equal(result.brollImages, 1);
+    assert.equal(result.brollVideos, 1);
+    assert.equal((await fs.stat(path.join(destination, 'broll/images/scene-001.png'))).isFile(), true);
+    assert.equal((await fs.stat(path.join(destination, 'broll/videos/scene-001.mp4'))).isFile(), true);
+    const manifest = JSON.parse(await fs.readFile(path.join(destination, 'project-manifest.json'), 'utf8'));
+    assert.deepEqual(manifest.missing.talkingHeadClips, ['missing-source.mov']);
+    assert.deepEqual(manifest.missing.brollImages, []);
+    assert.deepEqual(manifest.missing.brollVideos, []);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});

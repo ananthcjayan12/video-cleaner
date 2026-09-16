@@ -134,6 +134,7 @@ export const api = {
   syncGoogleFlow: (id: string) => request<{ plan: BrollPlan; unmatched: GoogleFlowCatalogVideo[] }>(`/api/projects/${id}/broll/google-flow/sync`, { method: 'POST' }),
   assignGoogleFlowVideo: (id: string, sceneId: string, mediaId: string) => request<{ scene: BrollScene; videoUrl: string }>(`/api/projects/${id}/broll/google-flow/assign`, { method: 'POST', body: JSON.stringify({ sceneId, mediaId }) }),
   previewBrollScene: (id: string, sceneId: string) => request<{ previewUrl: string; duration: number; cached: boolean }>(`/api/projects/${id}/broll/scenes/${sceneId}/preview`, { method: 'POST' }),
+  previewBrollProject: (id: string) => request<{ previewUrl: string; duration: number; cached: boolean; sceneCount: number }>(`/api/projects/${id}/broll/preview`, { method: 'POST' }),
   brollImageUrl: (id: string, sceneId: string, version?: string) => `/api/projects/${id}/broll/scenes/${sceneId}/image${version ? `?v=${encodeURIComponent(version)}` : ''}`,
   brollVideoUrl: (id: string, sceneId: string, version?: string) => `/api/projects/${id}/broll/scenes/${sceneId}/video${version ? `?v=${encodeURIComponent(version)}` : ''}`,
   presenterMatteStatus: (id: string) => request<PresenterMatteStatus>(`/api/projects/${id}/presenter-matte`),
