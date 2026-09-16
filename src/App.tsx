@@ -24,7 +24,6 @@ type SceneDraft = { title: string; imagePrompt: string; videoPrompt: string; sou
 type ParallelFailure<T> = { item: T; error: string };
 type SceneDialog = { kind: 'image-prompt' | 'video-prompt' | 'image-regeneration' | 'video-regeneration'; sceneId: string; value: string };
 type ScenePreview = { sceneId: string; title: string; url: string; duration: number };
-type ProjectPreview = { url: string; duration: number; sceneCount: number; cached: boolean };
 type ProjectExportDialog = { project: Project; options: ProjectExportOptions };
 
 const PROJECT_EXPORT_ITEMS: Array<{ key: keyof ProjectExportOptions; label: string; description: string; group: 'Media' | 'B-roll' | 'Text & timing' }> = [
@@ -71,8 +70,6 @@ function App() {
   const [layoutSaving, setLayoutSaving] = useState<string | null>(null);
   const [previewingScene, setPreviewingScene] = useState<string | null>(null);
   const [scenePreview, setScenePreview] = useState<ScenePreview | null>(null);
-  const [previewingProject, setPreviewingProject] = useState(false);
-  const [projectPreview, setProjectPreview] = useState<ProjectPreview | null>(null);
   const [generatingAll, setGeneratingAll] = useState(false);
   const [parallelRunning, setParallelRunning] = useState<string[]>([]);
   const [imageConcurrency, setImageConcurrency] = useState(0);
@@ -152,9 +149,8 @@ function App() {
   function applyBrollPlan(plan: BrollPlan) {
     const drafts = Object.fromEntries(plan.scenes.map((scene) => [scene.id, draftFromScene(scene)]));
     setBroll(plan); setBrollSettings(plan.settings); setSceneDrafts(drafts); draftRef.current = drafts;
-    setProject((current) => current ? { ...current, state: { ...current.state, ...projectBrollProgress(plan) } } : current);
   }
-  function resetBroll() { clearAllAutosaves(); setBroll(null); setSceneDrafts({}); draftRef.current = {}; setBrollGenerating(null); setPreviewingScene(null); setScenePreview(null); setPreviewingProject(false); setProjectPreview(null); setParallelRunning([]); setFlowUnmatched([]); }
+  function resetBroll() { clearAllAutosaves(); setBroll(null); setSceneDrafts({}); draftRef.current = {}; setBrollGenerating(null); setPreviewingScene(null); setScenePreview(null); setParallelRunning([]); setFlowUnmatched([]); }
 
   function clearAllAutosaves() {
     for (const timer of Object.values(autosaveTimers.current)) window.clearTimeout(timer);
@@ -305,11 +301,7 @@ function App() {
 
   function replaceScene(scene: BrollScene) {
     clearAutosave(scene.id);
-    const nextPlan = broll ? { ...broll, scenes: broll.scenes.map((item) => item.id === scene.id ? scene : item) } : null;
-    if (nextPlan) {
-      setBroll(nextPlan);
-      setProject((current) => current ? { ...current, state: { ...current.state, ...projectBrollProgress(nextPlan) } } : current);
-    }
+    setBroll((current) => current ? { ...current, scenes: current.scenes.map((item) => item.id === scene.id ? scene : item) } : current);
     const nextDraft = draftFromScene(scene); draftRef.current = { ...draftRef.current, [scene.id]: nextDraft }; setSceneDrafts((current) => ({ ...current, [scene.id]: nextDraft }));
   }
 
@@ -364,19 +356,6 @@ function App() {
       setScenePreview({ sceneId: saved.id, title: saved.title, url: result.previewUrl, duration: result.duration }); setStatus(`${saved.title} preview ready${result.cached ? ' from cache' : ''} ✓`);
     } catch (err) { setError(message(err)); }
     finally { setBusy(false); setPreviewingScene(null); }
-  }
-
-  async function previewProjectBroll() {
-    if (!project || !broll || busy || previewingProject) return;
-    if (!proxyUrl) { setStatus('Create or restore the proxy video before previewing the complete B-roll video.'); return; }
-    try {
-      setBusy(true); setError(''); setPreviewingProject(true); setStatus('Saving B-roll timing, then rendering a complete proxy preview…');
-      for (const scene of broll.scenes) await saveScene(scene);
-      const result = await api.previewBrollProject(project.id);
-      setProjectPreview({ url: result.previewUrl, duration: result.duration, sceneCount: result.sceneCount, cached: result.cached });
-      setStatus(`Complete B-roll preview ready${result.cached ? ' from cache' : ''} · ${result.sceneCount} scene${result.sceneCount === 1 ? '' : 's'} ✓`);
-    } catch (err) { setError(message(err)); }
-    finally { setBusy(false); setPreviewingProject(false); }
   }
 
   async function generateScene(scene: BrollScene, regenerationComment?: string) {
@@ -571,11 +550,10 @@ function App() {
         <section className="workflow"><aside className="panel controls"><h3>Dialogue flow</h3><button onClick={prepare} disabled={busy || exportRunning || !!proxyUrl || !system?.ffmpeg.installed || !project.sourceAvailable}>1. Create proxy + audio</button><button onClick={transcribe} disabled={busy || exportRunning || !system?.elevenLabs.configured || !!words.length}>2. Transcribe audio</button><label>Cleanup intensity<select value={intensity} onChange={(e) => setIntensity(e.target.value as typeof intensity)}><option value="light">Light</option><option value="balanced">Balanced</option><option value="aggressive">Aggressive</option></select></label><button onClick={clean} disabled={busy || exportRunning || !system?.codex.authenticated}>3. Clean with Codex</button><div className="divider" /><button onClick={() => exportBaseVideo('quality')} disabled={busy || exportRunning || !edl || !project.sourceAvailable}>Export cleaned video only</button>{exportJob && exportJob.state !== 'idle' && <ExportProgress job={exportJob} onStop={stopExport} />}</aside>
           <section className="workspace"><div className="panel playerCard">{proxyUrl ? <video ref={videoRef} src={proxyUrl} controls onPlay={startPreviewGuard} onPause={stopPreviewGuard} onEnded={stopPreviewGuard} onTimeUpdate={syncPreview} onSeeked={syncPreview} /> : <div className="emptyPlayer">Proxy is optional for standalone B-roll. Saved projects restore it automatically when available.</div>}</div><div className="panel transcriptCard"><div className="sectionTitle"><div><span className="label">EDIT DECISION LIST</span><h3>Transcript</h3></div><span className="legend"><i /> kept <i className="removedDot" /> removed</span></div>{words.length ? <div className="transcript">{words.map((word, i) => <button key={word.id} className={`word ${keepMask[i] ? 'kept' : 'removed'}`} title={`${word.start.toFixed(2)}s – ${word.end.toFixed(2)}s`} onClick={() => toggleWord(i)}>{word.text}</button>)}</div> : <p className="muted">No transcript yet. Raw/asset-only B-roll planning can create it automatically.</p>}</div></section>
         </section>
-        <BrollWorkspace project={project} system={system} plan={broll} settings={brollSettings} setSettings={setBrollSettings} drafts={sceneDrafts} changeDraft={changeDraft} changeSceneLayout={changeSceneLayout} changeSceneAspect={changeSceneAspect} changeVideoProvider={changeVideoProvider} changeVideoAudio={changeVideoAudio} previewScene={previewScene} previewingScene={previewingScene} previewProjectBroll={previewProjectBroll} previewingProject={previewingProject} proxyAvailable={Boolean(proxyUrl)} planBroll={planBroll} generateScene={generateScene} importSceneImage={importSceneImage} importSceneVideo={importSceneVideo} deleteScene={deleteScene} rewriteVideoPrompt={rewriteVideoPrompt} createSceneVideo={createSceneVideo} generateAll={generateAllBroll} generateMissing={generateMissingBroll} regenerateSelected={regenerateSelectedBroll} generateAllVideoPrompts={generateAllVideoPrompts} generateAllVideos={generateAllVideos} generateMissingVideos={generateMissingVideos} saveScene={saveScene} generating={brollGenerating} layoutSaving={layoutSaving} parallelRunning={parallelRunning} generatingAll={generatingAll} busy={busy || exportRunning} exportAssets={exportAssets} exportVideo={() => exportBrollVideo('quality')} imageConcurrency={imageConcurrency} setImageConcurrency={setImageConcurrency} videoConcurrency={videoConcurrency} setVideoConcurrency={setVideoConcurrency} flowUnmatched={flowUnmatched} syncGoogleFlow={syncGoogleFlow} assignGoogleFlowVideo={assignGoogleFlowVideo} />
+        <BrollWorkspace project={project} system={system} plan={broll} settings={brollSettings} setSettings={setBrollSettings} drafts={sceneDrafts} changeDraft={changeDraft} changeSceneLayout={changeSceneLayout} changeSceneAspect={changeSceneAspect} changeVideoProvider={changeVideoProvider} changeVideoAudio={changeVideoAudio} previewScene={previewScene} previewingScene={previewingScene} planBroll={planBroll} generateScene={generateScene} importSceneImage={importSceneImage} importSceneVideo={importSceneVideo} deleteScene={deleteScene} rewriteVideoPrompt={rewriteVideoPrompt} createSceneVideo={createSceneVideo} generateAll={generateAllBroll} generateMissing={generateMissingBroll} regenerateSelected={regenerateSelectedBroll} generateAllVideoPrompts={generateAllVideoPrompts} generateAllVideos={generateAllVideos} generateMissingVideos={generateMissingVideos} saveScene={saveScene} generating={brollGenerating} layoutSaving={layoutSaving} parallelRunning={parallelRunning} generatingAll={generatingAll} busy={busy || exportRunning} exportAssets={exportAssets} exportVideo={() => exportBrollVideo('quality')} imageConcurrency={imageConcurrency} setImageConcurrency={setImageConcurrency} videoConcurrency={videoConcurrency} setVideoConcurrency={setVideoConcurrency} flowUnmatched={flowUnmatched} syncGoogleFlow={syncGoogleFlow} assignGoogleFlowVideo={assignGoogleFlowVideo} />
       </>}
       <footer className="statusbar"><span className={busy || exportRunning || generatingAll ? 'pulse' : ''}>{busy || exportRunning || generatingAll ? '●' : '○'}</span> {status}{error && <strong className="error">{error}</strong>}</footer>
       {scenePreview && <ScenePreviewModal preview={scenePreview} close={() => setScenePreview(null)} />}
-      {projectPreview && <ProjectPreviewModal preview={projectPreview} close={() => setProjectPreview(null)} />}
       {projectExportDialog && <ProjectExportModal dialog={projectExportDialog} busy={busy} changeOption={changeProjectExportOption} selectAll={() => setAllProjectExportOptions(true)} clearAll={() => setAllProjectExportOptions(false)} cancel={() => setProjectExportDialog(null)} confirm={() => void confirmEditableProjectExport()} />}
     </main>
   );
@@ -608,7 +586,7 @@ function SettingsPanel({ system, form, setForm, save, refresh, disabled, ffmpegD
   </section>;
 }
 
-function BrollWorkspace({ project, system, plan, settings, setSettings, drafts, changeDraft, changeSceneLayout, changeSceneAspect, changeVideoProvider, changeVideoAudio, previewScene, previewingScene, previewProjectBroll, previewingProject, proxyAvailable, planBroll, generateScene, importSceneImage, importSceneVideo, deleteScene, rewriteVideoPrompt, createSceneVideo, generateAll, generateMissing, regenerateSelected, generateAllVideoPrompts, generateAllVideos, generateMissingVideos, saveScene, generating, layoutSaving, parallelRunning, generatingAll, busy, exportAssets, exportVideo, imageConcurrency, setImageConcurrency, videoConcurrency, setVideoConcurrency, flowUnmatched, syncGoogleFlow, assignGoogleFlowVideo }: any) {
+function BrollWorkspace({ project, system, plan, settings, setSettings, drafts, changeDraft, changeSceneLayout, changeSceneAspect, changeVideoProvider, changeVideoAudio, previewScene, previewingScene, planBroll, generateScene, importSceneImage, importSceneVideo, deleteScene, rewriteVideoPrompt, createSceneVideo, generateAll, generateMissing, regenerateSelected, generateAllVideoPrompts, generateAllVideos, generateMissingVideos, saveScene, generating, layoutSaving, parallelRunning, generatingAll, busy, exportAssets, exportVideo, imageConcurrency, setImageConcurrency, videoConcurrency, setVideoConcurrency, flowUnmatched, syncGoogleFlow, assignGoogleFlowVideo }: any) {
   const [dialog, setDialog] = useState<SceneDialog | null>(null);
   const [selectedForRegeneration, setSelectedForRegeneration] = useState<string[]>([]);
   const [flowAssignments, setFlowAssignments] = useState<Record<string, string>>({});
@@ -651,21 +629,20 @@ function BrollWorkspace({ project, system, plan, settings, setSettings, drafts, 
           </div>
           <div className="brollBody">
             <label className="toggleRow batchSelect"><input type="checkbox" checked={selectedForBatch} onChange={(e) => toggleRegenerationSelection(scene.id, e.target.checked)} disabled={busy || generatingAll || !!generating} /> Select for image regeneration</label>
-            <div className="sceneMeta"><span>{scene.id}</span><span>{scene.shotType || 'shot'}</span>{scene.provider && <span>{providerLabel(scene.provider)}</span>}{isWorking && <span>WORKING</span>}{scene.videoFile && <span className="videoBadge">VIDEO</span>}{scene.videoProvider && <span>{videoProviderLabel(scene.videoProvider)}</span>}{scene.videoModel && <span>{scene.videoModel}</span>}</div>
+            <div className="sceneMeta"><span>{scene.id}</span>{scene.beatType && <span className="storyBadge">{scene.beatType}</span>}{scene.visualMode && <span className="modeBadge">{scene.visualMode}</span>}<span>{scene.shotType || 'shot'}</span>{scene.provider && <span>{providerLabel(scene.provider)}</span>}{isWorking && <span>WORKING</span>}{scene.videoFile && <span className="videoBadge">VIDEO</span>}{scene.videoProvider && <span>{videoProviderLabel(scene.videoProvider)}</span>}{scene.videoModel && <span>{scene.videoModel}</span>}</div>
             {scene.videoAttempts?.length ? <details className="videoAttempts" open={scene.videoAttempts.some((attempt) => attempt.status !== 'completed')}><summary>Video attempts ({scene.videoAttempts.length})</summary>{[...scene.videoAttempts].reverse().map((attempt) => <div className={`videoAttempt ${attempt.status}`} key={attempt.id}><span>{attempt.status.toUpperCase()} · {attempt.source} · {new Date(attempt.startedAt).toLocaleString()}</span>{attempt.flowMediaId && <small>Flow media: {attempt.flowMediaId}</small>}{attempt.error && <small className="attemptError">{attempt.error}</small>}{attempt.errorLogFile && <small>Full log: {attempt.errorLogFile}</small>}</div>)}</details> : null}
             <label className="toggleRow"><input type="checkbox" checked={draft.enabled} onChange={(e) => changeDraft(scene.id, { enabled: e.target.checked })} /> Use this B-roll scene</label>
             <label className="sceneLayout">B-roll layout<select value={scene.displayTemplate ?? plan.settings.displayTemplate ?? 'full-frame'} onChange={(e) => void changeSceneLayout(scene, e.target.value as BrollDisplayTemplate)} disabled={busy || generatingAll || !!generating || !!layoutSaving}>{BROLL_LAYOUTS.map((layout) => <option key={layout.value} value={layout.value}>{layout.label}</option>)}</select><small>{layoutSaving === scene.id ? 'Saving layout…' : HORIZONTAL_BROLL_LAYOUTS.has(scene.displayTemplate ?? plan.settings.displayTemplate ?? 'full-frame') && (!scene.assetAspectRatio || scene.assetAspectRatio === 'auto') ? 'Auto orientation uses horizontal 16:9 for this card layout.' : 'Applied only to this B-roll when the final video is rendered.'}</small></label>
             <label className="sceneLayout">B-roll orientation<select value={scene.assetAspectRatio ?? 'auto'} onChange={(e) => void changeSceneAspect(scene, e.target.value as BrollAssetAspectRatio)} disabled={busy || generatingAll || !!generating || !!layoutSaving}><option value="auto">Auto from layout</option><option value="9:16">Vertical 9:16</option><option value="16:9">Horizontal 16:9</option></select><small>{scene.assetAspectRatio === '9:16' ? 'Next image and video will be vertical 9:16.' : scene.assetAspectRatio === '16:9' ? 'Next image and video will be horizontal 16:9.' : 'The selected layout decides the next image and video orientation.'}</small></label>
             <label>Scene title<input value={draft.title} onChange={(e) => changeDraft(scene.id, { title: e.target.value })} /></label>
             <div className="timingGrid"><label>Start sec<input type="number" step="0.05" min="0" value={draft.sourceStart} onChange={(e) => changeDraft(scene.id, { sourceStart: e.target.value })} /></label><label>End sec<input type="number" step="0.05" min="0" value={draft.sourceEnd} onChange={(e) => changeDraft(scene.id, { sourceEnd: e.target.value })} /></label></div>
-            <p className="sceneNarration">“{scene.narration}”</p><p className="visualIntent">{scene.visualIntent}</p>
+            <p className="sceneNarration">“{scene.narration}”</p>{(scene.keyPoint || scene.whyThisVisualMatters || scene.viewerTakeaway) && <div className="storyBrief">{scene.keyPoint && <div><strong>Key point</strong><span>{scene.keyPoint}</span></div>}{scene.whyThisVisualMatters && <div><strong>Why B-roll here</strong><span>{scene.whyThisVisualMatters}</span></div>}{scene.viewerTakeaway && <div><strong>Viewer takeaway</strong><span>{scene.viewerTakeaway}</span></div>}</div>}<p className="visualIntent">{scene.visualIntent}</p>{scene.animationPlan && <details className="animationBrief"><summary>Animation plan · {scene.animationPlan.motionType}</summary><div><strong>Camera</strong><span>{scene.animationPlan.cameraMove}</span></div><div><strong>Subject motion</strong><span>{scene.animationPlan.subjectMotion}</span></div>{scene.animationPlan.revealSequence.length > 0 && <div><strong>Reveal</strong><span>{scene.animationPlan.revealSequence.join(' → ')}</span></div>}{scene.animationPlan.highlightTargets.length > 0 && <div><strong>Highlight</strong><span>{scene.animationPlan.highlightTargets.join(', ')}</span></div>}{scene.animationPlan.avoidMotion.length > 0 && <div><strong>Keep stable</strong><span>{scene.animationPlan.avoidMotion.join(', ')}</span></div>}</details>}
             <div className="promptActions"><button onClick={() => openDialog('image-prompt', scene, draft.imagePrompt)} disabled={busy || generatingAll || !!generating}>Edit image prompt</button>{scene.videoPrompt ? <button onClick={() => openDialog('video-prompt', scene, draft.videoPrompt)} disabled={busy || generatingAll || !!generating}>Edit video prompt</button> : scene.imageFile && <button onClick={() => rewriteVideoPrompt(scene)} disabled={busy || generatingAll || !!generating || !system?.codex.authenticated}>Create video prompt</button>}</div>
             <div className="sceneButtons"><button onClick={() => saveScene(scene)} disabled={busy || generatingAll || !!generating}>Save now</button><button onClick={() => void previewScene(scene)} disabled={busy || generatingAll || !!generating || !scene.imageFile || !project.sourceAvailable}>{previewingScene === scene.id ? 'Preparing preview…' : 'Preview section'}</button><button onClick={() => scene.imageFile ? openDialog('image-regeneration', scene) : void generateScene(scene)} disabled={busy || generatingAll || !!generating || !providerReady(system, plan.settings.provider)}>{isWorking ? 'Working…' : scene.imageFile ? 'Regenerate image' : 'Generate image'}</button><button className="primary" onClick={() => scene.videoFile ? openDialog('video-regeneration', scene) : void createSceneVideo(scene)} disabled={busy || generatingAll || !!generating || !scene.imageFile || !videoProviderReady(system, plan.settings.videoProvider || 'grok-cli')}>{isWorking ? 'Working…' : scene.videoFile ? 'Regenerate video' : 'Create video'}</button></div>
           </div>
         </article>;
       })}</div>
-      <div className="brollFooterActions"><button onClick={previewProjectBroll} disabled={busy || generatingAll || previewingProject || !proxyAvailable || !plan.scenes.some((scene: BrollScene) => (scene.videoFile || scene.imageFile) && scene.enabled)}>{previewingProject ? 'Rendering proxy preview…' : 'Preview complete with B-roll'}</button>{plan.settings.workflowMode === 'assets-only' ? <button className="primary" onClick={exportAssets} disabled={busy || generatingAll}>Export images/videos + timing JSON</button> : <button className="primary" onClick={exportVideo} disabled={busy || generatingAll || !project.sourceAvailable || !plan.scenes.some((scene: BrollScene) => (scene.videoFile || scene.imageFile) && scene.enabled)}>Render final video with B-roll</button>}</div>
-      <p className="muted brollPreviewHelp">The complete preview uses the local proxy at quick-validation quality. It does not overwrite or replace the final source render.</p>
+      <div className="brollFooterActions">{plan.settings.workflowMode === 'assets-only' ? <button className="primary" onClick={exportAssets} disabled={busy || generatingAll}>Export images/videos + timing JSON</button> : <button className="primary" onClick={exportVideo} disabled={busy || generatingAll || !project.sourceAvailable || !plan.scenes.some((scene: BrollScene) => (scene.videoFile || scene.imageFile) && scene.enabled)}>Render final video with B-roll</button>}</div>
     </>}
     {dialog && dialogScene && <SceneDialogModal dialog={dialog} scene={dialogScene} setDialog={setDialog} onSubmit={submitDialog} />}
   </section>;
@@ -676,14 +653,6 @@ function ScenePreviewModal({ preview, close }: { preview: ScenePreview; close: (
     <div className="sectionTitle"><div><span className="label">{preview.sceneId} · {preview.duration.toFixed(1)} SEC</span><h3 id="preview-modal-title">{preview.title} — rendered preview</h3></div><button className="ghost" onClick={close}>Close</button></div>
     <video key={preview.url} src={preview.url} controls autoPlay playsInline />
     <p className="muted">This preview renders only this B-roll section at preview resolution using the same layout and presenter-cutout pipeline as the final video.</p>
-  </section></div>;
-}
-
-function ProjectPreviewModal({ preview, close }: { preview: ProjectPreview; close: () => void }) {
-  return <div className="modalBackdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }}><section className="sceneModal previewModal" role="dialog" aria-modal="true" aria-labelledby="project-preview-modal-title">
-    <div className="sectionTitle"><div><span className="label">COMPLETE PROXY PREVIEW · {preview.sceneCount} SCENE{preview.sceneCount === 1 ? '' : 'S'} · {formatTime(preview.duration)}</span><h3 id="project-preview-modal-title">Complete video — B-roll validation</h3></div><button className="ghost" onClick={close}>Close</button></div>
-    <video key={preview.url} src={preview.url} controls autoPlay playsInline />
-    <p className="muted">This complete preview is rendered from the proxy before the final export. Check scene timing, B-roll coverage and layout here, then render the final video when it looks right.</p>
   </section></div>;
 }
 
@@ -779,11 +748,6 @@ function ExportProgress({ job, onStop }: { job: ExportStatus; onStop: () => void
 function SystemItem({ label, ok, detail }: { label: string; ok: boolean; detail: string }) { return <div className="systemItem"><span className={ok ? 'ok' : 'bad'}>{ok ? '✓' : '×'}</span><div><strong>{label}</strong><small>{detail}</small></div></div>; }
 function providerReady(system: SystemStatus | null, provider: ImageProvider) { if (!system) return false; if (provider === 'gemini') return system.imageProviders.gemini.configured; if (provider === 'openai') return system.imageProviders.openai.configured; if (provider === 'grok-cli') return system.imageProviders.grokCli.configured; return system.imageProviders.codexCli.configured; }
 function providerLabel(provider: ImageProvider | 'manual') { if (provider === 'gemini') return 'Gemini API'; if (provider === 'openai') return 'OpenAI Images API'; if (provider === 'grok-cli') return 'Grok CLI'; if (provider === 'manual') return 'Manual image'; return 'Codex CLI'; }
-function projectBrollProgress(plan: BrollPlan): Pick<Project['state'], 'brollPlanned' | 'brollScenes' | 'brollImages' | 'brollVideos' | 'missingImages' | 'missingVideos'> {
-  const brollImages = plan.scenes.filter((scene) => Boolean(scene.imageFile)).length;
-  const brollVideos = plan.scenes.filter((scene) => Boolean(scene.videoFile)).length;
-  return { brollPlanned: true, brollScenes: plan.scenes.length, brollImages, brollVideos, missingImages: plan.scenes.length - brollImages, missingVideos: Math.max(0, brollImages - brollVideos) };
-}
 function formatTime(seconds: number) { const safe = Math.max(0, Number(seconds) || 0); const minutes = Math.floor(safe / 60); const remaining = Math.floor(safe % 60); return `${minutes}:${String(remaining).padStart(2, '0')}`; }
 function draftFromScene(scene: BrollScene): SceneDraft { return { title: scene.title, imagePrompt: scene.imagePrompt, videoPrompt: scene.videoPrompt ?? '', sourceStart: scene.sourceStart.toFixed(2), sourceEnd: scene.sourceEnd.toFixed(2), enabled: scene.enabled }; }
 function message(error: unknown) { return error instanceof Error ? error.message : String(error); }
