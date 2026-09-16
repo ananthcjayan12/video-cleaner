@@ -111,19 +111,26 @@ async function resolvedBrollAsset(workDir: string, scene: BrollScene, kind: Brol
     if (absolute && !candidates.includes(absolute)) candidates.push(absolute);
   };
 
-  add(kind === 'image' ? scene.imageFile : scene.videoFile);
-  if (kind === 'video') {
+  const imageRevision = Math.max(0, Number(scene.imageRevision) || (scene.imageFile ? 1 : 0));
+  const currentVideo = kind === 'video'
+    ? scene.videoStatus !== 'stale' && (scene.videoSourceImageRevision === undefined || scene.videoSourceImageRevision === imageRevision)
+    : true;
+
+  if (kind === 'image') add(scene.imageFile);
+  else if (currentVideo) add(scene.videoFile);
+
+  if (kind === 'video' && currentVideo) {
     const attempts = (scene.videoAttempts ?? [])
-      .filter((attempt) => attempt.status === 'completed')
+      .filter((attempt) => attempt.status === 'completed' && (attempt.sourceImageRevision === undefined || attempt.sourceImageRevision === imageRevision))
       .sort((a, b) => (a.id === scene.activeVideoAttemptId ? -1 : 0) - (b.id === scene.activeVideoAttemptId ? -1 : 0) || String(b.completedAt ?? b.startedAt).localeCompare(String(a.completedAt ?? a.startedAt)));
     for (const attempt of attempts) add(attempt.localFile);
   }
 
   add(path.join(brollDir, `${scene.id}${kind === 'image' ? '.png' : '.mp4'}`));
   const extensions = kind === 'image' ? new Set(['.png', '.jpg', '.jpeg', '.webp', '.heic', '.heif']) : new Set(['.mp4', '.mov', '.m4v', '.webm']);
-  const canonicalMatches = await matchingFiles(brollDir, `${scene.id}.`, extensions);
+  const canonicalMatches = kind === 'video' && !currentVideo ? [] : await matchingFiles(brollDir, `${scene.id}.`, extensions);
   for (const match of canonicalMatches) add(match);
-  if (kind === 'video') {
+  if (kind === 'video' && currentVideo) {
     const attemptMatches = await matchingFiles(path.join(brollDir, 'video-attempts'), `${scene.id}-`, extensions);
     for (const match of attemptMatches) add(match);
   }
@@ -290,14 +297,17 @@ export async function reconcileBrollFiles(project: Project, plan: BrollPlan | nu
       scene.imageFile = undefined; scene.generatedAt = undefined; scene.model = undefined; changed = true;
     }
 
+    scene.imageRevision = Math.max(0, Number(scene.imageRevision) || (scene.imageFile ? 1 : 0));
     const videoPath = await resolvedBrollAsset(project.workDir, scene, 'video');
     const videoStat = await statFile(videoPath);
-    if (videoPath && (scene.videoFile !== videoPath || !scene.videoGeneratedAt)) {
+    if (videoPath && (scene.videoFile !== videoPath || !scene.videoGeneratedAt || scene.videoStatus !== 'ready')) {
       scene.videoFile = videoPath;
       scene.videoGeneratedAt ||= videoStat?.mtime.toISOString();
+      scene.videoSourceImageRevision ??= scene.imageRevision;
+      scene.videoStatus = 'ready';
       changed = true;
     } else if (!videoPath && scene.videoFile) {
-      scene.videoFile = undefined; scene.videoGeneratedAt = undefined; scene.videoModel = undefined; changed = true;
+      scene.videoFile = undefined; scene.videoGeneratedAt = undefined; scene.videoModel = undefined; scene.videoProvider = undefined; scene.activeVideoAttemptId = undefined; scene.videoSourceImageRevision = undefined; scene.videoStatus = scene.imageFile ? 'stale' : 'none'; changed = true;
     }
   }
   if (changed) await atomicWriteJson(path.join(project.workDir, 'broll-plan.json'), plan);
@@ -316,7 +326,7 @@ export async function summarizeProject(project: Project, brollPlan?: BrollPlan |
   const plan = await reconcileBrollFiles(project, loadedPlan ?? null);
   const scenes = plan?.scenes ?? [];
   const brollImages = scenes.filter((scene) => Boolean(scene.imageFile)).length;
-  const brollVideos = scenes.filter((scene) => Boolean(scene.videoFile)).length;
+  const brollVideos = scenes.filter((scene) => Boolean(scene.videoFile) && scene.videoStatus !== 'stale' && (scene.videoSourceImageRevision === undefined || scene.videoSourceImageRevision === scene.imageRevision)).length;
   const videoEligible = scenes.filter((scene) => Boolean(scene.imageFile)).length;
   const sourceName = clips.length > 1 ? `${clips.length} clips · ${clips[0].sourceName}${clips.length > 1 ? ` + ${clips.length - 1} more` : ''}` : project.sourceName;
   return {
