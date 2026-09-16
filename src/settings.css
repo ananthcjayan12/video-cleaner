@@ -159,8 +159,8 @@ textarea:focus { border-color:#71717a; }
 .exportOptionCard b { color:#e4e4e7; font-size:11px; }
 .exportOptionCard small { color:#71717a; line-height:1.4; }
 .exportOptionCard em { color:#fbbf24; font-size:9px; font-style:normal; }
-.exportOptionCard.unavailable { opacity:.5; cursor:not-allowed; }
-.exportOptionCard.unavailable:hover { border-color:#27272a; background:#0f0f11; }
+.exportOptionCard.missingAsset { border-color:#713f12; background:rgba(113,63,18,.08); }
+.exportOptionCard.missingAsset:hover { border-color:#a16207; background:rgba(113,63,18,.14); }
 .exportSourceNote { margin:16px 0 0; border:1px solid #713f12; background:rgba(113,63,18,.12); color:#fde68a; border-radius:10px; padding:10px 12px; font-size:10px; line-height:1.5; }
 .modalActions { justify-content:flex-end; margin-top:16px; }
 
