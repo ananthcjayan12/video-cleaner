@@ -126,7 +126,7 @@ async function resolvedBrollAsset(workDir: string, scene: BrollScene, kind: Brol
     for (const attempt of attempts) add(attempt.localFile);
   }
 
-  add(path.join(brollDir, `${scene.id}${kind === 'image' ? '.png' : '.mp4'}`));
+  if (kind === 'image' || currentVideo) add(path.join(brollDir, `${scene.id}${kind === 'image' ? '.png' : '.mp4'}`));
   const extensions = kind === 'image' ? new Set(['.png', '.jpg', '.jpeg', '.webp', '.heic', '.heif']) : new Set(['.mp4', '.mov', '.m4v', '.webm']);
   const canonicalMatches = kind === 'video' && !currentVideo ? [] : await matchingFiles(brollDir, `${scene.id}.`, extensions);
   for (const match of canonicalMatches) add(match);
