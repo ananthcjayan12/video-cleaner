@@ -222,21 +222,25 @@ export async function buildProjectExportDirectory(options: {
   const register = () => { fileCount += 1; };
   const clips = projectClips(project);
   const clipManifest: Array<Record<string, unknown>> = [];
+  let exportedClips = 0;
 
   for (let index = 0; index < clips.length; index += 1) {
     const clip = clips[index];
+    const sourceAvailable = await isFile(clip.sourcePath);
     let relative: string | null = null;
-    if (selection.talkingHeadVideo) {
-      if (!await isFile(clip.sourcePath)) throw new Error(`Original talking-head clip is missing: ${clip.sourceName}`);
+    if (selection.talkingHeadVideo && sourceAvailable) {
       const sourceExt = path.extname(clip.sourceName || clip.sourcePath) || path.extname(clip.sourcePath) || '.mp4';
       const sourceBase = safeFileName(path.basename(clip.sourceName || clip.sourcePath, sourceExt), `clip-${index + 1}`);
       relative = archivePath('talking-head', `${String(index + 1).padStart(3, '0')}-${sourceBase}${sourceExt.toLowerCase()}`);
       await linkOrCopy(clip.sourcePath, path.join(directory, relative));
       register();
+      exportedClips += 1;
     }
     clipManifest.push({
       id: clip.id,
       originalName: clip.sourceName,
+      sourceAvailable,
+      requested: selection.talkingHeadVideo,
       file: relative,
       timelineStart: clip.timelineStart,
       timelineEnd: clip.timelineEnd,
@@ -398,11 +402,21 @@ export async function buildProjectExportDirectory(options: {
       timebase: 'seconds on original/source timeline',
     },
     counts: {
-      clips: selection.talkingHeadVideo ? clips.length : 0,
+      clips: exportedClips,
       words: words.length,
       brollScenes: plan?.scenes.length ?? 0,
       brollImages,
       brollVideos,
+    },
+    missing: {
+      talkingHeadClips: selection.talkingHeadVideo ? clipManifest.filter((clip) => !clip.sourceAvailable).map((clip) => clip.originalName) : [],
+      proxyPreview: selection.proxyPreview && !proxyFile,
+      analysisAudio: selection.analysisAudio && !analysisAudioFile,
+      transcript: (selection.subtitles || selection.transcriptText || selection.wordTimestamps) && words.length === 0,
+      editTimeline: selection.editTimeline && !project.edl,
+      brollPlan: (selection.brollImages || selection.brollVideos || selection.brollTiming) && !plan,
+      brollImages: selection.brollImages && plan ? plan.scenes.filter((scene) => !scene.imageFile).map((scene) => scene.id) : [],
+      brollVideos: selection.brollVideos && plan ? plan.scenes.filter((scene) => !scene.videoFile).map((scene) => scene.id) : [],
     },
   });
   register();
@@ -433,12 +447,13 @@ export async function buildProjectExportDirectory(options: {
     '',
     'Tip:',
     'You can create multiple lightweight ZIPs from the same Video Cleaner project, for example subtitles-only, B-roll-only, or source-video + timing.',
+    'If a selected asset is missing, Video Cleaner skips that file and still creates the ZIP. Check project-manifest.json -> missing for the skipped items.',
     '',
   ].join('\n');
   await writeText(path.join(directory, 'README.txt'), readme);
   register();
 
-  return { clips: selection.talkingHeadVideo ? clips.length : 0, words: selection.wordTimestamps ? words.length : 0, brollImages, brollVideos, files: fileCount };
+  return { clips: exportedClips, words: selection.wordTimestamps ? words.length : 0, brollImages, brollVideos, files: fileCount };
 }
 
 export async function exportProjectZip(options: {
