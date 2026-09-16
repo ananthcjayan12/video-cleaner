@@ -68,7 +68,45 @@ function freshProject(project: Project, words: Word[], edl: Edl | null, broll: B
   const useCleaned = Boolean(edl?.keepRanges?.length);
   const segments = cleanedSegments(words, useCleaned ? edl : null, project.media.duration);
   const duration = Math.max(0.1, segments.at(-1)?.timelineEnd || project.media.duration || 30);
-  const baseUrl = api.editorBaseVideoUrl(project.id, project.updatedAt);
+  const sourceClips = project.clips?.length ? project.clips : [{
+    id: '__base_video__',
+    sourceName: project.sourceName,
+    duration: project.media.duration,
+    timelineStart: 0,
+    timelineEnd: project.media.duration,
+  }];
+  const baseClips: CJCutClip[] = [];
+  for (let segmentIndex = 0; segmentIndex < segments.length; segmentIndex += 1) {
+    const segment = segments[segmentIndex];
+    for (const sourceClip of sourceClips) {
+      const intersectionStart = Math.max(segment.sourceStart, sourceClip.timelineStart);
+      const intersectionEnd = Math.min(segment.sourceEnd, sourceClip.timelineEnd);
+      if (intersectionEnd <= intersectionStart + 0.001) continue;
+      const externalId = `vc-base-${sourceClip.id}-${segmentIndex}`;
+      baseClips.push({
+        id: externalId,
+        externalId,
+        role: 'base',
+        trackId: 'vc-base',
+        type: 'video',
+        name: sourceClips.length > 1 ? sourceClip.sourceName : 'Talking head',
+        url: sourceClip.id === '__base_video__'
+          ? api.editorBaseVideoUrl(project.id, project.updatedAt)
+          : api.editorBaseClipUrl(project.id, sourceClip.id, project.updatedAt),
+        start: segment.timelineStart + (intersectionStart - segment.sourceStart),
+        duration: Math.max(0.05, intersectionEnd - intersectionStart),
+        sourceStart: Math.max(0, intersectionStart - sourceClip.timelineStart),
+        sourceDuration: sourceClip.duration,
+        x: 50, y: 50, scale: 1, rotation: 0, opacity: 1, volume: 1, speed: 1,
+        metadata: {
+          sourceClipId: sourceClip.id,
+          sourceStart: intersectionStart,
+          sourceEnd: intersectionEnd,
+          managed: true,
+        },
+      });
+    }
+  }
   const baseTrack: CJCutTrack = {
     id: 'vc-base',
     externalId: 'vc-base',
@@ -77,21 +115,7 @@ function freshProject(project: Project, words: Word[], edl: Edl | null, broll: B
     type: 'video',
     visible: true,
     locked: false,
-    clips: segments.map((segment, index): CJCutClip => ({
-      id: `vc-base-${index}`,
-      externalId: `vc-base-${index}`,
-      role: 'base',
-      trackId: 'vc-base',
-      type: 'video',
-      name: index ? `Talking head ${index + 1}` : 'Talking head',
-      url: baseUrl,
-      start: segment.timelineStart,
-      duration: Math.max(0.05, segment.timelineEnd - segment.timelineStart),
-      sourceStart: segment.sourceStart,
-      sourceDuration: project.media.duration,
-      x: 50, y: 50, scale: 1, rotation: 0, opacity: 1, volume: 1, speed: 1,
-      metadata: { sourceStart: segment.sourceStart, sourceEnd: segment.sourceEnd, managed: true },
-    })),
+    clips: baseClips,
   };
 
   const brollTracks: CJCutTrack[] = [];
@@ -129,7 +153,7 @@ function freshProject(project: Project, words: Word[], edl: Edl | null, broll: B
         duration: clipDuration,
         sourceStart: 0,
         sourceDuration: clipDuration,
-        x: transform.x, y: transform.y, scale: transform.scale, rotation: 0, opacity: 1, volume: 1, speed: 1,
+        x: transform.x, y: transform.y, scale: transform.scale, rotation: 0, opacity: 1, volume: 0, speed: 1,
         metadata: {
           managed: true,
           sceneId: scene.id,
