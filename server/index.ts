@@ -734,7 +734,7 @@ app.post('/api/projects/:id/prepare', route(async (req, res) => {
 app.get('/api/projects/:id/proxy', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); if (!project.proxyPath) throw new Error('Proxy has not been generated yet'); res.sendFile(project.proxyPath); }));
 app.get('/api/projects/:id/editor/base-video', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id));
-  const proxy = project.proxyPath && await fs.stat(project.proxyPath).catch(() => null);
+  const proxy = project.proxyPath ? await fs.stat(project.proxyPath).catch(() => null) : null;
   if (proxy?.isFile()) return void res.sendFile(project.proxyPath!);
   const clips = projectClips(project);
   if (clips.length !== 1) throw new Error('Create the project proxy before using the live editor with multiple base clips.');
