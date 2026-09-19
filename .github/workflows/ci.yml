@@ -16,6 +16,6 @@ jobs:
           node-version: 22
       - run: npm install --no-audit --no-fund
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
-      - run: node --import tsx --test server/project-export.test.ts server/editor-render.test.ts
+      - run: node --import tsx --test server/project-export.test.ts server/editor-render.test.ts src/workflow.test.ts
       - run: npm run typecheck
       - run: npm run build
