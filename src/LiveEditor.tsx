@@ -213,33 +213,75 @@ export default function LiveEditor({ project, words, edl, broll, exportVideo, ex
   const saveTimer = useRef<number | null>(null);
   const pendingWrites = useRef<Promise<unknown>>(Promise.resolve());
   const latestTimeline = useRef<CJCutProject | null>(null);
+  const pendingAutosave = useRef(false);
+  const hydratedProjectId = useRef<string | null>(null);
   const [exportPreparing, setExportPreparing] = useState(false);
 
   const seed = useMemo(() => freshProject(project, words, edl, broll), [project, words, edl, broll]);
+  // A new asset changes the editor seed; an unrelated project timestamp does not.
+  // Never re-fetch a stale persisted timeline over active unsaved CJCut edits.
   const seedKey = useMemo(() => JSON.stringify({
     project: project.id,
-    updatedAt: project.updatedAt,
-    broll: (broll?.scenes ?? []).map((scene) => [scene.id, scene.enabled, scene.generatedAt, scene.videoGeneratedAt, scene.imageStatus, scene.videoStatus]),
-  }), [project.id, project.updatedAt, broll]);
+    clips: (project.clips ?? []).map(clip => [clip.id, clip.sourceName, clip.timelineStart, clip.timelineEnd]),
+    edl: edl?.keepRanges ?? null,
+    broll: (broll?.scenes ?? []).map(scene => [scene.id, scene.enabled, scene.generatedAt, scene.videoGeneratedAt, scene.imageStatus, scene.videoStatus, scene.imageRevision]),
+  }), [project.id, project.clips, edl?.keepRanges, broll?.scenes]);
 
   useEffect(() => {
     let cancelled = false;
-    setStatus('Loading saved edit…'); setError('');
-    void api.getEditorProject<CJCutProject>(project.id).then(({ project: saved }) => {
-      if (cancelled) return;
-      const next = reconcileSaved(saved, seed);
-      latestTimeline.current = next;
-      setEditorProject(next);
-      setStatus(saved ? 'Live editor restored and refreshed from current project assets.' : 'Live editor created from the current project stage.');
-    }).catch((err) => {
-      if (cancelled) return;
-      latestTimeline.current = seed; setEditorProject(seed);
-      setError(err instanceof Error ? err.message : String(err));
-    });
+    if (hydratedProjectId.current !== project.id) {
+      hydratedProjectId.current = project.id;
+      latestTimeline.current = null;
+      setEditorProject(null);
+      setStatus('Loading saved edit…');
+      setError('');
+      // Project ID is the only reason to load an editor document from disk.
+      // For asset changes we merge into the live in-memory edit below instead.
+      void pendingWrites.current.catch(() => undefined)
+        .then(() => api.getEditorProject<CJCutProject>(project.id))
+        .then(({ project: saved }) => {
+          if (cancelled) return;
+          const next = reconcileSaved(saved, seed);
+          latestTimeline.current = next;
+          setEditorProject(next);
+          setStatus(saved ? 'Saved editor timeline restored.' : 'Editor ready at this project stage.');
+        }).catch(err => {
+          if (cancelled) return;
+          latestTimeline.current = seed;
+          setEditorProject(seed);
+          setError(err instanceof Error ? err.message : String(err));
+        });
+    } else if (latestTimeline.current) {
+      const merged = reconcileSaved(latestTimeline.current, seed);
+      if (JSON.stringify(merged) !== JSON.stringify(latestTimeline.current)) {
+        latestTimeline.current = merged;
+        setEditorProject(merged);
+        setStatus('New project assets synced without losing timeline edits.');
+        pendingAutosave.current = true;
+        if (saveTimer.current !== null) window.clearTimeout(saveTimer.current);
+        saveTimer.current = window.setTimeout(() => {
+          pendingAutosave.current = false;
+          void queueSave(merged).catch(err => setError(err instanceof Error ? err.message : String(err)));
+        }, 700);
+      }
+    }
     return () => { cancelled = true; };
   }, [project.id, seedKey]);
 
-  useEffect(() => () => { if (saveTimer.current !== null) window.clearTimeout(saveTimer.current); }, []);
+  // Switching workflow tabs unmounts Live Editor. Flush the last edit rather
+  // than cancelling the debounced save (which previously lost splits/trims).
+  useEffect(() => () => {
+    if (saveTimer.current !== null) {
+      window.clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+    if (pendingAutosave.current && latestTimeline.current) {
+      const snapshot = clone(latestTimeline.current);
+      pendingAutosave.current = false;
+      pendingWrites.current = pendingWrites.current.catch(() => undefined)
+        .then(() => api.saveEditorProject(project.id, snapshot));
+    }
+  }, [project.id]);
 
   function queueSave(next: CJCutProject) {
     const snapshot = clone(next);
@@ -249,17 +291,23 @@ export default function LiveEditor({ project, words, edl, broll, exportVideo, ex
   }
 
   function handleChange(next: CJCutProject) {
+    if (latestTimeline.current && JSON.stringify(next) === JSON.stringify(latestTimeline.current)) return;
     latestTimeline.current = next;
     setEditorProject(next);
+    pendingAutosave.current = true;
     if (saveTimer.current !== null) window.clearTimeout(saveTimer.current);
     saveTimer.current = window.setTimeout(() => {
-      void queueSave(next).then(() => setStatus('Editor changes autosaved ✓')).catch((err) => setError(err instanceof Error ? err.message : String(err)));
+      saveTimer.current = null;
+      pendingAutosave.current = false;
+      void queueSave(next).then(() => setStatus('Editor changes autosaved ✓')).catch(err => setError(err instanceof Error ? err.message : String(err)));
     }, 700);
   }
 
   async function saveNow(next: CJCutProject) {
     latestTimeline.current = next;
     if (saveTimer.current !== null) window.clearTimeout(saveTimer.current);
+    saveTimer.current = null;
+    pendingAutosave.current = false;
     try {
       await queueSave(next);
       setStatus('Editor project saved ✓'); setError('');
@@ -273,6 +321,8 @@ export default function LiveEditor({ project, words, edl, broll, exportVideo, ex
     try {
       setExportPreparing(true); setError('');
       if (saveTimer.current !== null) window.clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+      pendingAutosave.current = false;
       await queueSave(latest);
       await exportVideo(latest);
     } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
