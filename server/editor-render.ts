@@ -158,7 +158,6 @@ export async function buildEditorRender(options: {
   if (duration < MIN_LENGTH) throw new Error('The CJCut timeline contains no visible clips.');
   if (duration > 14400) throw new Error('CJCut timeline is longer than the four-hour render limit.');
   const args: string[] = [
-    '-hide_banner', '-y', '-nostats', '-progress', 'pipe:1',
     '-f', 'lavfi', '-i', 'color=c=black:s=' + width + 'x' + height + ':r=' + fps + ':d=' + seconds(duration),
   ];
   const filters: string[] = ['[0:v]setpts=PTS-STARTPTS,format=yuva420p[basecanvas]'];
