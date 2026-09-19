@@ -16,7 +16,8 @@
     "dotenv": "^16.4.7",
     "express": "^5.1.0",
     "react": "^19.1.1",
-    "react-dom": "^19.1.1"
+    "react-dom": "^19.1.1",
+    "@cjcut/editor": "git+https://github.com/ananthcjayan12/cjcut.git#58e67da613da0a2f3a708cee132ad9efe112dbdf"
   },
   "devDependencies": {
     "@types/express": "^5.0.3",
