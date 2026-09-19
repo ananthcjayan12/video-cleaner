@@ -20,6 +20,8 @@ import {
 } from './api';
 import ProjectLibrary from './ProjectLibrary';
 import LiveEditor from './LiveEditor';
+import WorkflowNavigator from './WorkflowNavigator';
+import { stageAfter, suggestedStage, workflowFacts, workflowSteps, type WorkflowStage } from './workflow';
 import './settings.css';
 
 type SceneDraft = { title: string; imagePrompt: string; videoPrompt: string; sourceStart: string; sourceEnd: string; enabled: boolean };
@@ -70,7 +72,8 @@ function App() {
   const [thumbnail, setThumbnail] = useState<ThumbnailState | null>(null);
   const [thumbnailHook, setThumbnailHook] = useState('');
   const [thumbnailBusy, setThumbnailBusy] = useState(false);
-  const [activeProjectView, setActiveProjectView] = useState<'pipeline' | 'editor'>('pipeline');
+  const [activeStage, setActiveStage] = useState<WorkflowStage>('upload');
+  const [quickEditorOpen, setQuickEditorOpen] = useState(false);
   const [sceneDrafts, setSceneDrafts] = useState<Record<string, SceneDraft>>({});
   const [brollGenerating, setBrollGenerating] = useState<string | null>(null);
   const [layoutSaving, setLayoutSaving] = useState<string | null>(null);
@@ -221,7 +224,7 @@ function App() {
     await action('Opening native file picker…', async () => {
       clearAllAutosaves();
       const selected = await api.selectProject(); setProject(selected); setProxyUrl(''); setWords([]); setEdl(null); resetBroll(); setExportJob(null);
-      const thumbnailState = await api.getThumbnail(selected.id); setThumbnail(thumbnailState); setThumbnailHook(thumbnailState.hook ?? ''); setActiveProjectView('pipeline');
+      const thumbnailState = await api.getThumbnail(selected.id); setThumbnail(thumbnailState); setThumbnailHook(thumbnailState.hook ?? ''); setActiveStage('upload'); setQuickEditorOpen(false);
       window.localStorage.setItem('video-cleaner:lastProjectId', selected.id);
       await refreshProjects();
       setStatus('Project created locally. Use the cleaning flow, or jump directly to B-roll planning.');
@@ -234,6 +237,8 @@ function App() {
       const [snapshot, thumbnailState] = await Promise.all([api.openProject(saved.id), api.getThumbnail(saved.id)]);
       setProject(snapshot.project); setProxyUrl(snapshot.proxyUrl ? `${snapshot.proxyUrl}?v=${Date.now()}` : ''); setWords(snapshot.transcript?.words ?? []); setEdl(snapshot.edl); setExportJob(null);
       setThumbnail(thumbnailState); setThumbnailHook(thumbnailState.hook ?? '');
+      setActiveStage(suggestedStage(workflowFacts(snapshot.project, snapshot.transcript?.words?.length ?? 0, Boolean(snapshot.edl), snapshot.broll, thumbnailState)));
+      setQuickEditorOpen(false);
       if (snapshot.broll) applyBrollPlan(snapshot.broll); else resetBroll();
       window.localStorage.setItem('video-cleaner:lastProjectId', saved.id);
       setStatus(snapshot.project.sourceAvailable ? `Resumed ${snapshot.project.name}. Everything is loaded from local storage.` : `Resumed ${snapshot.project.name}. The original source needs to be relinked before source-dependent operations.`);
@@ -241,7 +246,7 @@ function App() {
   }
 
   async function closeProject() {
-    clearAllAutosaves(); setProject(null); setProxyUrl(''); setWords([]); setEdl(null); resetBroll(); setThumbnail(null); setThumbnailHook(''); setActiveProjectView('pipeline'); setExportJob(null); setError(''); await refreshProjects();
+    clearAllAutosaves(); setProject(null); setProxyUrl(''); setWords([]); setEdl(null); resetBroll(); setThumbnail(null); setThumbnailHook(''); setActiveStage('upload'); setQuickEditorOpen(false); setExportJob(null); setError(''); await refreshProjects();
   }
 
   async function renameProject(saved: Project) {
@@ -251,7 +256,7 @@ function App() {
 
   async function deleteProject(saved: Project) {
     if (!window.confirm(`Delete the local project “${saved.name}”?\n\nThis removes its proxy, transcript, edit data and B-roll assets from Video Cleaner. The original source video is NOT deleted.`)) return;
-    await action('Deleting local project files…', async () => { await api.deleteProject(saved.id); if (project?.id === saved.id) { setProject(null); setProxyUrl(''); setWords([]); setEdl(null); resetBroll(); setThumbnail(null); setThumbnailHook(''); setActiveProjectView('pipeline'); } await refreshProjects(); setStatus(`Deleted ${saved.name}. The original video was left untouched.`); });
+    await action('Deleting local project files…', async () => { await api.deleteProject(saved.id); if (project?.id === saved.id) { setProject(null); setProxyUrl(''); setWords([]); setEdl(null); resetBroll(); setThumbnail(null); setThumbnailHook(''); setActiveStage('upload'); setQuickEditorOpen(false); } await refreshProjects(); setStatus(`Deleted ${saved.name}. The original video was left untouched.`); });
   }
 
   async function relinkProject(saved: Project) {
@@ -589,6 +594,13 @@ function App() {
   const capabilities = system?.ffmpeg.capabilities;
   const ffmpegDetail = system?.ffmpeg.path ? `${system.ffmpeg.path}${capabilities?.videoToolboxDecode ? ' · VT decode' : ''}${capabilities?.h264VideoToolbox ? ' · H264 VT' : ''}${capabilities?.hevcVideoToolbox ? ' · HEVC VT' : ''}` : 'Not detected';
   const sourceClips = project?.clips ?? [];
+  const stageFacts = project ? workflowFacts(project, words.length, Boolean(edl), broll, thumbnail) : null;
+  const stageSteps = stageFacts ? workflowSteps(stageFacts) : [];
+  const chooseStage = (next: WorkflowStage) => { setActiveStage(next); setQuickEditorOpen(false); setError(''); };
+  const liveEditorProps = project ? {
+    project, words, edl, broll, exportVideo: exportLiveEditor, exportJob,
+    onStopExport: stopExport, exportBusy: busy || exportRunning,
+  } : null;
 
   return (
     <main className="shell">
@@ -605,22 +617,34 @@ function App() {
       {settingsOpen && <SettingsPanel system={system} form={settingsForm} setForm={setSettingsForm} save={saveSettings} refresh={refreshSystem} disabled={busy || exportRunning || generatingAll} ffmpegDetail={ffmpegDetail} />}
 
       {!project ? <ProjectLibrary projects={recentProjects} busy={busy} onNew={pick} onOpen={(saved) => void openProject(saved)} onRename={(saved) => void renameProject(saved)} onDelete={(saved) => void deleteProject(saved)} onRelink={(saved) => void relinkProject(saved)} onExport={(saved) => void exportEditableProject(saved)} onRefresh={() => void refreshProjects()} /> : <>
+        {activeStage === 'upload' ? <>
         <section className={`source panel ${project.sourceAvailable ? '' : 'missingSourcePanel'}`}>
           <div className="sourceSummary"><div><span className="label">{project.sourceAvailable ? 'BASE VIDEO TIMELINE' : 'BASE CLIP MISSING'}</span><strong>{project.name}</strong><small>{sourceClips.length > 1 ? `${sourceClips.length} clips play continuously in the order below.` : `${project.sourceName} · Add more clips at any time.`} Original media stays untouched.</small></div><div className="sourceRight"><div className="chips"><span>{project.media.width}×{project.media.height}</span><span>{String(project.media.videoCodec).toUpperCase()}</span>{project.media.frameRate ? <span>{project.media.frameRate.toFixed(2)} fps</span> : null}<span>{(project.media.size / 1024 / 1024 / 1024).toFixed(2)} GB</span>{project.media.hdr && <span className="warn">HDR</span>}</div><div className="sourceActions"><button className="primary" onClick={() => void addProjectClips()} disabled={busy || exportRunning || generatingAll || !system?.ffprobe.installed}>+ Add base clips</button><button onClick={() => exportEditableProject()} disabled={busy || exportRunning || generatingAll}>Export editable ZIP</button>{!project.sourceAvailable && <button className="danger" onClick={() => void relinkProject(project)} disabled={busy || generatingAll}>Relink missing clip</button>}</div></div></div>
           {sourceClips.length > 0 && <div className="clipTimeline"><div className="clipTimelineHead"><strong>Playback order</strong><span>Add clips in separate selections, then arrange them here.</span></div>{sourceClips.map((clip, index) => <div className="clipTimelineRow" key={clip.id}><span className="clipOrder">{index + 1}</span><div><strong>{clip.sourceName}</strong><small>{formatTime(clip.duration)} · timeline {formatTime(clip.timelineStart)}–{formatTime(clip.timelineEnd)}</small></div><div className="clipOrderActions"><button onClick={() => void moveProjectClip(index, -1)} disabled={busy || exportRunning || generatingAll || index === 0} aria-label={`Move ${clip.sourceName} earlier`}>↑</button><button onClick={() => void moveProjectClip(index, 1)} disabled={busy || exportRunning || generatingAll || index === sourceClips.length - 1} aria-label={`Move ${clip.sourceName} later`}>↓</button>{sourceClips.length > 1 && <button className="danger" onClick={() => void removeProjectClip(clip)} disabled={busy || exportRunning || generatingAll} aria-label={`Remove ${clip.sourceName}`}>Remove</button>}</div></div>)}</div>}
         </section>
+        </> : <div className="creatorProjectStrip panel"><div><span className="label">CURRENT PROJECT</span><strong>{project.name}</strong><small>{sourceClips.length || 1} base clip(s) · {formatTime(project.media.duration)} · {project.media.width || '?'}×{project.media.height || '?'} · {project.sourceAvailable ? 'Source ready' : 'Source needs relink'}</small></div><button onClick={() => chooseStage('upload')}>Manage source clips</button></div>}
         {!project.sourceAvailable && <div className="sourceWarning panel"><strong>Your project data is safe.</strong><span>Transcript, EDL and B-roll assets can still be resumed locally. Relink the original video before proxy creation or final render.</span></div>}
-        <div className="projectTabs panel">
-          <button className={activeProjectView === 'pipeline' ? 'active' : ''} onClick={() => setActiveProjectView('pipeline')}>Pipeline</button>
-          <button className={activeProjectView === 'editor' ? 'active' : ''} onClick={() => setActiveProjectView('editor')}>Live Editor</button>
-          <span>{activeProjectView === 'editor' ? 'CJCut preview reflects whatever assets exist right now.' : 'Generate and manage transcript, B-roll, video and thumbnail assets.'}</span>
-        </div>
-        {activeProjectView === 'pipeline' ? <>
+        <WorkflowNavigator projectName={project.name} steps={stageSteps} active={activeStage} onNavigate={chooseStage} onProjects={() => void closeProject()} onOpenEditor={() => { if (activeStage === 'editor') setQuickEditorOpen(false); else setQuickEditorOpen((open) => !open); }} previewOpen={quickEditorOpen} />
+        {activeStage === 'clean' && <>
+
         <section className="workflow"><aside className="panel controls"><h3>Dialogue flow</h3><button onClick={prepare} disabled={busy || exportRunning || !!proxyUrl || !system?.ffmpeg.installed || !project.sourceAvailable}>1. Create proxy + audio</button><button onClick={transcribe} disabled={busy || exportRunning || !system?.elevenLabs.configured || !!words.length}>2. Transcribe audio</button><label>Cleanup intensity<select value={intensity} onChange={(e) => setIntensity(e.target.value as typeof intensity)}><option value="light">Light</option><option value="balanced">Balanced</option><option value="aggressive">Aggressive</option></select></label><button onClick={clean} disabled={busy || exportRunning || !system?.codex.authenticated}>3. Clean with Codex</button><div className="divider" /><button onClick={() => exportBaseVideo('quality')} disabled={busy || exportRunning || !edl || !project.sourceAvailable}>Export cleaned video only</button>{exportJob && exportJob.state !== 'idle' && <ExportProgress job={exportJob} onStop={stopExport} />}</aside>
           <section className="workspace"><div className="panel playerCard">{proxyUrl ? <video ref={videoRef} src={proxyUrl} controls onPlay={startPreviewGuard} onPause={stopPreviewGuard} onEnded={stopPreviewGuard} onTimeUpdate={syncPreview} onSeeked={syncPreview} /> : <div className="emptyPlayer">Proxy is optional for standalone B-roll. Saved projects restore it automatically when available.</div>}</div><div className="panel transcriptCard"><div className="sectionTitle"><div><span className="label">EDIT DECISION LIST</span><h3>Transcript</h3></div><span className="legend"><i /> kept <i className="removedDot" /> removed</span></div>{words.length ? <div className="transcript">{words.map((word, i) => <button key={word.id} className={`word ${keepMask[i] ? 'kept' : 'removed'}`} title={`${word.start.toFixed(2)}s – ${word.end.toFixed(2)}s`} onClick={() => toggleWord(i)}>{word.text}</button>)}</div> : <p className="muted">No transcript yet. Raw/asset-only B-roll planning can create it automatically.</p>}</div></section>
         </section>
-        <BrollWorkspace project={project} system={system} plan={broll} settings={brollSettings} setSettings={setBrollSettings} drafts={sceneDrafts} changeDraft={changeDraft} changeSceneLayout={changeSceneLayout} changeSceneAspect={changeSceneAspect} changeVideoProvider={changeVideoProvider} changeVideoAudio={changeVideoAudio} previewScene={previewScene} previewingScene={previewingScene} planBroll={planBroll} generateScene={generateScene} importSceneImage={importSceneImage} importSceneVideo={importSceneVideo} deleteScene={deleteScene} rewriteVideoPrompt={rewriteVideoPrompt} createSceneVideo={createSceneVideo} generateAll={generateAllBroll} generateMissing={generateMissingBroll} regenerateSelected={regenerateSelectedBroll} generateAllVideoPrompts={generateAllVideoPrompts} generateAllVideos={generateAllVideos} generateMissingVideos={generateMissingVideos} saveScene={saveScene} generating={brollGenerating} layoutSaving={layoutSaving} parallelRunning={parallelRunning} generatingAll={generatingAll} busy={busy || exportRunning} exportAssets={exportAssets} exportVideo={() => exportBrollVideo('quality')} imageConcurrency={imageConcurrency} setImageConcurrency={setImageConcurrency} videoConcurrency={videoConcurrency} setVideoConcurrency={setVideoConcurrency} flowUnmatched={flowUnmatched} syncGoogleFlow={syncGoogleFlow} assignGoogleFlowVideo={assignGoogleFlowVideo} thumbnail={thumbnail} thumbnailHook={thumbnailHook} setThumbnailHook={setThumbnailHook} thumbnailBusy={thumbnailBusy} selectThumbnailReferences={selectThumbnailReferences} generateThumbnail={generateThumbnail} />
-        </> : <LiveEditor project={project} words={words} edl={edl} broll={broll} exportVideo={exportLiveEditor} exportJob={exportJob} onStopExport={stopExport} exportBusy={busy || exportRunning} />}
+        </>}
+        {(activeStage === 'story' || activeStage === 'assets' || activeStage === 'thumbnail') &&         <BrollWorkspace focus={activeStage === 'thumbnail' ? 'thumbnail' : activeStage === 'story' ? 'story' : 'assets'} project={project} system={system} plan={broll} settings={brollSettings} setSettings={setBrollSettings} drafts={sceneDrafts} changeDraft={changeDraft} changeSceneLayout={changeSceneLayout} changeSceneAspect={changeSceneAspect} changeVideoProvider={changeVideoProvider} changeVideoAudio={changeVideoAudio} previewScene={previewScene} previewingScene={previewingScene} planBroll={planBroll} generateScene={generateScene} importSceneImage={importSceneImage} importSceneVideo={importSceneVideo} deleteScene={deleteScene} rewriteVideoPrompt={rewriteVideoPrompt} createSceneVideo={createSceneVideo} generateAll={generateAllBroll} generateMissing={generateMissingBroll} regenerateSelected={regenerateSelectedBroll} generateAllVideoPrompts={generateAllVideoPrompts} generateAllVideos={generateAllVideos} generateMissingVideos={generateMissingVideos} saveScene={saveScene} generating={brollGenerating} layoutSaving={layoutSaving} parallelRunning={parallelRunning} generatingAll={generatingAll} busy={busy || exportRunning} exportAssets={exportAssets} exportVideo={() => exportBrollVideo('quality')} imageConcurrency={imageConcurrency} setImageConcurrency={setImageConcurrency} videoConcurrency={videoConcurrency} setVideoConcurrency={setVideoConcurrency} flowUnmatched={flowUnmatched} syncGoogleFlow={syncGoogleFlow} assignGoogleFlowVideo={assignGoogleFlowVideo} thumbnail={thumbnail} thumbnailHook={thumbnailHook} setThumbnailHook={setThumbnailHook} thumbnailBusy={thumbnailBusy} selectThumbnailReferences={selectThumbnailReferences} generateThumbnail={generateThumbnail} />}
+        {activeStage === 'editor' && liveEditorProps && <LiveEditor {...liveEditorProps} />}
+        {activeStage === 'export' && <section className="creatorExportStage">
+          <div className="panel creatorExportHero"><div><span className="label">FINAL VIDEO · EDITOR-FIRST</span><h3>Export exactly what you edited</h3><p>Open the CJCut timeline, preview the current layers, and select “Export edited MP4”. Your trims, splits, layer visibility and B-roll positioning are used by the final renderer. You can also export without B-roll or a thumbnail.</p><button className="primary" onClick={() => chooseStage('editor')} disabled={!project.sourceAvailable}>Open editor & export MP4 ↗</button></div><div className="creatorExportFacts"><span>{stageFacts?.clipCount ?? 0} base clip(s)</span><span>{stageFacts?.imagesReady ?? 0} B-roll images</span><span>{stageFacts?.videosReady ?? 0} B-roll videos</span><span>{thumbnail?.hasImage ? 'Thumbnail ready' : 'Thumbnail optional'}</span></div></div>
+          <div className="creatorExportOptions">
+            <div className="panel"><h3>Cleaned / source-only MP4</h3><p>Use the original pipeline export if you do not need CJCut layers. Cleaning is optional.</p><button onClick={() => exportBaseVideo('quality')} disabled={busy || exportRunning || !project.sourceAvailable}>Export base video</button></div>
+            <div className="panel"><h3>Editable project ZIP</h3><p>Download source clips, B-roll, timestamps, captions and selected assets.</p><button onClick={() => exportEditableProject()} disabled={busy || generatingAll}>Choose ZIP contents</button></div>
+            <div className="panel"><h3>B-roll-only assets</h3><p>Export any available assets independently of the completed video.</p><button onClick={exportAssets} disabled={busy || generatingAll || !broll}>Export available B-roll</button></div>
+            <div className="panel"><h3>Thumbnail</h3><p>{thumbnail?.hasImage ? 'Your branded cover is ready.' : 'A thumbnail is not required to export video.'}</p>{thumbnail?.hasImage ? <img className="creatorExportThumbnail" src={api.thumbnailImageUrl(project.id, thumbnail.generatedAt)} alt="Generated thumbnail" /> : <button onClick={() => chooseStage('thumbnail')}>Create optional cover</button>}</div>
+          </div>
+          {exportJob && exportJob.state !== 'idle' && <ExportProgress job={exportJob} onStop={stopExport} />}
+        </section>}
+        {quickEditorOpen && activeStage !== 'editor' && liveEditorProps && <div className="creatorEditorOverlay" role="dialog" aria-modal="true" aria-label="Quick live editor"><div className="creatorEditorOverlayBar"><div><strong>Live Editor</strong><small>Changes are saved locally. Close to return to {stageSteps.find((step) => step.id === activeStage)?.label || 'your workflow'}.</small></div><div><button onClick={() => { setQuickEditorOpen(false); setActiveStage('editor'); }}>Open full editor</button><button className="primary" onClick={() => setQuickEditorOpen(false)}>Back to workflow ✕</button></div></div><LiveEditor {...liveEditorProps} /></div>}
+
       </>}
       <footer className="statusbar"><span className={busy || exportRunning || generatingAll ? 'pulse' : ''}>{busy || exportRunning || generatingAll ? '●' : '○'}</span> {status}{error && <strong className="error">{error}</strong>}</footer>
       {scenePreview && <ScenePreviewModal preview={scenePreview} close={() => setScenePreview(null)} />}
