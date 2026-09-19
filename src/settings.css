@@ -240,3 +240,13 @@ textarea:focus { border-color:#71717a; }
   .liveEditorInfo > div:last-child { max-width:none; text-align:left; align-items:flex-start; }
   .liveEditorHost { overflow:auto; }
 }
+
+.liveEditorExportActions {display:flex!important;flex-direction:column;align-items:flex-end;gap:7px;max-width:42%;text-align:right;}
+.liveEditorExportActions button {min-width:170px;}
+.liveEditorRenderStatus {padding:13px 16px;display:flex;flex-direction:column;gap:7px;color:#d4d4d8;font-size:12px;}
+.liveEditorRenderStatus strong {font-size:12px;}
+.liveEditorRenderStatus small {color:#a1a1aa;overflow-wrap:anywhere;}
+.liveEditorRenderStatus .progressTrack {width:100%;height:6px;border-radius:999px;background:#27272a;overflow:hidden;}
+.liveEditorRenderStatus .progressTrack > span {display:block;height:100%;background:#38bdf8;}
+.liveEditorRenderStatus.completed .progressTrack > span {background:#4ade80;}
+@media (max-width:1000px) {.liveEditorExportActions {max-width:none;align-items:flex-start;text-align:left;}}
