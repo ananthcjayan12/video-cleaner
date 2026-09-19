@@ -34,6 +34,7 @@ import {
 } from './broll.js';
 import { ensurePresenterMatte, mattingSystemStatus, presenterMatteStatus, type PresenterMatteSpecInput } from './presenter.js';
 import { exportProjectZip, normalizeProjectExportOptions } from './project-export.js';
+import { buildEditorRender } from './editor-render.js';
 import { generateProjectThumbnail, loadThumbnailState, replaceThumbnailReferences, thumbnailImageFile, thumbnailReferenceFile, thumbnailStateView } from './thumbnail.js';
 import {
   atomicWriteJson,
@@ -902,6 +903,53 @@ app.post('/api/projects/:id/export-project-zip', route(async (req, res) => {
   const destination = selectedPath.toLowerCase().endsWith('.zip') ? selectedPath : `${selectedPath}.zip`;
   const result = await exportProjectZip({ project, plan: plan ?? null, destination, exportOptions });
   res.json(result);
+}));
+
+app.post('/api/projects/:id/editor/export-video', route(async (req, res) => {
+  const projectId = routeParam(req.params.id);
+  const project = getProject(projectId);
+  await requireSource(project);
+  const settings = await resolvedSettings();
+  if (!settings.ffmpegBin) throw new Error('FFmpeg was not found');
+  if (exportJobs.get(projectId)?.state === 'running') return void res.status(409).json({ error: 'A render is already running for this project' });
+  const savedPath = path.join(project.workDir, 'editor-project.json');
+  const timeline = await fs.readFile(savedPath, 'utf8').then(value => JSON.parse(value)).catch(() => null);
+  if (!timeline?.tracks?.length) throw new Error('No saved CJCut timeline. Save it in Live Editor first.');
+  const outputPath = await pickExportPath('video-cjcut-edited.mp4', 'Export edited timeline from CJCut');
+  if (!outputPath) return void res.status(400).json({ error: 'Export cancelled' });
+  const mode: 'fast' | 'quality' = req.body?.mode === 'fast' ? 'fast' : 'quality';
+  const job: ExportJob = {
+    state: 'running', progress: 0, outTime: '00:00:00.000000', speed: 'Preparing CJCut layers…',
+    frame: 0, outputPath, encoder: 'libx264', resumable: false, startedAt: Date.now(),
+  };
+  exportJobs.set(projectId, job);
+  void (async () => {
+    try {
+      const broll = brollPlans.get(projectId) ?? await loadBrollPlan(project.workDir);
+      const renderWorkDir = path.join(project.workDir, 'editor-render');
+      const render = await buildEditorRender({
+        project, timeline, broll, ffmpegBin: settings.ffmpegBin!, outputPath, workDir: renderWorkDir, mode,
+        probe: async file => probe(file),
+      });
+      if (job.stopRequested) { job.state = 'stopped'; job.speed = 'Stopped before encoding'; return; }
+      job.speed = `Rendering ${render.visualClips} visual / ${render.audioClips} audio clips…`;
+      await runTrackedExportProcess(projectId, settings.ffmpegBin!, render.args, (elapsed, speed, frame) => {
+        job.progress = Math.min(99, elapsed / render.duration * 100);
+        job.outTime = new Date(Math.max(0, Math.round(elapsed * 1000))).toISOString().slice(11, 23);
+        job.speed = speed || 'Rendering CJCut timeline…';
+        job.frame = frame;
+      });
+      if (job.stopRequested) { job.state = 'stopped'; job.speed = 'Stopped'; await fs.rm(outputPath, { force: true }); return; }
+      const output = await fs.stat(outputPath).catch(() => null);
+      if (!output?.isFile() || output.size < 1000) throw new Error('CJCut render finished without a usable MP4');
+      job.state = 'completed'; job.progress = 100; job.speed = 'Completed';
+    } catch (error) {
+      if (job.stopRequested) { job.state = 'stopped'; job.speed = 'Stopped'; }
+      else { job.state = 'failed'; job.error = error instanceof Error ? error.message : String(error); job.speed = ''; }
+      await fs.rm(outputPath, { force: true }).catch(() => undefined);
+    }
+  })();
+  res.status(202).json({ started: true, outputPath, encoder: 'libx264', hardware: false, targetBitRate: 0, editorTimeline: true });
 }));
 
 app.post('/api/projects/:id/broll/export-video', route(async (req, res) => {

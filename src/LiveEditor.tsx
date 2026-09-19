@@ -1,12 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { CJCutEditor, type CJCutClip, type CJCutProject, type CJCutTrack } from '@cjcut/editor';
-import { api, type BrollDisplayTemplate, type BrollPlan, type BrollScene, type Edl, type Project, type Word } from './api';
+import { api, type BrollDisplayTemplate, type BrollPlan, type BrollScene, type Edl, type ExportStatus, type Project, type Word } from './api';
 
 type Props = {
   project: Project;
   words: Word[];
   edl: Edl | null;
   broll: BrollPlan | null;
+  exportVideo: (timeline: CJCutProject) => Promise<void>;
+  exportJob: ExportStatus | null;
+  onStopExport: () => Promise<void>;
+  exportBusy: boolean;
 };
 
 type TimelineSegment = { sourceStart: number; sourceEnd: number; timelineStart: number; timelineEnd: number };
@@ -202,11 +206,14 @@ function reconcileSaved(saved: CJCutProject | null, fresh: CJCutProject): CJCutP
   return { ...clone(saved), name: fresh.name, width: fresh.width, height: fresh.height, fps: fresh.fps, duration, tracks };
 }
 
-export default function LiveEditor({ project, words, edl, broll }: Props) {
+export default function LiveEditor({ project, words, edl, broll, exportVideo, exportJob, onStopExport, exportBusy }: Props) {
   const [editorProject, setEditorProject] = useState<CJCutProject | null>(null);
   const [status, setStatus] = useState('Preparing live editor…');
   const [error, setError] = useState('');
   const saveTimer = useRef<number | null>(null);
+  const pendingWrites = useRef<Promise<unknown>>(Promise.resolve());
+  const latestTimeline = useRef<CJCutProject | null>(null);
+  const [exportPreparing, setExportPreparing] = useState(false);
 
   const seed = useMemo(() => freshProject(project, words, edl, broll), [project, words, edl, broll]);
   const seedKey = useMemo(() => JSON.stringify({
@@ -220,11 +227,13 @@ export default function LiveEditor({ project, words, edl, broll }: Props) {
     setStatus('Loading saved edit…'); setError('');
     void api.getEditorProject<CJCutProject>(project.id).then(({ project: saved }) => {
       if (cancelled) return;
-      setEditorProject(reconcileSaved(saved, seed));
+      const next = reconcileSaved(saved, seed);
+      latestTimeline.current = next;
+      setEditorProject(next);
       setStatus(saved ? 'Live editor restored and refreshed from current project assets.' : 'Live editor created from the current project stage.');
     }).catch((err) => {
       if (cancelled) return;
-      setEditorProject(seed);
+      latestTimeline.current = seed; setEditorProject(seed);
       setError(err instanceof Error ? err.message : String(err));
     });
     return () => { cancelled = true; };
@@ -232,29 +241,52 @@ export default function LiveEditor({ project, words, edl, broll }: Props) {
 
   useEffect(() => () => { if (saveTimer.current !== null) window.clearTimeout(saveTimer.current); }, []);
 
+  function queueSave(next: CJCutProject) {
+    const snapshot = clone(next);
+    const saving = pendingWrites.current.catch(() => undefined).then(() => api.saveEditorProject(project.id, snapshot));
+    pendingWrites.current = saving;
+    return saving;
+  }
+
   function handleChange(next: CJCutProject) {
+    latestTimeline.current = next;
     setEditorProject(next);
     if (saveTimer.current !== null) window.clearTimeout(saveTimer.current);
     saveTimer.current = window.setTimeout(() => {
-      void api.saveEditorProject(project.id, next).then(() => setStatus('Editor changes autosaved ✓')).catch((err) => setError(err instanceof Error ? err.message : String(err)));
+      void queueSave(next).then(() => setStatus('Editor changes autosaved ✓')).catch((err) => setError(err instanceof Error ? err.message : String(err)));
     }, 700);
   }
 
   async function saveNow(next: CJCutProject) {
+    latestTimeline.current = next;
     if (saveTimer.current !== null) window.clearTimeout(saveTimer.current);
     try {
-      await api.saveEditorProject(project.id, next);
+      await queueSave(next);
       setStatus('Editor project saved ✓'); setError('');
     } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+  }
+
+  async function exportCurrentTimeline() {
+    if (exportBusy || exportPreparing) return;
+    const latest = latestTimeline.current ?? editorProject;
+    if (!latest) return;
+    try {
+      setExportPreparing(true); setError('');
+      if (saveTimer.current !== null) window.clearTimeout(saveTimer.current);
+      await queueSave(latest);
+      await exportVideo(latest);
+    } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+    finally { setExportPreparing(false); }
   }
 
   if (!editorProject) return <section className="panel liveEditorLoading"><strong>Preparing live editor…</strong><span>{status}</span></section>;
 
   return <section className="liveEditorTab">
     <div className="liveEditorInfo panel">
-      <div><span className="label">LIVE PROJECT PREVIEW</span><strong>Current stage → editable CJCut timeline</strong><small>Talking head is the base layer. Every available B-roll is a separate editable layer; video is preferred, otherwise the generated image is used. Move, trim, split, hide or delete clips without changing CJCut itself.</small></div>
-      <div><span>{status}</span>{error && <strong>{error}</strong>}</div>
+      <div><span className="label">LIVE PROJECT PREVIEW</span><strong>Current stage → editable CJCut timeline</strong><small>This timeline is now the source of truth for your edited MP4. Trim, split, reposition and hide B-roll layers, then export exactly this composition.</small></div>
+      <div className="liveEditorExportActions"><button className="primary" onClick={() => void exportCurrentTimeline()} disabled={exportBusy || exportPreparing || !project.sourceAvailable}>{exportPreparing ? 'Saving timeline…' : 'Export edited MP4'}</button>{exportJob?.state === 'running' && <button onClick={() => void onStopExport()}>Stop</button>}<span>{status}</span>{error && <strong>{error}</strong>}</div>
     </div>
+    {exportJob && exportJob.state !== 'idle' && <div className={`liveEditorRenderStatus panel ${exportJob.state}`}><strong>{exportJob.state === 'completed' ? 'Edited MP4 ready' : exportJob.state === 'failed' ? 'Edited render failed' : exportJob.state === 'running' ? 'Rendering edited timeline…' : 'Render stopped'}</strong><span>{Math.min(100, Math.max(0, exportJob.progress || 0)).toFixed(1)}% · {exportJob.speed || exportJob.encoder || ''}</span><div className="progressTrack"><span style={{ width: `${Math.min(100, Math.max(0, exportJob.progress || 0))}%` }} /></div>{exportJob.outputPath && <small>{exportJob.outputPath}</small>}{exportJob.error && <strong className="error">{exportJob.error}</strong>}</div>}
     <div className="liveEditorHost">
       <CJCutEditor
         initialProject={editorProject}

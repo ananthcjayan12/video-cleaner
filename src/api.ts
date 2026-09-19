@@ -163,6 +163,7 @@ export const api = {
   preparePresenterMatte: (id: string) => request<PresenterMatteStatus>(`/api/projects/${id}/presenter-matte`, { method: 'POST' }),
   exportBrollAssets: (id: string) => request<{ destination: string; sceneCount: number }>(`/api/projects/${id}/broll/export-assets`, { method: 'POST' }),
   exportProjectZip: (id: string, options: ProjectExportOptions) => request<ProjectZipExportResult>(`/api/projects/${id}/export-project-zip`, { method: 'POST', body: JSON.stringify({ options }) }),
+  exportEditorVideo: (id: string, mode: 'fast' | 'quality') => request<{ started: boolean; outputPath: string; encoder: string; hardware: boolean; editorTimeline: boolean }>(`/api/projects/${id}/editor/export-video`, { method: 'POST', body: JSON.stringify({ mode }) }),
   exportBrollVideo: (id: string, mode: 'fast' | 'quality') => request<{ started: boolean; outputPath: string; encoder: string; hardware: boolean; targetBitRate: number; brollScenes: number; presenterMatte?: boolean; checkpoints?: number }>(`/api/projects/${id}/broll/export-video`, { method: 'POST', body: JSON.stringify({ mode }) }),
   exportVideo: (id: string, mode: 'fast' | 'quality') => request<{ started: boolean; outputPath: string; encoder: string; hardware: boolean; targetBitRate: number }>(`/api/projects/${id}/export`, { method: 'POST', body: JSON.stringify({ mode }) }),
   exportStatus: (id: string) => request<ExportStatus>(`/api/projects/${id}/export-status`),
