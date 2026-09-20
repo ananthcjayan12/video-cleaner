@@ -21,6 +21,7 @@ import {
 import ProjectLibrary from './ProjectLibrary';
 import LiveEditor from './LiveEditor';
 import WorkflowNavigator from './WorkflowNavigator';
+import ModelPicker, { textProviderConfigured } from './ModelPicker';
 import { suggestedStage, workflowFacts, workflowSteps, type WorkflowStage } from './workflow';
 import './settings.css';
 
@@ -86,11 +87,12 @@ function App() {
   const [flowUnmatched, setFlowUnmatched] = useState<GoogleFlowCatalogVideo[]>([]);
   const [intensity, setIntensity] = useState<'light' | 'balanced' | 'aggressive'>('balanced');
   const [system, setSystem] = useState<SystemStatus | null>(null);
+  const [agyModels, setAgyModels] = useState<import('./api').ModelOption[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsForm, setSettingsForm] = useState({
     elevenLabsApiKey: '', openAiApiKey: '', geminiApiKey: '', magnificApiKey: '', imageProvider: 'gemini',
     openAiImageModel: '', geminiImageModel: '', grokModel: '', grokVideoModel: '', gflowProfile: '', gflowVideoModel: '', magnificVideoModel: '', magnificVideoEndpoint: '',
-    codexBin: '', grokBin: '', gflowBin: '', ffmpegBin: '', ffprobeBin: '', projectsDir: '',
+    codexBin: '', agyBin: '', cleanProvider: 'codex-cli', cleanModel: '', planningProvider: 'codex-cli', planningModel: '', codexModel: '', grokBin: '', gflowBin: '', ffmpegBin: '', ffprobeBin: '', projectsDir: '',
   });
   const [status, setStatus] = useState('Loading local projects…');
   const [busy, setBusy] = useState(false);
@@ -180,13 +182,17 @@ function App() {
   async function refreshSystem() {
     try {
       const result = await api.settings(); setSystem(result);
+      void refreshAgyModels();
       const provider = result.overrides?.imageProvider || result.imageProvider || 'gemini';
       setSettingsForm((current) => ({
         ...current, imageProvider: provider,
+        cleanProvider: result.overrides?.cleanProvider || result.textModels.clean.provider, cleanModel: result.overrides?.cleanModel ?? result.textModels.clean.model,
+        planningProvider: result.overrides?.planningProvider || result.textModels.planning.provider, planningModel: result.overrides?.planningModel ?? result.textModels.planning.model,
+        codexModel: result.overrides?.codexModel ?? result.textModels.codexModel, agyBin: result.overrides?.agyBin ?? '',
         codexBin: result.overrides?.codexBin ?? '', grokBin: result.overrides?.grokBin ?? '', gflowBin: result.overrides?.gflowBin ?? '', ffmpegBin: result.overrides?.ffmpegBin ?? '', ffprobeBin: result.overrides?.ffprobeBin ?? '', projectsDir: result.overrides?.projectsDir ?? '',
         openAiImageModel: result.overrides?.openAiImageModel ?? '', geminiImageModel: result.overrides?.geminiImageModel ?? '', grokModel: result.overrides?.grokModel ?? '', grokVideoModel: result.overrides?.grokVideoModel ?? '', gflowProfile: result.overrides?.gflowProfile ?? '', gflowVideoModel: result.overrides?.gflowVideoModel ?? '', magnificApiKey: '', magnificVideoModel: result.overrides?.magnificVideoModel ?? '', magnificVideoEndpoint: result.overrides?.magnificVideoEndpoint ?? '',
       }));
-      setBrollSettings((current) => ({ ...current, provider: provider as ImageProvider }));
+      setBrollSettings((current) => ({ ...current, provider: provider as ImageProvider, planningProvider: (result.textModels.planning.provider as import('./api').TextProvider), planningModel: result.textModels.planning.model }));
     } catch (err) { setError(message(err)); }
   }
 
@@ -195,6 +201,8 @@ function App() {
     catch (err) { setError(message(err)); }
     finally { setBusy(false); }
   }
+
+  async function refreshAgyModels() { try { const result = await api.agyModels(); setAgyModels(result.models); } catch (err) { setError(message(err)); } }
 
   async function saveSettings() {
     await action('Saving local settings…', async () => {
@@ -318,8 +326,8 @@ function App() {
 
   async function prepare() { if (!project) return; await action('Creating proxy + analysis audio from one source pass…', async () => { const result = await api.prepare(project.id); setProxyUrl(`${result.proxyUrl}?v=${Date.now()}`); setProject((current) => current ? { ...current, proxyUrl: result.proxyUrl, state: { ...current.state, proxyReady: true } } : current); setStatus(`Proxy ready: ${result.proxy.width}×${result.proxy.height} @ ${result.proxy.fps} fps${result.proxy.hardware ? ' · VideoToolbox' : ''}.`); }); }
   async function transcribe() { if (!project) return; await action('Transcribing source audio with ElevenLabs Scribe…', async () => { const result = await api.transcribe(project.id); setWords(result.transcript.words); setEdl(result.edl); resetBroll(); setProject((current) => current ? { ...current, state: { ...current.state, transcriptReady: true } } : current); setStatus('Transcript ready. Clean it, or plan B-roll directly from the raw narration.'); }); }
-  async function clean() { if (!project) return; await action(`Running ${intensity} delete-only Codex cleanup…`, async () => { const result = await api.clean(project.id, intensity); setEdl(result); resetBroll(); setProject((current) => current ? { ...current, state: { ...current.state, cleaned: true, brollPlanned: false, brollScenes: 0, brollImages: 0, brollVideos: 0, missingImages: 0, missingVideos: 0 } } : current); setStatus('Cleaned dialogue EDL ready.'); }); }
-  async function planBroll() { if (!project) return; await action('Codex is planning B-roll and will automatically repair timing or validation issues…', async () => { const result = await api.planBroll(project.id, brollSettings); setWords(result.transcript.words); setEdl(result.edl); applyBrollPlan(result.plan); setProject((current) => current ? { ...current, state: { ...current.state, transcriptReady: true, brollPlanned: true, brollScenes: result.plan.scenes.length, brollImages: 0, brollVideos: 0, missingImages: result.plan.scenes.length, missingVideos: 0 } } : current); setStatus(`B-roll plan ready: ${result.plan.scenes.length} scene${result.plan.scenes.length === 1 ? '' : 's'}. Timing validation passed ✓`); }); }
+  async function clean() { if (!project) return; await action(`Running ${intensity} delete-only cleanup with ${settingsForm.cleanProvider}…`, async () => { await api.saveSettings({ cleanProvider: settingsForm.cleanProvider, cleanModel: settingsForm.cleanModel }); const result = await api.clean(project.id, intensity); setEdl(result); resetBroll(); setProject((current) => current ? { ...current, state: { ...current.state, cleaned: true, brollPlanned: false, brollScenes: 0, brollImages: 0, brollVideos: 0, missingImages: 0, missingVideos: 0 } } : current); setStatus('Cleaned dialogue EDL ready.'); }); }
+  async function planBroll() { if (!project) return; await action(`${brollSettings.planningProvider || 'codex-cli'} is planning B-roll and will repair timing or validation issues…`, async () => { const result = await api.planBroll(project.id, brollSettings); setWords(result.transcript.words); setEdl(result.edl); applyBrollPlan(result.plan); setProject((current) => current ? { ...current, state: { ...current.state, transcriptReady: true, brollPlanned: true, brollScenes: result.plan.scenes.length, brollImages: 0, brollVideos: 0, missingImages: result.plan.scenes.length, missingVideos: 0 } } : current); setStatus(`B-roll plan ready: ${result.plan.scenes.length} scene${result.plan.scenes.length === 1 ? '' : 's'}. Timing validation passed ✓`); }); }
 
   function maskToRanges(mask: boolean[]) {
     const ranges: KeepRange[] = []; let start = -1;
@@ -633,7 +641,7 @@ function App() {
         </div>
       </header>
 
-      {settingsOpen && <SettingsPanel system={system} form={settingsForm} setForm={setSettingsForm} save={saveSettings} refresh={refreshSystem} disabled={busy || exportRunning || generatingAll} ffmpegDetail={ffmpegDetail} />}
+      {settingsOpen && <SettingsPanel agyModels={agyModels} refreshAgyModels={refreshAgyModels} system={system} form={settingsForm} setForm={setSettingsForm} save={saveSettings} refresh={refreshSystem} disabled={busy || exportRunning || generatingAll} ffmpegDetail={ffmpegDetail} />}
 
       {!project ? <ProjectLibrary projects={recentProjects} busy={busy} onNew={pick} onOpen={(saved) => void openProject(saved)} onRename={(saved) => void renameProject(saved)} onDelete={(saved) => void deleteProject(saved)} onRelink={(saved) => void relinkProject(saved)} onExport={(saved) => void exportEditableProject(saved)} onRefresh={() => void refreshProjects()} /> : <>
         {activeStage === 'upload' ? <>
@@ -647,7 +655,7 @@ function App() {
         <WorkflowNavigator projectName={project.name} steps={stageSteps} active={activeStage} onNavigate={chooseStage} onProjects={() => void closeProject()} onOpenEditor={() => { if (activeStage !== 'editor') setQuickEditorOpen((open) => !open); }} previewOpen={quickEditorOpen} />
         {activeStage === 'clean' && <>
 
-        <section className="workflow"><aside className="panel controls"><h3>Dialogue flow</h3><button onClick={prepare} disabled={busy || exportRunning || !!proxyUrl || !system?.ffmpeg.installed || !project.sourceAvailable}>1. Create proxy + audio</button><button onClick={transcribe} disabled={busy || exportRunning || !system?.elevenLabs.configured || !!words.length}>2. Transcribe audio</button><label>Cleanup intensity<select value={intensity} onChange={(e) => setIntensity(e.target.value as typeof intensity)}><option value="light">Light</option><option value="balanced">Balanced</option><option value="aggressive">Aggressive</option></select></label><button onClick={clean} disabled={busy || exportRunning || !system?.codex.authenticated}>3. Clean with Codex</button><div className="divider" /><button onClick={() => exportBaseVideo('quality')} disabled={busy || exportRunning || !edl || !project.sourceAvailable}>Export cleaned video only</button>{exportJob && exportJob.state !== 'idle' && <ExportProgress job={exportJob} onStop={stopExport} />}</aside>
+        <section className="workflow"><aside className="panel controls"><h3>Dialogue flow</h3><button onClick={prepare} disabled={busy || exportRunning || !!proxyUrl || !system?.ffmpeg.installed || !project.sourceAvailable}>1. Create proxy + audio</button><button onClick={transcribe} disabled={busy || exportRunning || !system?.elevenLabs.configured || !!words.length}>2. Transcribe audio</button><label>Cleanup intensity<select value={intensity} onChange={(e) => setIntensity(e.target.value as typeof intensity)}><option value="light">Light</option><option value="balanced">Balanced</option><option value="aggressive">Aggressive</option></select></label><ModelPicker title="Cleaning AI" provider={settingsForm.cleanProvider as import('./api').TextProvider} model={settingsForm.cleanModel} system={system} agyModels={agyModels} onProvider={(value) => setSettingsForm({ ...settingsForm, cleanProvider: value, cleanModel: '' })} onModel={(value) => setSettingsForm({ ...settingsForm, cleanModel: value })} refreshAgy={() => void refreshAgyModels()} busy={busy || exportRunning} /><button onClick={clean} disabled={busy || exportRunning || !textProviderConfigured(system, settingsForm.cleanProvider as import('./api').TextProvider)}>3. Clean with selected model</button><div className="divider" /><button onClick={() => exportBaseVideo('quality')} disabled={busy || exportRunning || !edl || !project.sourceAvailable}>Export cleaned video only</button>{exportJob && exportJob.state !== 'idle' && <ExportProgress job={exportJob} onStop={stopExport} />}</aside>
           <section className="workspace"><div className="panel playerCard">{proxyUrl ? <video ref={videoRef} src={proxyUrl} controls onPlay={startPreviewGuard} onPause={stopPreviewGuard} onEnded={stopPreviewGuard} onTimeUpdate={syncPreview} onSeeked={syncPreview} /> : <div className="emptyPlayer">Proxy is optional for standalone B-roll. Saved projects restore it automatically when available.</div>}</div><div className="panel transcriptCard"><div className="sectionTitle"><div><span className="label">EDIT DECISION LIST</span><h3>Transcript</h3></div><span className="legend"><i /> kept <i className="removedDot" /> removed</span></div>{words.length ? <div className="transcript">{words.map((word, i) => <button key={word.id} className={`word ${keepMask[i] ? 'kept' : 'removed'}`} title={`${word.start.toFixed(2)}s – ${word.end.toFixed(2)}s`} onClick={() => toggleWord(i)}>{word.text}</button>)}</div> : <p className="muted">No transcript yet. Raw/asset-only B-roll planning can create it automatically.</p>}</div></section>
         </section>
         <div className="creatorNextActions panel"><div><strong>Review your dialogue</strong><small>You can clean, manually adjust the transcript, plan B-roll from raw video, or open Live Editor at any time.</small></div><button className="primary" onClick={() => chooseStage('story')}>Plan B-roll →</button><button onClick={() => chooseStage('editor')}>Edit current video</button></div>
@@ -678,10 +686,11 @@ function App() {
   );
 }
 
-function SettingsPanel({ system, form, setForm, save, refresh, disabled, ffmpegDetail }: any) {
+function SettingsPanel({ system, form, setForm, save, refresh, agyModels, refreshAgyModels, disabled, ffmpegDetail }: any) {
   return <section className="panel settingsPanel">
+    <div className="modelSettingsGrid"><ModelPicker title="Cleaning model" provider={form.cleanProvider} model={form.cleanModel} system={system} agyModels={agyModels} onProvider={(value) => setForm({ ...form, cleanProvider: value, cleanModel: '' })} onModel={(value) => setForm({ ...form, cleanModel: value })} refreshAgy={refreshAgyModels} busy={disabled} /><ModelPicker title="Default B-roll planning + animation model" provider={form.planningProvider} model={form.planningModel} system={system} agyModels={agyModels} onProvider={(value) => setForm({ ...form, planningProvider: value, planningModel: '' })} onModel={(value) => setForm({ ...form, planningModel: value })} refreshAgy={refreshAgyModels} busy={disabled} /></div>
     <div className="sectionTitle"><div><span className="label">LOCAL DEPENDENCIES + IMAGE / VIDEO PROVIDERS</span><h3>Settings</h3></div><button onClick={refresh} disabled={disabled}>Re-check</button></div>
-    <div className="systemGrid"><SystemItem label="Codex CLI" ok={Boolean(system?.codex.installed && system?.codex.authenticated)} detail={system?.codex.path ?? 'Not detected'} /><SystemItem label="Grok CLI" ok={Boolean(system?.grok.installed)} detail={system?.grok.path ?? 'Not detected'} /><SystemItem label="Grok Video" ok={Boolean(system?.videoProviders?.grokCli.configured)} detail={system?.videoProviders?.grokCli.configured ? system.videoProviders.grokCli.model : 'Grok CLI not detected'} /><SystemItem label="Google Flow" ok={Boolean(system?.videoProviders?.googleFlow.configured)} detail={system?.videoProviders?.googleFlow.configured ? `${system.videoProviders.googleFlow.model} · profile ${system.videoProviders.googleFlow.profile}` : system?.gflow?.installed ? 'Installed · sign in with gflow auth login' : 'gflow CLI not detected'} /><SystemItem label="Magnific Video" ok={Boolean(system?.videoProviders?.magnific.configured)} detail={system?.videoProviders?.magnific.configured ? system.videoProviders.magnific.model : 'API key missing'} /><SystemItem label="FFmpeg" ok={Boolean(system?.ffmpeg.installed)} detail={ffmpegDetail} /><SystemItem label="ElevenLabs" ok={Boolean(system?.elevenLabs.configured)} detail={system?.elevenLabs.configured ? 'API key configured' : 'API key missing'} /><SystemItem label="Gemini Images" ok={Boolean(system?.imageProviders?.gemini.configured)} detail={system?.imageProviders?.gemini.model ?? 'Not configured'} /><SystemItem label="OpenAI Images" ok={Boolean(system?.imageProviders?.openai.configured)} detail={system?.imageProviders?.openai.model ?? 'Not configured'} /></div>
+    <div className="systemGrid"><SystemItem label="AGY CLI" ok={Boolean(system?.agy?.installed)} detail={system?.agy?.path || 'Not detected'} /><SystemItem label="Codex CLI" ok={Boolean(system?.codex.installed && system?.codex.authenticated)} detail={system?.codex.path ?? 'Not detected'} /><SystemItem label="Grok CLI" ok={Boolean(system?.grok.installed)} detail={system?.grok.path ?? 'Not detected'} /><SystemItem label="Grok Video" ok={Boolean(system?.videoProviders?.grokCli.configured)} detail={system?.videoProviders?.grokCli.configured ? system.videoProviders.grokCli.model : 'Grok CLI not detected'} /><SystemItem label="Google Flow" ok={Boolean(system?.videoProviders?.googleFlow.configured)} detail={system?.videoProviders?.googleFlow.configured ? `${system.videoProviders.googleFlow.model} · profile ${system.videoProviders.googleFlow.profile}` : system?.gflow?.installed ? 'Installed · sign in with gflow auth login' : 'gflow CLI not detected'} /><SystemItem label="Magnific Video" ok={Boolean(system?.videoProviders?.magnific.configured)} detail={system?.videoProviders?.magnific.configured ? system.videoProviders.magnific.model : 'API key missing'} /><SystemItem label="FFmpeg" ok={Boolean(system?.ffmpeg.installed)} detail={ffmpegDetail} /><SystemItem label="ElevenLabs" ok={Boolean(system?.elevenLabs.configured)} detail={system?.elevenLabs.configured ? 'API key configured' : 'API key missing'} /><SystemItem label="Gemini Images" ok={Boolean(system?.imageProviders?.gemini.configured)} detail={system?.imageProviders?.gemini.model ?? 'Not configured'} /><SystemItem label="OpenAI Images" ok={Boolean(system?.imageProviders?.openai.configured)} detail={system?.imageProviders?.openai.model ?? 'Not configured'} /></div>
     <div className="settingsGrid">
       <label>Default image provider<select value={form.imageProvider} onChange={(e) => setForm({ ...form, imageProvider: e.target.value })}><option value="gemini">Gemini API</option><option value="grok-cli">Grok CLI · experimental</option><option value="codex-cli">Codex CLI · experimental</option><option value="openai">OpenAI Images API</option></select></label>
       <label>ElevenLabs API key<input type="password" value={form.elevenLabsApiKey} onChange={(e) => setForm({ ...form, elevenLabsApiKey: e.target.value })} placeholder={system?.elevenLabs.configured ? 'Configured — enter only to replace' : 'xi-…'} /></label>
@@ -689,7 +698,7 @@ function SettingsPanel({ system, form, setForm, save, refresh, disabled, ffmpegD
       <label>Gemini image model<input value={form.geminiImageModel} onChange={(e) => setForm({ ...form, geminiImageModel: e.target.value })} placeholder={system?.imageProviders?.gemini.model || 'gemini-3.1-flash-image'} /></label>
       <label>OpenAI API key<input type="password" value={form.openAiApiKey} onChange={(e) => setForm({ ...form, openAiApiKey: e.target.value })} placeholder={system?.imageProviders?.openai.configured ? 'Configured — enter only to replace' : 'sk-…'} /></label>
       <label>OpenAI image model<input value={form.openAiImageModel} onChange={(e) => setForm({ ...form, openAiImageModel: e.target.value })} placeholder={system?.imageProviders?.openai.model || 'gpt-image-2'} /></label>
-      <label>Codex binary<input value={form.codexBin} onChange={(e) => setForm({ ...form, codexBin: e.target.value })} placeholder="Auto detect from PATH" /></label>
+      <label>AGY CLI binary<input value={form.agyBin} onChange={(e) => setForm({ ...form, agyBin: e.target.value })} placeholder="Auto detect agy on PATH" /></label><label>Codex text/image model override<input value={form.codexModel} onChange={(e) => setForm({ ...form, codexModel: e.target.value })} placeholder="CLI default" /></label><label>Codex binary<input value={form.codexBin} onChange={(e) => setForm({ ...form, codexBin: e.target.value })} placeholder="Auto detect from PATH" /></label>
       <label>Grok binary<input value={form.grokBin} onChange={(e) => setForm({ ...form, grokBin: e.target.value })} placeholder="Auto detect from PATH" /></label>
       <label>Grok agent model override<input value={form.grokModel} onChange={(e) => setForm({ ...form, grokModel: e.target.value })} placeholder="CLI default" /></label>
       <label>Grok image-to-video model<input value={form.grokVideoModel} onChange={(e) => setForm({ ...form, grokVideoModel: e.target.value })} placeholder={system?.videoProviders?.grokCli.model || 'grok-imagine-video-1.5'} /></label>
