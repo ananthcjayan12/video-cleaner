@@ -254,7 +254,7 @@ function validateStoryPlan(words: BrollWord[], keepRanges: BrollKeepRange[] | un
   if (issues.length) throw new BrollPlanValidationError(issues);
   return { beats, notes: Array.isArray(raw?.notes) ? raw.notes.map((note: unknown) => String(note)) : [] };
 }
-async function createVisualPlan(options: { codexBin: string; workDir: string; beats: PlannedStoryBeat[]; targetAspect: string }) {
+async function createVisualPlan(options: { textConfig: TextModelConfig; choice: TextModelChoice; workDir: string; beats: PlannedStoryBeat[]; targetAspect: string }) {
   const schemaPath = path.join(options.workDir, 'broll-visual-plan.schema.json'); const outputPath = path.join(options.workDir, 'codex-broll-visual-plan.json');
   await fs.writeFile(schemaPath, JSON.stringify(visualPlanSchema(options.beats.length), null, 2));
   const beatPayload = options.beats.map((beat) => ({
@@ -264,9 +264,9 @@ async function createVisualPlan(options: { codexBin: string; workDir: string; be
   const basePrompt = `You are the visual-development director for a premium talking-head story. The story editor has already selected the B-roll beats. Your job is to write the strongest possible STARTING-FRAME image prompt for each beat.\n\nDo not add, remove, merge or reorder beats. Return exactly one prompt for every supplied id.\n\nTARGET FRAME: ${options.targetAspect}.\n\nGLOBAL STORYTELLING BAR:\n${BROLL_STYLE_PRESET}\n\nVISUAL MODE RULES:\n- hyperreal-clinical: premium documentary/live-action realism only when a real person, visible symptom, consultation, environment or tangible action is essential to the spoken idea. Natural people; never generic stock posing.\n- educational-3d: polished cinematic 3D/scientific visualization for mechanisms, concepts, progression, prevention or treatment logic.\n- anatomy-cutaway: anatomically plausible sectional/cutaway view that clearly exposes the internal relationship being explained.\n- procedure-closeup: precise close or macro view of a treatment/action/tool interacting with the relevant structure; clinically plausible, clean and non-gory.\n- symbolic-medical: simple premium object-based metaphor for an abstract point such as timing, prevention, protection, risk or recurrence; still grounded in the narration.\n- clinic-support: realistic environment/detail shot only when the clinic, appointment, equipment or consultation itself is part of the story; never use this as filler.\n\nEvery imagePrompt must describe ONE coherent frame, not a collage or infographic. It must be animation-ready: clear depth layers, separated movable elements, readable subject, clean background, no baked-in motion blur. Do not include text, labels, arrows with words, logos, watermarks or poster layouts. The prompt must directly express the key point and viewer takeaway; do not introduce unrelated topics.\n\nSTORY BEATS:\n${JSON.stringify(beatPayload, null, 2)}`;
   let attemptPrompt = basePrompt; let lastIssues: string[] = [];
   for (let attempt = 1; attempt <= 3; attempt += 1) {
-    await run(options.codexBin, ['exec', '--ephemeral', '--output-schema', schemaPath, '--output-last-message', outputPath, '-'], attemptPrompt);
     let raw: any;
-    try { raw = JSON.parse(await fs.readFile(outputPath, 'utf8')); } catch (error) { raw = null; lastIssues = [`Visual plan was not valid JSON: ${error instanceof Error ? error.message : String(error)}`]; }
+    try { raw = await generateStructuredText({ config: options.textConfig, choice: options.choice, workDir: options.workDir, prompt: attemptPrompt, schema: visualPlanSchema(options.beats.length), outputName: 'broll-visual-plan' }); }
+    catch (error) { raw = null; lastIssues = [`Visual plan failed: ${error instanceof Error ? error.message : String(error)}`]; }
     if (raw?.scenes && Array.isArray(raw.scenes)) {
       const byId = new Map<string, string>(); const issues: string[] = [];
       for (const scene of raw.scenes) {
@@ -285,8 +285,9 @@ async function createVisualPlan(options: { codexBin: string; workDir: string; be
   throw new Error(`Codex could not produce a complete visual plan. Remaining issues:\n${lastIssues.map((issue) => `- ${issue}`).join('\\n')}`);
 }
 
-export async function createBrollPlan(options: { codexBin: string; workDir: string; words: BrollWord[]; keepRanges?: BrollKeepRange[]; orientation: 'portrait' | 'landscape'; settings?: Partial<BrollPlanSettings> }) {
-  const settings = normalizeSettings(options.settings); const { codexBin, workDir, words, keepRanges, orientation } = options; const { kept } = keptWordIndexes(words, keepRanges);
+export async function createBrollPlan(options: { textConfig: TextModelConfig; workDir: string; words: BrollWord[]; keepRanges?: BrollKeepRange[]; orientation: 'portrait' | 'landscape'; settings?: Partial<BrollPlanSettings> }) {
+  const settings = normalizeSettings(options.settings); const { workDir, words, keepRanges, orientation } = options;
+  const choice: TextModelChoice = { provider: settings.planningProvider || 'codex-cli', model: settings.planningModel || '' }; const { kept } = keptWordIndexes(words, keepRanges);
   const { times } = keptTimeline(words, keepRanges);
   const transcript = words.map((word, index) => ({ word, index })).filter(({ index }) => kept.has(index)).map(({ word, index }) => { const timeline = times.get(index)!; return `[${word.id} source:${word.start.toFixed(3)}-${word.end.toFixed(3)} final:${timeline.start.toFixed(3)}-${timeline.end.toFixed(3)}] ${word.text}`; }).join('\\n');
   const requestedCount = targetSceneCount(words, keepRanges, settings); const schemaPath = path.join(workDir, 'broll-story-plan.schema.json'); const outputPath = path.join(workDir, 'codex-broll-story-plan.json');
@@ -301,9 +302,9 @@ export async function createBrollPlan(options: { codexBin: string; workDir: stri
   const prompt = `You are the story editor for a polished talking-head video. Decide WHERE B-roll genuinely improves understanding or storytelling before anyone writes image prompts.\n\n${countInstruction}\n${cadenceInstruction}\n\nHARD SCHEDULING RULE: after one B-roll ends, leave at least ${MIN_BROLL_GAP_SECONDS} full seconds of uninterrupted talking-head footage before the next B-roll starts. This is an end-to-next-start gap, not a start-to-start gap. Never overlap or place B-roll scenes back-to-back. Measure gaps using the final timestamps supplied for each word.\n\nAnalyze ONLY the supplied narration. Identify the key story progression: hook, problem, cause, anatomy/mechanism, progression/consequence, solution, prevention, CTA or a genuinely useful supporting beat. Each chosen beat must add new information or emotional clarity. Reject decorative scenes that merely show a generic clinic, smiling person, doctor, tool or object without helping the viewer understand the current sentence.\n\nFor every beat explain:\n- keyPoint: the single spoken idea this visual must communicate.\n- whyThisVisualMatters: why cutting away from the talking head is worth it here.\n- viewerTakeaway: what the viewer should understand after seeing it.\n- visualMode: select the best storytelling language. Use hyperreal-clinical only when real-world human/environment realism carries the idea. Prefer educational-3d/anatomy-cutaway/procedure-closeup for internal mechanisms and treatment logic; symbolic-medical for abstract ideas; clinic-support only when the clinic itself matters.\n\nTARGET FRAME: ${targetAspect}.\nTARGET B-ROLL DURATION: normally ${plannedMinDuration}-${plannedMaxDuration} seconds.\n\nDo NOT write image prompts yet. This pass is only story structure and visual strategy. Every scene must use supplied word IDs and stay chronological.\n\nNARRATION WORDS:\n${transcript}`;
   let attemptPrompt = prompt; let lastIssues: string[] = []; let story: { beats: PlannedStoryBeat[]; notes: string[] } | null = null;
   for (let attempt = 1; attempt <= MAX_BROLL_PLAN_ATTEMPTS; attempt += 1) {
-    await run(codexBin, ['exec', '--ephemeral', '--output-schema', schemaPath, '--output-last-message', outputPath, '-'], attemptPrompt);
     let raw: any;
-    try { raw = JSON.parse(await fs.readFile(outputPath, 'utf8')); } catch (error) { raw = null; lastIssues = [`The story plan was not valid JSON: ${error instanceof Error ? error.message : String(error)}`]; }
+    try { raw = await generateStructuredText({ config: options.textConfig, choice, workDir, prompt: attemptPrompt, schema: storyPlanSchema(requestedCount), outputName: 'broll-story-plan' }); }
+    catch (error) { raw = null; lastIssues = [`The story plan failed: ${error instanceof Error ? error.message : String(error)}`]; }
     if (raw) {
       try { story = validateStoryPlan(words, keepRanges, raw, settings); break; }
       catch (error) { if (!(error instanceof BrollPlanValidationError)) throw error; lastIssues = error.issues; }
@@ -314,7 +315,7 @@ export async function createBrollPlan(options: { codexBin: string; workDir: stri
     }
   }
   if (!story) throw new Error(`Codex could not produce a valid B-roll story plan after ${MAX_BROLL_PLAN_ATTEMPTS} attempts. Remaining issues:\n${lastIssues.map((issue) => `- ${issue}`).join('\\n')}`);
-  const scenes = await createVisualPlan({ codexBin, workDir, beats: story.beats, targetAspect });
+  const scenes = await createVisualPlan({ textConfig: options.textConfig, choice, workDir, beats: story.beats, targetAspect });
   const plan: BrollPlan = { version: 2, orientation, stylePreset: BROLL_STYLE_PRESET, settings, scenes, notes: story.notes };
   await saveBrollPlan(workDir, plan); return plan;
 }
@@ -548,7 +549,7 @@ export async function generateBrollImage(options: { config: ImageProviderConfig;
   }
 }
 
-export async function createVideoPrompt(options: { codexBin: string; workDir: string; plan: BrollPlan; sceneId: string }) {
+export async function createVideoPrompt(options: { textConfig: TextModelConfig; workDir: string; plan: BrollPlan; sceneId: string }) {
   const scene = options.plan.scenes.find((candidate) => candidate.id === options.sceneId); if (!scene) throw new Error('B-roll scene not found'); if (!scene.imageFile) throw new Error('Add or generate a B-roll image before creating video');
   const schemaPath = path.join(options.workDir, `${scene.id}-video-prompt.schema.json`); const outputPath = path.join(options.workDir, `${scene.id}-video-prompt.json`);
   const schema = {
@@ -586,8 +587,8 @@ First create a structured animationPlan:
 - avoidMotion: important things that must remain stable to prevent AI warping or factual confusion.
 
 Then write ONE production-ready videoPrompt based on that plan. Motion must advance the idea, not merely add ambience. Educational/3D/cutaway scenes may reveal layers, show progression, move tools/materials, highlight structures or demonstrate cause-and-effect when supported by the narration. Hyperreal scenes should favor believable human/environment motion and restrained camera movement. Preserve identity, anatomy, composition and clinically important details from the starting image. Do not invent unsupported people, objects, tools, procedures, text or logos. No random morphing, dramatic cuts, lip-sync unless explicitly needed, or decorative motion unrelated to the key point.`;
-  await run(options.codexBin, ['exec', '--ephemeral', '--output-schema', schemaPath, '--output-last-message', outputPath, '-'], prompt);
-  const raw = JSON.parse(await fs.readFile(outputPath, 'utf8')); const videoPrompt = String(raw.videoPrompt ?? '').trim(); const animation = raw.animationPlan ?? {};
+  const raw: any = await generateStructuredText({ config: options.textConfig, choice: { provider: options.plan.settings.planningProvider || 'codex-cli', model: options.plan.settings.planningModel || '' }, workDir: options.workDir, prompt, schema, outputName: scene.id + '-video-prompt' });
+  const videoPrompt = String(raw.videoPrompt ?? '').trim(); const animation = raw.animationPlan ?? {};
   if (videoPrompt.length < 50) throw new Error('Codex returned an unusable video prompt');
   const animationPlan: BrollAnimationPlan = {
     motionType: String(animation.motionType ?? '').trim(), cameraMove: String(animation.cameraMove ?? '').trim(), subjectMotion: String(animation.subjectMotion ?? '').trim(),
