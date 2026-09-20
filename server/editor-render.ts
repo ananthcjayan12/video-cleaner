@@ -147,6 +147,7 @@ async function resolveClips(options: {
 export async function buildEditorRender(options: {
   project: Project; timeline: unknown; broll: BrollPlan | null;
   ffmpegBin: string; outputPath: string; workDir: string; mode: 'fast' | 'quality';
+  inputVideoArgs?: string[]; outputVideoArgs?: string[]; outputColorArgs?: string[];
   probe: (file: string) => Promise<MediaInfo>;
 }): Promise<EditorRender> {
   const editor = validateTimeline(options.timeline);
@@ -184,7 +185,7 @@ export async function buildEditorRender(options: {
     const id = inputIndex++;
     const sourceSeconds = clip.sourceStart + clip.duration * clip.speed;
     if (clip.type === 'image') args.push('-loop', '1', '-framerate', String(fps), '-i', clip.filePath!);
-    else args.push(...(clip.role === 'broll' ? ['-stream_loop', '-1'] : []), '-i', clip.filePath!);
+    else args.push(...(clip.role === 'broll' ? ['-stream_loop', '-1'] : []), ...(options.inputVideoArgs ?? []), '-i', clip.filePath!);
     const trim = clip.type === 'image'
       ? 'trim=duration=' + seconds(clip.duration)
       : 'trim=start=' + seconds(clip.sourceStart) + ':end=' + seconds(sourceSeconds);
@@ -226,11 +227,13 @@ export async function buildEditorRender(options: {
   args.push('-filter_complex', filters.join(';'), '-map', '[vout]');
   if (audioLabels.length) args.push('-map', '[aout]');
   else args.push('-map', String(inputIndex) + ':a:0');
-  args.push(
-    '-t', seconds(duration), '-r', String(fps),
+  const outputVideoArgs = options.outputVideoArgs ?? [
     '-c:v', 'libx264', '-preset', options.mode === 'quality' ? 'medium' : 'veryfast',
-    '-crf', options.mode === 'quality' ? '18' : '23',
-    '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k',
+    '-crf', options.mode === 'quality' ? '18' : '23', '-pix_fmt', 'yuv420p',
+  ];
+  args.push(
+    '-t', seconds(duration), '-r', String(fps), ...outputVideoArgs, ...(options.outputColorArgs ?? []),
+    '-c:a', 'aac', '-b:a', '192k',
     '-movflags', '+faststart', options.outputPath,
   );
   return { args, duration, visualClips, audioClips, outputPath: options.outputPath };

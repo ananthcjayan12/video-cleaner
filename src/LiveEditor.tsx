@@ -229,8 +229,7 @@ export default function LiveEditor({ project, words, edl, broll, exportVideo, ex
 
   useEffect(() => {
     let cancelled = false;
-    if (hydratedProjectId.current !== project.id) {
-      hydratedProjectId.current = project.id;
+    if (hydratedProjectId.current !== project.id || !latestTimeline.current) {
       latestTimeline.current = null;
       setEditorProject(null);
       setStatus('Loading saved edit…');
@@ -242,11 +241,13 @@ export default function LiveEditor({ project, words, edl, broll, exportVideo, ex
         .then(({ project: saved }) => {
           if (cancelled) return;
           const next = reconcileSaved(saved, seed);
+          hydratedProjectId.current = project.id;
           latestTimeline.current = next;
           setEditorProject(next);
           setStatus(saved ? 'Saved editor timeline restored.' : 'Editor ready at this project stage.');
         }).catch(err => {
           if (cancelled) return;
+          hydratedProjectId.current = project.id;
           latestTimeline.current = seed;
           setEditorProject(seed);
           setError(err instanceof Error ? err.message : String(err));

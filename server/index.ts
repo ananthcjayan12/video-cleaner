@@ -918,9 +918,14 @@ app.post('/api/projects/:id/editor/export-video', route(async (req, res) => {
   const outputPath = await pickExportPath('video-cjcut-edited.mp4', 'Export edited timeline from CJCut');
   if (!outputPath) return void res.status(400).json({ error: 'Export cancelled' });
   const mode: 'fast' | 'quality' = req.body?.mode === 'fast' ? 'fast' : 'quality';
+  const capabilities = await ffmpegCapabilities(settings.ffmpegBin);
+  // The editor compositor produces an SDR yuv420p canvas. Use the same
+  // VideoToolbox-aware encoder selection as the original Video Cleaner exports.
+  const encoding = encodingArgs(project, capabilities, mode, true);
+  const inputVideoArgs = capabilities.videoToolboxDecode ? ['-hwaccel', 'videotoolbox'] : [];
   const job: ExportJob = {
     state: 'running', progress: 0, outTime: '00:00:00.000000', speed: 'Preparing CJCut layers…',
-    frame: 0, outputPath, encoder: 'libx264', resumable: false, startedAt: Date.now(),
+    frame: 0, outputPath, encoder: encoding.encoder, resumable: false, startedAt: Date.now(),
   };
   exportJobs.set(projectId, job);
   void (async () => {
@@ -929,6 +934,7 @@ app.post('/api/projects/:id/editor/export-video', route(async (req, res) => {
       const renderWorkDir = path.join(project.workDir, 'editor-render');
       const render = await buildEditorRender({
         project, timeline, broll, ffmpegBin: settings.ffmpegBin!, outputPath, workDir: renderWorkDir, mode,
+        inputVideoArgs, outputVideoArgs: encoding.args, outputColorArgs: bt709ColorArgs(),
         probe: async file => probe(file),
       });
       if (job.stopRequested) { job.state = 'stopped'; job.speed = 'Stopped before encoding'; return; }
@@ -949,7 +955,7 @@ app.post('/api/projects/:id/editor/export-video', route(async (req, res) => {
       await fs.rm(outputPath, { force: true }).catch(() => undefined);
     }
   })();
-  res.status(202).json({ started: true, outputPath, encoder: 'libx264', hardware: false, targetBitRate: 0, editorTimeline: true });
+  res.status(202).json({ started: true, outputPath, encoder: encoding.encoder, hardware: encoding.hardware, targetBitRate: encoding.targetBitRate, editorTimeline: true });
 }));
 
 app.post('/api/projects/:id/broll/export-video', route(async (req, res) => {
