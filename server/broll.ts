@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { generateStructuredText, type TextModelChoice, type TextModelConfig, type TextProvider } from './text-models.js';
 
 export type BrollWord = { id: string; text: string; start: number; end: number };
 export type BrollKeepRange = { startWordId: string; endWordId: string };
@@ -38,6 +39,9 @@ export const BROLL_DISPLAY_TEMPLATES: Array<{ id: BrollDisplayTemplate; label: s
 export type BrollPlanSettings = {
   workflowMode: BrollWorkflowMode;
   provider: ImageProvider;
+  imageModel?: string;
+  planningProvider?: TextProvider;
+  planningModel?: string;
   videoProvider: VideoProvider;
   countMode: BrollCountMode;
   targetCount: number;
@@ -101,7 +105,7 @@ export type BrollScene = {
 };
 
 export type BrollPlan = { version: 2; orientation: 'portrait' | 'landscape'; stylePreset: string; settings: BrollPlanSettings; scenes: BrollScene[]; notes: string[]; googleFlow?: GoogleFlowProjectState };
-export type ImageProviderConfig = { openAiApiKey?: string; openAiModel?: string; geminiApiKey?: string; geminiModel?: string; grokBin?: string; grokModel?: string; grokVideoModel?: string; gflowBin?: string; gflowProfile?: string; gflowVideoModel?: string; magnificApiKey?: string; magnificVideoModel?: string; magnificVideoEndpoint?: string; magnificFetch?: typeof fetch; magnificPollIntervalMs?: number; magnificTimeoutMs?: number; codexBin?: string; ffmpegBin?: string };
+export type ImageProviderConfig = { openAiApiKey?: string; openAiModel?: string; geminiApiKey?: string; geminiModel?: string; grokBin?: string; grokModel?: string; grokVideoModel?: string; gflowBin?: string; gflowProfile?: string; gflowVideoModel?: string; magnificApiKey?: string; magnificVideoModel?: string; magnificVideoEndpoint?: string; magnificFetch?: typeof fetch; magnificPollIntervalMs?: number; magnificTimeoutMs?: number; codexBin?: string; codexModel?: string; ffmpegBin?: string };
 type RunOptions = { cwd?: string; env?: NodeJS.ProcessEnv };
 
 export const BROLL_STYLE_PRESET = [
@@ -210,7 +214,8 @@ function normalizeSettings(raw: Partial<BrollPlanSettings> | undefined): BrollPl
   const videoProvider: VideoProvider = ['grok-cli', 'google-flow', 'magnific'].includes(String(raw?.videoProvider)) ? raw!.videoProvider as VideoProvider : 'grok-cli';
   const countMode: BrollCountMode = ['auto', 'exact', 'per-minute', 'interval'].includes(String(raw?.countMode)) ? raw!.countMode as BrollCountMode : 'auto';
   const aspectRatio = ['auto', '9:16', '16:9'].includes(String(raw?.aspectRatio)) ? raw!.aspectRatio as BrollPlanSettings['aspectRatio'] : 'auto';
-  return { workflowMode, provider, videoProvider, countMode, targetCount: Math.max(1, Math.min(40, Number(raw?.targetCount) || 6)), imagesPerMinute: Math.max(0.5, Math.min(20, Number(raw?.imagesPerMinute) || 5)), intervalSeconds: Math.max(10, Math.min(300, Number(raw?.intervalSeconds) || 20)), minSceneDuration: Math.max(1, Math.min(20, Number(raw?.minSceneDuration) || 3)), maxSceneDuration: Math.max(2, Math.min(30, Number(raw?.maxSceneDuration) || 8)), aspectRatio, displayTemplate: normalizeDisplayTemplate(raw?.displayTemplate), returnVideoWithAudio: raw?.returnVideoWithAudio === true };
+  const planningProvider: TextProvider = ['codex-cli', 'agy-cli', 'gemini', 'openai'].includes(String(raw?.planningProvider)) ? raw!.planningProvider as TextProvider : 'codex-cli';
+  return { workflowMode, provider, imageModel: raw?.imageModel?.trim() || '', planningProvider, planningModel: raw?.planningModel?.trim() || '', videoProvider, countMode, targetCount: Math.max(1, Math.min(40, Number(raw?.targetCount) || 6)), imagesPerMinute: Math.max(0.5, Math.min(20, Number(raw?.imagesPerMinute) || 5)), intervalSeconds: Math.max(10, Math.min(300, Number(raw?.intervalSeconds) || 20)), minSceneDuration: Math.max(1, Math.min(20, Number(raw?.minSceneDuration) || 3)), maxSceneDuration: Math.max(2, Math.min(30, Number(raw?.maxSceneDuration) || 8)), aspectRatio, displayTemplate: normalizeDisplayTemplate(raw?.displayTemplate), returnVideoWithAudio: raw?.returnVideoWithAudio === true };
 }
 function validateStoryPlan(words: BrollWord[], keepRanges: BrollKeepRange[] | undefined, raw: any, settings: BrollPlanSettings) {
   const { index, kept } = keptWordIndexes(words, keepRanges); const { times } = keptTimeline(words, keepRanges);
@@ -511,6 +516,8 @@ export async function generateBrollImage(options: { config: ImageProviderConfig;
   const scene = plan.scenes.find((candidate) => candidate.id === sceneId);
   if (!scene) throw new Error('B-roll scene not found');
   const provider = plan.settings.provider;
+  const customModel = plan.settings.imageModel?.trim();
+  const imageConfig: ImageProviderConfig = { ...config, ...(customModel ? (provider === 'openai' ? { openAiModel: customModel } : provider === 'gemini' ? { geminiModel: customModel } : provider === 'grok-cli' ? { grokModel: customModel } : { codexModel: customModel }) : {}) };
   const aspect = resolveSceneAssetAspect(plan, scene);
   const prompt = generatedImagePrompt(scene, plan, options.regenerationComment);
   const brollDir = path.join(workDir, 'broll');
@@ -520,9 +527,9 @@ export async function generateBrollImage(options: { config: ImageProviderConfig;
   await beginSceneImageGeneration(workDir, plan, scene);
   try {
     let model: string;
-    if (provider === 'openai') model = await generateOpenAi(prompt, aspect, config, rawPath);
-    else if (provider === 'gemini') model = await generateGemini(prompt, aspect, config, rawPath);
-    else model = await generateWithAgentCli(provider, prompt, config, workDir, rawPath);
+    if (provider === 'openai') model = await generateOpenAi(prompt, aspect, imageConfig, rawPath);
+    else if (provider === 'gemini') model = await generateGemini(prompt, aspect, imageConfig, rawPath);
+    else model = await generateWithAgentCli(provider, prompt, imageConfig, workDir, rawPath);
     await normalizeImage(rawPath, outputPath, aspect, config.ffmpegBin, true);
     scene.imageFile = outputPath;
     scene.generatedAt = new Date().toISOString();
