@@ -2,6 +2,8 @@ export type Word = { id: string; text: string; start: number; end: number };
 export type KeepRange = { startWordId: string; endWordId: string; reason?: string };
 export type Edl = { keepRanges: KeepRange[]; notes?: string[] };
 export type ImageProvider = 'openai' | 'gemini' | 'grok-cli' | 'codex-cli';
+export type TextProvider = 'codex-cli' | 'agy-cli' | 'gemini' | 'openai';
+export type ModelOption = { id: string; label: string };
 export type VideoProvider = 'grok-cli' | 'google-flow' | 'magnific';
 export type BrollWorkflowMode = 'cleaned-video' | 'raw-video' | 'assets-only';
 export type BrollAssetAspectRatio = 'auto' | '9:16' | '16:9';
@@ -40,6 +42,8 @@ export type Project = {
 export type SystemStatus = {
   codex: { installed: boolean; authenticated: boolean; path: string | null };
   grok: { installed: boolean; path: string | null; model: string; videoModel?: string };
+  agy: { installed: boolean; path: string | null };
+  textModels: { clean: { provider: TextProvider; model: string }; planning: { provider: TextProvider; model: string }; codexModel: string };
   gflow: { installed: boolean; authenticated: boolean; path: string | null; model: string; profile: string };
   ffmpeg: { installed: boolean; path: string | null; capabilities?: { videoToolboxDecode: boolean; h264VideoToolbox: boolean; hevcVideoToolbox: boolean } };
   ffprobe: { installed: boolean; path: string | null };
@@ -56,6 +60,7 @@ export type SystemStatus = {
   matting?: { configured: boolean; pythonInstalled: boolean; dependenciesInstalled: boolean; pythonPath: string | null; detail: string };
   projectsDir: string;
   overrides?: {
+    cleanProvider?: string; cleanModel?: string; planningProvider?: string; planningModel?: string; codexModel?: string; agyBin?: string;
     codexBin: string; grokBin: string; gflowBin: string; ffmpegBin: string; ffprobeBin: string; projectsDir: string;
     imageProvider: string; openAiImageModel: string; geminiImageModel: string; grokModel: string; grokVideoModel?: string; gflowProfile?: string; gflowVideoModel?: string; magnificVideoModel?: string; magnificVideoEndpoint?: string;
   };
@@ -88,7 +93,7 @@ export type ThumbnailState = {
 };
 export type ExportStatus = { state: 'idle' | 'running' | 'completed' | 'failed' | 'stopped'; progress: number; outTime: string; speed: string; frame: number; outputPath?: string; encoder?: string; error?: string; checkpointCompleted?: number; checkpointTotal?: number; resumable?: boolean; resumed?: boolean };
 export type BrollPlanSettings = {
-  workflowMode: BrollWorkflowMode; provider: ImageProvider; videoProvider: VideoProvider; countMode: BrollCountMode; targetCount: number; imagesPerMinute: number; intervalSeconds: number;
+  workflowMode: BrollWorkflowMode; provider: ImageProvider; imageModel?: string; planningProvider?: TextProvider; planningModel?: string; videoProvider: VideoProvider; countMode: BrollCountMode; targetCount: number; imagesPerMinute: number; intervalSeconds: number;
   minSceneDuration: number; maxSceneDuration: number; aspectRatio: 'auto' | '9:16' | '16:9'; displayTemplate?: BrollDisplayTemplate; returnVideoWithAudio: boolean;
 };
 export type BrollVideoAttempt = { id: string; source: 'google-flow' | 'grok-cli' | 'magnific' | 'manual' | 'flow-catalog'; status: 'submitted' | 'completed' | 'failed'; startedAt: string; completedAt?: string; model?: string; prompt?: string; localFile?: string; flowProjectId?: string; flowMediaId?: string; flowWorkflowId?: string; error?: string; errorLogFile?: string; sourceImageRevision?: number };
@@ -119,6 +124,7 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 export const api = {
   status: () => request<SystemStatus>('/api/system/status'),
   settings: () => request<SystemStatus>('/api/settings'),
+  agyModels: () => request<{ models: ModelOption[] }>('/api/models/agy'),
   saveSettings: (body: Record<string, string>) => request<SystemStatus>('/api/settings', { method: 'PUT', body: JSON.stringify(body) }),
 
   listProjects: () => request<Project[]>('/api/projects'),
@@ -146,7 +152,7 @@ export const api = {
   generateThumbnail: (id: string, hook?: string) => request<ThumbnailState>(`/api/projects/${id}/thumbnail/generate`, { method: 'POST', body: JSON.stringify({ hook }) }),
   thumbnailImageUrl: (id: string, version?: string) => `/api/projects/${id}/thumbnail/image${version ? `?v=${encodeURIComponent(version)}` : ''}`,
   thumbnailReferenceUrl: (id: string, referenceId: string, version?: string) => `/api/projects/${id}/thumbnail/references/${encodeURIComponent(referenceId)}${version ? `?v=${encodeURIComponent(version)}` : ''}`,
-  updateBrollSettings: (id: string, patch: { provider?: ImageProvider; videoProvider?: VideoProvider; returnVideoWithAudio?: boolean }) => request<BrollPlan>(`/api/projects/${id}/broll/settings`, { method: 'PUT', body: JSON.stringify(patch) }),
+  updateBrollSettings: (id: string, patch: { provider?: ImageProvider; imageModel?: string; planningProvider?: TextProvider; planningModel?: string; videoProvider?: VideoProvider; returnVideoWithAudio?: boolean }) => request<BrollPlan>(`/api/projects/${id}/broll/settings`, { method: 'PUT', body: JSON.stringify(patch) }),
   updateBrollScene: (id: string, sceneId: string, patch: { title?: string; imagePrompt?: string; videoPrompt?: string; sourceStart?: number; sourceEnd?: number; enabled?: boolean; displayTemplate?: BrollDisplayTemplate | 'default'; assetAspectRatio?: BrollAssetAspectRatio }) => request<BrollScene>(`/api/projects/${id}/broll/scenes/${sceneId}`, { method: 'PUT', body: JSON.stringify(patch) }),
   deleteBrollScene: (id: string, sceneId: string) => request<BrollPlan>(`/api/projects/${id}/broll/scenes/${sceneId}`, { method: 'DELETE' }),
   generateBrollScene: (id: string, sceneId: string, regenerationComment?: string) => request<{ scene: BrollScene; imageUrl: string }>(`/api/projects/${id}/broll/scenes/${sceneId}/generate`, { method: 'POST', body: JSON.stringify({ regenerationComment }) }),
