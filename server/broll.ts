@@ -54,6 +54,23 @@ export type BrollPlanSettings = {
   returnVideoWithAudio: boolean;
 };
 
+function planningModelLabel(choice: TextModelChoice): string {
+  const provider = choice.provider === 'agy-cli' ? 'AGY' : choice.provider === 'codex-cli' ? 'Codex' : choice.provider === 'openai' ? 'OpenAI' : 'Gemini';
+  return choice.model ? `${provider} (${choice.model})` : provider;
+}
+
+async function writePlanningFailureLog(workDir: string, stage: string, choice: TextModelChoice, attempts: number, issues: string[]): Promise<string | undefined> {
+  try {
+    const directory = path.join(workDir, 'generation-logs', 'text');
+    await fs.mkdir(directory, { recursive: true });
+    const logPath = path.join(directory, `${stage}-validation-latest.json`);
+    await fs.writeFile(logPath, JSON.stringify({ timestamp: new Date().toISOString(), stage, provider: choice.provider, model: choice.model || null, attempts, issues }, null, 2));
+    return logPath;
+  } catch {
+    return undefined;
+  }
+}
+
 export type BrollVideoAttempt = {
   id: string;
   source: 'google-flow' | 'grok-cli' | 'magnific' | 'manual' | 'flow-catalog';
@@ -255,7 +272,7 @@ function validateStoryPlan(words: BrollWord[], keepRanges: BrollKeepRange[] | un
   return { beats, notes: Array.isArray(raw?.notes) ? raw.notes.map((note: unknown) => String(note)) : [] };
 }
 async function createVisualPlan(options: { textConfig: TextModelConfig; choice: TextModelChoice; workDir: string; beats: PlannedStoryBeat[]; targetAspect: string }) {
-  const schemaPath = path.join(options.workDir, 'broll-visual-plan.schema.json'); const outputPath = path.join(options.workDir, 'codex-broll-visual-plan.json');
+  const schemaPath = path.join(options.workDir, 'broll-visual-plan.schema.json');
   await fs.writeFile(schemaPath, JSON.stringify(visualPlanSchema(options.beats.length), null, 2));
   const beatPayload = options.beats.map((beat) => ({
     id: beat.id, narration: beat.narration, beatType: beat.beatType, keyPoint: beat.keyPoint, whyThisVisualMatters: beat.whyThisVisualMatters,
@@ -280,9 +297,10 @@ async function createVisualPlan(options: { textConfig: TextModelConfig; choice: 
       if (!issues.length) return options.beats.map((beat): BrollScene => ({ ...beat, imagePrompt: byId.get(beat.id)!, enabled: true }));
       lastIssues = issues;
     }
-    if (attempt < 3) attemptPrompt = `${basePrompt}\n\nREPAIR THE VISUAL PLAN. Return a complete replacement for all beats. Fix every issue:\n${lastIssues.map((issue, index) => `${index + 1}. ${issue}`).join('\\n')}`;
+    if (attempt < 3) attemptPrompt = `${basePrompt}\n\nREPAIR THE VISUAL PLAN. Return a complete replacement for all beats. Fix every issue:\n${lastIssues.map((issue, index) => `${index + 1}. ${issue}`).join('\n')}`;
   }
-  throw new Error(`Codex could not produce a complete visual plan. Remaining issues:\n${lastIssues.map((issue) => `- ${issue}`).join('\\n')}`);
+  const logPath = await writePlanningFailureLog(options.workDir, 'broll-visual-plan', options.choice, 3, lastIssues);
+  throw new Error(`${planningModelLabel(options.choice)} could not produce a complete visual plan after 3 attempts.${logPath ? ` Diagnostic log: ${logPath}` : ''}\nRemaining issues:\n${lastIssues.map((issue) => `- ${issue}`).join('\n')}`);
 }
 
 export async function createBrollPlan(options: { textConfig: TextModelConfig; workDir: string; words: BrollWord[]; keepRanges?: BrollKeepRange[]; orientation: 'portrait' | 'landscape'; settings?: Partial<BrollPlanSettings> }) {
@@ -290,7 +308,7 @@ export async function createBrollPlan(options: { textConfig: TextModelConfig; wo
   const choice: TextModelChoice = { provider: settings.planningProvider || 'codex-cli', model: settings.planningModel || '' }; const { kept } = keptWordIndexes(words, keepRanges);
   const { times } = keptTimeline(words, keepRanges);
   const transcript = words.map((word, index) => ({ word, index })).filter(({ index }) => kept.has(index)).map(({ word, index }) => { const timeline = times.get(index)!; return `[${word.id} source:${word.start.toFixed(3)}-${word.end.toFixed(3)} final:${timeline.start.toFixed(3)}-${timeline.end.toFixed(3)}] ${word.text}`; }).join('\\n');
-  const requestedCount = targetSceneCount(words, keepRanges, settings); const schemaPath = path.join(workDir, 'broll-story-plan.schema.json'); const outputPath = path.join(workDir, 'codex-broll-story-plan.json');
+  const requestedCount = targetSceneCount(words, keepRanges, settings); const schemaPath = path.join(workDir, 'broll-story-plan.schema.json');
   await fs.writeFile(schemaPath, JSON.stringify(storyPlanSchema(requestedCount), null, 2));
   const targetAspect = settings.aspectRatio === 'auto' ? (orientation === 'portrait' ? 'vertical 9:16' : 'landscape 16:9') : settings.aspectRatio;
   const intervalDurationLimit = settings.countMode === 'interval' ? settings.intervalSeconds - MIN_BROLL_GAP_SECONDS : settings.maxSceneDuration;
@@ -311,10 +329,13 @@ export async function createBrollPlan(options: { textConfig: TextModelConfig; wo
     }
     if (attempt < MAX_BROLL_PLAN_ATTEMPTS) {
       const previousPlan = raw ? JSON.stringify(raw, null, 2) : '(unparseable response)';
-      attemptPrompt = `${prompt}\n\nREPAIR PASS ${attempt} OF ${MAX_BROLL_PLAN_ATTEMPTS - 1}\nThe previous story plan failed validation. Return a complete replacement plan. Correct every issue while keeping only strong storytelling beats.\n\nALL VALIDATION ISSUES:\n${lastIssues.map((issue, index) => `${index + 1}. ${issue}`).join('\\n')}\n\nPREVIOUS STORY PLAN:\n${previousPlan}`;
+      attemptPrompt = `${prompt}\n\nREPAIR PASS ${attempt} OF ${MAX_BROLL_PLAN_ATTEMPTS - 1}\nThe previous story plan failed validation. Return a complete replacement plan. Correct every issue while keeping only strong storytelling beats.\n\nALL VALIDATION ISSUES:\n${lastIssues.map((issue, index) => `${index + 1}. ${issue}`).join('\n')}\n\nPREVIOUS STORY PLAN:\n${previousPlan}`;
     }
   }
-  if (!story) throw new Error(`Codex could not produce a valid B-roll story plan after ${MAX_BROLL_PLAN_ATTEMPTS} attempts. Remaining issues:\n${lastIssues.map((issue) => `- ${issue}`).join('\\n')}`);
+  if (!story) {
+    const logPath = await writePlanningFailureLog(workDir, 'broll-story-plan', choice, MAX_BROLL_PLAN_ATTEMPTS, lastIssues);
+    throw new Error(`${planningModelLabel(choice)} could not produce a valid B-roll story plan after ${MAX_BROLL_PLAN_ATTEMPTS} attempts.${logPath ? ` Diagnostic log: ${logPath}` : ''}\nRemaining issues:\n${lastIssues.map((issue) => `- ${issue}`).join('\n')}`);
+  }
   const scenes = await createVisualPlan({ textConfig: options.textConfig, choice, workDir, beats: story.beats, targetAspect });
   const plan: BrollPlan = { version: 2, orientation, stylePreset: BROLL_STYLE_PRESET, settings, scenes, notes: story.notes };
   await saveBrollPlan(workDir, plan); return plan;
@@ -589,14 +610,14 @@ First create a structured animationPlan:
 Then write ONE production-ready videoPrompt based on that plan. Motion must advance the idea, not merely add ambience. Educational/3D/cutaway scenes may reveal layers, show progression, move tools/materials, highlight structures or demonstrate cause-and-effect when supported by the narration. Hyperreal scenes should favor believable human/environment motion and restrained camera movement. Preserve identity, anatomy, composition and clinically important details from the starting image. Do not invent unsupported people, objects, tools, procedures, text or logos. No random morphing, dramatic cuts, lip-sync unless explicitly needed, or decorative motion unrelated to the key point.`;
   const raw: any = await generateStructuredText({ config: options.textConfig, choice: { provider: options.plan.settings.planningProvider || 'codex-cli', model: options.plan.settings.planningModel || '' }, workDir: options.workDir, prompt, schema, outputName: scene.id + '-video-prompt' });
   const videoPrompt = String(raw.videoPrompt ?? '').trim(); const animation = raw.animationPlan ?? {};
-  if (videoPrompt.length < 50) throw new Error('Codex returned an unusable video prompt');
+  if (videoPrompt.length < 50) throw new Error(`${planningModelLabel({ provider: options.plan.settings.planningProvider || 'codex-cli', model: options.plan.settings.planningModel || '' })} returned an unusable video prompt`);
   const animationPlan: BrollAnimationPlan = {
     motionType: String(animation.motionType ?? '').trim(), cameraMove: String(animation.cameraMove ?? '').trim(), subjectMotion: String(animation.subjectMotion ?? '').trim(),
     revealSequence: Array.isArray(animation.revealSequence) ? animation.revealSequence.map((item: unknown) => String(item).trim()).filter(Boolean) : [],
     highlightTargets: Array.isArray(animation.highlightTargets) ? animation.highlightTargets.map((item: unknown) => String(item).trim()).filter(Boolean) : [],
     avoidMotion: Array.isArray(animation.avoidMotion) ? animation.avoidMotion.map((item: unknown) => String(item).trim()).filter(Boolean) : [],
   };
-  if (!animationPlan.motionType || !animationPlan.cameraMove || !animationPlan.subjectMotion) throw new Error('Codex returned an incomplete animation plan');
+  if (!animationPlan.motionType || !animationPlan.cameraMove || !animationPlan.subjectMotion) throw new Error(`${planningModelLabel({ provider: options.plan.settings.planningProvider || 'codex-cli', model: options.plan.settings.planningModel || '' })} returned an incomplete animation plan`);
   scene.animationPlan = animationPlan; scene.videoPrompt = videoPrompt; await saveBrollPlan(options.workDir, options.plan); return scene;
 }
 export async function generateBrollVideoWithGrokCli(options: { config: ImageProviderConfig; workDir: string; plan: BrollPlan; sceneId: string; regenerationComment?: string }) {

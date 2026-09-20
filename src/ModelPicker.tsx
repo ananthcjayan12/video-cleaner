@@ -27,7 +27,7 @@ export default function ModelPicker(props: ModelChoiceProps) {
     ? agyModels : model ? [...agyModels, { id: model, label: model + ' (saved selection)' }] : agyModels;
   return <fieldset className="modelPicker" disabled={busy}>
     <legend>{title}</legend>
-    <label>Provider<select value={provider} onChange={event => { onProvider(event.target.value as TextProvider); onModel(''); }}>
+    <label>Provider<select value={provider} onChange={event => onProvider(event.target.value as TextProvider)}>
       <option value="codex-cli">Codex CLI · signed-in account</option>
       <option value="agy-cli">AGY CLI · signed-in account</option>
       <option value="gemini">Gemini API · API usage</option>
