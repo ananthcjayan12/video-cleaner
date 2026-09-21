@@ -4,16 +4,19 @@ import type { Project } from './project-store.js';
 import { projectClips } from './project-store.js';
 import type { BrollPlan, BrollScene } from './broll.js';
 import { resolveEditorMedia } from './editor-media.js';
+import { ffmpegKeyframeExpression, type AudioKeyframe } from '@cjcut/editor/audio';
 
 export type EditorClip = {
   id: string; trackId: string; type: 'video' | 'image' | 'audio' | 'text'; name: string;
   role?: string; externalId?: string; url?: string; text?: string;
   start: number; duration: number; sourceStart: number; sourceDuration: number;
   x: number; y: number; scale: number; rotation: number; opacity: number; volume: number; speed: number;
+  fadeIn?: number; fadeOut?: number; volumeKeyframes?: AudioKeyframe[];
   metadata?: Record<string, unknown>;
 };
 export type EditorTrack = {
-  id: string; name: string; type: string; role?: string; visible: boolean; locked: boolean; clips: EditorClip[];
+  id: string; name: string; type: string; role?: string; visible: boolean; locked: boolean;
+  volume?: number; muted?: boolean; clips: EditorClip[];
 };
 export type EditorTimeline = {
   name: string; width: number; height: number; fps: number; duration: number; tracks: EditorTrack[];
@@ -56,6 +59,8 @@ function validateTimeline(input: unknown): EditorTimeline {
   let count = 0;
   for (const track of editor.tracks) {
     if (!track || typeof track.id !== 'string' || !Array.isArray(track.clips)) throw new Error('Invalid CJCut track');
+    numeric(track.volume, 1, 0, 1, 'track gain');
+    if (track.muted !== undefined && typeof track.muted !== 'boolean') throw new Error('Invalid track mute value');
     for (const clip of track.clips) {
       if (++count > MAX_CLIPS) throw new Error('Editor timeline has too many clips to render');
       if (!clip || typeof clip.id !== 'string' || typeof clip.type !== 'string') throw new Error('Invalid CJCut clip');
@@ -69,6 +74,16 @@ function validateTimeline(input: unknown): EditorTimeline {
       numeric(clip.rotation, 0, -360, 360, 'rotation');
       numeric(clip.opacity, 1, 0, 1, 'opacity');
       numeric(clip.volume, 1, 0, 1, 'volume');
+      numeric(clip.fadeIn, 0, 0, clip.duration, 'fade in');
+      numeric(clip.fadeOut, 0, 0, clip.duration, 'fade out');
+      if (clip.volumeKeyframes !== undefined) {
+        if (!Array.isArray(clip.volumeKeyframes) || clip.volumeKeyframes.length > 128) throw new Error('Too many volume keyframes');
+        for (const point of clip.volumeKeyframes) {
+          if (!point || typeof point !== 'object') throw new Error('Invalid volume keyframe');
+          numeric(point.time, 0, 0, clip.duration, 'keyframe time');
+          numeric(point.gain, 1, 0, 1, 'keyframe gain');
+        }
+      }
     }
   }
   return editor;
@@ -143,7 +158,7 @@ async function resolveClips(options: {
       if (clip.type !== 'image' && ['base', 'imported'].includes(role) && clip.sourceStart + clip.duration * clip.speed > sourceDuration + 0.05) {
         throw new Error('Trim or playback speed extends past the source file in ' + clip.name);
       }
-      resolved.push({ clip: { ...clip, role, filePath, hasAudio: audioAllowed && clip.volume > 0 }, trackIndex });
+      resolved.push({ clip: { ...clip, role, filePath, hasAudio: audioAllowed && clip.volume > 0 && !track.muted && (track.volume ?? 1) > 0 }, trackIndex });
     }
   }
   return resolved;
@@ -172,11 +187,25 @@ export async function buildEditorRender(options: {
     '-f', 'lavfi', '-i', 'color=c=black:s=' + width + 'x' + height + ':r=' + fps + ':d=' + seconds(duration),
   ];
   const filters: string[] = ['[0:v]setpts=PTS-STARTPTS,format=yuva420p[basecanvas]'];
+  const tracksById = new Map(editor.tracks.map(track => [track.id, track]));
+  const audioProcessing = (clip: ResolvedClip) => {
+    const track = tracksById.get(clip.trackId);
+    const gain = (track?.volume ?? 1) * clip.volume;
+    const parts = [',volume=' + seconds(gain)];
+    if (clip.volumeKeyframes?.length) {
+      parts.push(",volume='" + ffmpegKeyframeExpression(clip.volumeKeyframes, clip.duration) + "':eval=frame");
+    }
+    if ((clip.fadeIn ?? 0) > 0) parts.push(',afade=t=in:st=0:d=' + seconds(Math.min(clip.duration, clip.fadeIn!)));
+    if ((clip.fadeOut ?? 0) > 0) parts.push(',afade=t=out:st=' + seconds(Math.max(0, clip.duration - clip.fadeOut!)) +
+      ':d=' + seconds(Math.min(clip.duration, clip.fadeOut!)));
+    return parts.join('');
+  };
   let videoLabel = 'basecanvas';
   const audioLabels: string[] = [];
   let visualClips = 0; let audioClips = 0; let inputIndex = 1;
   await fs.mkdir(options.workDir, { recursive: true });
   for (const { clip } of resolved) {
+    if (clip.type === 'audio' && !clip.hasAudio) continue;
     if (clip.type === 'text') {
       const filename = path.join(options.workDir, 'text-' + String(visualClips++).padStart(3, '0') + '.txt');
       await fs.writeFile(filename, clip.text || '', 'utf8');
@@ -200,7 +229,7 @@ export async function buildEditorRender(options: {
       const delayMs = Math.round(clip.start * 1000);
       filters.push('[' + id + ':a]atrim=start=' + seconds(clip.sourceStart) + ':end=' + seconds(sourceSeconds) +
         ',asetpts=PTS-STARTPTS,atempo=' + seconds(clip.speed) +
-        ',aresample=48000,volume=' + seconds(clip.volume) +
+        ',aresample=48000' + audioProcessing(clip) +
         ',adelay=' + delayMs + ':all=1[' + audioLabel + ']');
       audioLabels.push(audioLabel); audioClips++;
       continue;
@@ -232,7 +261,7 @@ export async function buildEditorRender(options: {
       const delayMs = Math.round(clip.start * 1000);
       filters.push('[' + id + ':a]atrim=start=' + seconds(clip.sourceStart) + ':end=' + seconds(sourceSeconds) +
         ',asetpts=PTS-STARTPTS,atempo=' + seconds(clip.speed) +
-        ',aresample=48000,volume=' + opacity + ',volume=' + seconds(clip.volume) +
+        ',aresample=48000' + audioProcessing(clip) +
         ',adelay=' + delayMs + ':all=1[' + audioLabel + ']');
       audioLabels.push(audioLabel); audioClips++;
     }
