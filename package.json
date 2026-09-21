@@ -17,7 +17,7 @@
     "express": "^5.1.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
-    "@cjcut/editor": "git+https://github.com/ananthcjayan12/cjcut.git#7719b03d2ed59ce2c0fd03bfe088e0be093b2cf6"
+    "@cjcut/editor": "git+https://github.com/ananthcjayan12/cjcut.git#178f9c35d47e7972fd5ed99c97c00dfc07518d4a"
   },
   "devDependencies": {
     "@types/express": "^5.0.3",
