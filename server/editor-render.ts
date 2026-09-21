@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { Project } from './project-store.js';
 import { projectClips } from './project-store.js';
 import type { BrollPlan, BrollScene } from './broll.js';
+import { resolveEditorMedia } from './editor-media.js';
 
 export type EditorClip = {
   id: string; trackId: string; type: 'video' | 'image' | 'audio' | 'text'; name: string;
@@ -125,13 +126,22 @@ async function resolveClips(options: {
           if (!scene.imageFile) throw new Error('Image for ' + scene.title + ' is missing. Refresh the editor.');
           filePath = scene.imageFile;
         }
+      } else if (role === 'imported') {
+        const importedId = clip.metadata?.editorMediaId;
+        if (typeof importedId !== 'string') throw new Error('Imported media reference missing for ' + clip.name);
+        const found = await resolveEditorMedia(project.workDir, importedId);
+        if (!found) throw new Error('Imported file for ' + clip.name + ' is missing. Import it again or remove this clip.');
+        if (found.entry.kind !== clip.type) throw new Error('Imported media type changed for ' + clip.name);
+        filePath = found.file;
+        sourceDuration = found.entry.duration;
+        audioAllowed = clip.type === 'audio' || (clip.type === 'video' && Boolean(found.entry.hasAudio));
       } else {
-        throw new Error('Unsupported editor media: ' + clip.name + '. Only project base and generated B-roll media are currently available.');
+        throw new Error('Unsupported editor media: ' + clip.name + '. Only project base, imported media and generated B-roll can be exported.');
       }
       if (!await exists(filePath)) throw new Error('Missing media file for ' + clip.name + ': ' + path.basename(filePath));
       if (clip.type !== 'image' && clip.sourceStart >= sourceDuration - 0.001 && role === 'base') throw new Error('Talking-head trim exceeds the source in ' + clip.name);
-      if (clip.type !== 'image' && role === 'base' && clip.sourceStart + clip.duration * clip.speed > sourceDuration + 0.05) {
-        throw new Error('Talking-head trim/speed extends past the source in ' + clip.name);
+      if (clip.type !== 'image' && ['base', 'imported'].includes(role) && clip.sourceStart + clip.duration * clip.speed > sourceDuration + 0.05) {
+        throw new Error('Trim or playback speed extends past the source file in ' + clip.name);
       }
       resolved.push({ clip: { ...clip, role, filePath, hasAudio: audioAllowed && clip.volume > 0 }, trackIndex });
     }
@@ -184,6 +194,17 @@ export async function buildEditorRender(options: {
     }
     const id = inputIndex++;
     const sourceSeconds = clip.sourceStart + clip.duration * clip.speed;
+    if (clip.type === 'audio') {
+      args.push('-i', clip.filePath!);
+      const audioLabel = 'aud' + id;
+      const delayMs = Math.round(clip.start * 1000);
+      filters.push('[' + id + ':a]atrim=start=' + seconds(clip.sourceStart) + ':end=' + seconds(sourceSeconds) +
+        ',asetpts=PTS-STARTPTS,atempo=' + seconds(clip.speed) +
+        ',aresample=48000,volume=' + seconds(clip.volume) +
+        ',adelay=' + delayMs + ':all=1[' + audioLabel + ']');
+      audioLabels.push(audioLabel); audioClips++;
+      continue;
+    }
     if (clip.type === 'image') args.push('-loop', '1', '-framerate', String(fps), '-i', clip.filePath!);
     else args.push(...(clip.role === 'broll' ? ['-stream_loop', '-1'] : []), ...(options.inputVideoArgs ?? []), '-i', clip.filePath!);
     const trim = clip.type === 'image'
