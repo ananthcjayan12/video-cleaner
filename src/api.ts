@@ -1,4 +1,17 @@
 export type Word = { id: string; text: string; start: number; end: number };
+export type EditorMediaEntry = {
+  id: string; name: string; kind: 'video' | 'audio' | 'image'; duration: number;
+  size: number; width?: number; height?: number; hasAudio?: boolean;
+};
+export async function uploadEditorMedia(id: string, file: File): Promise<EditorMediaEntry> {
+  const kind = file.type.startsWith('video/') ? 'video' : file.type.startsWith('audio/') ? 'audio' : file.type.startsWith('image/') ? 'image' : '';
+  if (!kind) throw new Error('Select a supported video, audio or picture');
+  const endpoint = `/api/projects/${encodeURIComponent(id)}/editor/media?kind=${kind}&name=${encodeURIComponent(file.name)}`;
+  const response = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: file });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.error || `Media upload failed (${response.status})`);
+  return body.media as EditorMediaEntry;
+}
 export type KeepRange = { startWordId: string; endWordId: string; reason?: string };
 export type Edl = { keepRanges: KeepRange[]; notes?: string[] };
 export type ImageProvider = 'openai' | 'gemini' | 'grok-cli' | 'codex-cli';
@@ -144,6 +157,8 @@ export const api = {
   planBroll: (id: string, settings: Partial<BrollPlanSettings>) => request<{ plan: BrollPlan; transcript: { text?: string; words: Word[] }; edl: Edl }>(`/api/projects/${id}/broll/plan`, { method: 'POST', body: JSON.stringify({ settings: { ...settings, displayTemplate: undefined } }) }),
   getBroll: (id: string) => request<BrollPlan>(`/api/projects/${id}/broll`),
   getEditorProject: <T = unknown>(id: string) => request<{ project: T | null }>(`/api/projects/${id}/editor-project`),
+  editorMedia: (id: string) => request<{ media: EditorMediaEntry[] }>(`/api/projects/${id}/editor/media`),
+  editorMediaUrl: (id: string, mediaId: string) => `/api/projects/${encodeURIComponent(id)}/editor/media/${encodeURIComponent(mediaId)}`,
   saveEditorProject: <T = unknown>(id: string, project: T) => request<{ project: T; savedAt: string }>(`/api/projects/${id}/editor-project`, { method: 'PUT', body: JSON.stringify({ project }) }),
   editorBaseVideoUrl: (id: string, version?: string) => `/api/projects/${id}/editor/base-video${version ? `?v=${encodeURIComponent(version)}` : ''}`,
   editorBaseClipUrl: (id: string, clipId: string, version?: string) => `/api/projects/${id}/editor/base-clips/${encodeURIComponent(clipId)}${version ? `?v=${encodeURIComponent(version)}` : ''}`,
