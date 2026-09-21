@@ -129,7 +129,7 @@ export const BROLL_STYLE_PRESET = [
   'Story-first B-roll: every visual must earn its place by clarifying, advancing or emotionally supporting the exact spoken idea. Never create filler just to satisfy a B-roll count.',
   'Use a deliberate mix of visual languages instead of forcing one look on every scene. Choose realistic live-action only when a real person, visible symptom, consultation, environment or tangible action carries the story; use educational 3D, anatomical cutaways, procedure closeups or symbolic medical visuals when explaining mechanisms, progression, treatment or prevention.',
   'For educational/scientific scenes, create polished clinically believable 3D visualization with readable anatomy, clear spatial relationships, clean depth layers and premium soft lighting. Make the concept understandable at a glance without labels.',
-  'For hyper-real clinical scenes, use authentic premium documentary-style photography with believable people and environments, natural skin/teeth/hands, realistic materials and restrained cinematic lighting. Do not add people merely to make a scene look cinematic.',
+  'For hyper-real clinical scenes, use authentic premium documentary-style photography with believable people and environments, natural skin/teeth/hands, realistic materials and restrained cinematic lighting. When showing people, depict believable Indian people in an authentic contemporary Indian setting appropriate to the narration unless the narration or a supplied identity/reference explicitly indicates otherwise. Preserve any supplied patient identity exactly. Do not add people merely to make a scene look cinematic; avoid caricatures, generic foreign stock-photo faces, token costumes or stereotypical cultural props.',
   'Compose the image as the FIRST FRAME of a short image-to-video story: one dominant idea, visually separable foreground/midground/background elements, clean negative space, no baked-in motion blur, and obvious opportunities for reveal, progression, highlighting, object movement or camera movement.',
   'Keep the essential subject and action inside the social-video safe area. Prefer close, readable compositions over wide generic scenes.',
   'No text, captions, typography, labels, logos, watermarks, UI, borders, multi-panel layouts, collages, poster design or infographic cards.',
@@ -278,7 +278,7 @@ async function createVisualPlan(options: { textConfig: TextModelConfig; choice: 
     id: beat.id, narration: beat.narration, beatType: beat.beatType, keyPoint: beat.keyPoint, whyThisVisualMatters: beat.whyThisVisualMatters,
     viewerTakeaway: beat.viewerTakeaway, visualMode: beat.visualMode, visualIntent: beat.visualIntent, shotType: beat.shotType,
   }));
-  const basePrompt = `You are the visual-development director for a premium talking-head story. The story editor has already selected the B-roll beats. Your job is to write the strongest possible STARTING-FRAME image prompt for each beat.\n\nDo not add, remove, merge or reorder beats. Return exactly one prompt for every supplied id.\n\nTARGET FRAME: ${options.targetAspect}.\n\nGLOBAL STORYTELLING BAR:\n${BROLL_STYLE_PRESET}\n\nVISUAL MODE RULES:\n- hyperreal-clinical: premium documentary/live-action realism only when a real person, visible symptom, consultation, environment or tangible action is essential to the spoken idea. Natural people; never generic stock posing.\n- educational-3d: polished cinematic 3D/scientific visualization for mechanisms, concepts, progression, prevention or treatment logic.\n- anatomy-cutaway: anatomically plausible sectional/cutaway view that clearly exposes the internal relationship being explained.\n- procedure-closeup: precise close or macro view of a treatment/action/tool interacting with the relevant structure; clinically plausible, clean and non-gory.\n- symbolic-medical: simple premium object-based metaphor for an abstract point such as timing, prevention, protection, risk or recurrence; still grounded in the narration.\n- clinic-support: realistic environment/detail shot only when the clinic, appointment, equipment or consultation itself is part of the story; never use this as filler.\n\nEvery imagePrompt must describe ONE coherent frame, not a collage or infographic. It must be animation-ready: clear depth layers, separated movable elements, readable subject, clean background, no baked-in motion blur. Do not include text, labels, arrows with words, logos, watermarks or poster layouts. The prompt must directly express the key point and viewer takeaway; do not introduce unrelated topics.\n\nSTORY BEATS:\n${JSON.stringify(beatPayload, null, 2)}`;
+  const basePrompt = `You are the visual-development director for a premium talking-head story. The story editor has already selected the B-roll beats. Your job is to write the strongest possible STARTING-FRAME image prompt for each beat.\n\nDo not add, remove, merge or reorder beats. Return exactly one prompt for every supplied id.\n\nTARGET FRAME: ${options.targetAspect}.\n\nGLOBAL STORYTELLING BAR:\n${BROLL_STYLE_PRESET}\n\nVISUAL MODE RULES:\n- hyperreal-clinical: premium documentary/live-action realism only when a real person, visible symptom, consultation, environment or tangible action is essential to the spoken idea. When people are needed, depict authentic Indian patients/clinicians in an everyday contemporary Indian setting unless narration or a supplied person/reference requires otherwise; do not change a supplied patient's identity. Natural people; never generic stock posing.\n- educational-3d: polished cinematic 3D/scientific visualization for mechanisms, concepts, progression, prevention or treatment logic.\n- anatomy-cutaway: anatomically plausible sectional/cutaway view that clearly exposes the internal relationship being explained.\n- procedure-closeup: precise close or macro view of a treatment/action/tool interacting with the relevant structure; clinically plausible, clean and non-gory.\n- symbolic-medical: simple premium object-based metaphor for an abstract point such as timing, prevention, protection, risk or recurrence; still grounded in the narration.\n- clinic-support: realistic environment/detail shot only when the clinic, appointment, equipment or consultation itself is part of the story; when people are relevant use a believable modern Indian clinic with Indian staff/patients unless the script or user-supplied reference says otherwise. Never use this as filler.\n\nEvery imagePrompt must describe ONE coherent frame, not a collage or infographic. It must be animation-ready: clear depth layers, separated movable elements, readable subject, clean background, no baked-in motion blur. Do not include text, labels, arrows with words, logos, watermarks or poster layouts. The prompt must directly express the key point and viewer takeaway; do not introduce unrelated topics.\n\nSTORY BEATS:\n${JSON.stringify(beatPayload, null, 2)}`;
   let attemptPrompt = basePrompt; let lastIssues: string[] = [];
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     let raw: any;
@@ -408,11 +408,11 @@ export function displayTemplateUsesHorizontalBroll(template: BrollDisplayTemplat
 
 export function resolveSceneAssetAspect(plan: BrollPlan, scene: BrollScene) { if (scene.assetAspectRatio && scene.assetAspectRatio !== 'auto') return scene.assetAspectRatio; if (displayTemplateUsesHorizontalBroll(resolveSceneDisplayTemplate(plan, scene))) return '16:9'; if (plan.settings.aspectRatio !== 'auto') return plan.settings.aspectRatio; return plan.orientation === 'portrait' ? '9:16' : '16:9'; }
 function visualModeDirective(mode: BrollVisualMode | undefined) {
-  if (mode === 'hyperreal-clinical') return 'Render as premium documentary-style live-action clinical photography. Use people only when the story beat genuinely needs them; keep expressions/actions natural and non-stock-like.';
+  if (mode === 'hyperreal-clinical') return 'Render as premium documentary-style live-action clinical photography. When people are necessary show authentic Indian patients and clinicians in a believable contemporary Indian setting; keep expressions, skin tones and actions natural, without stereotypes. If a specific real patient or image reference is provided, preserve that exact person instead of inventing or changing identity. Do not insert unrelated people.';
   if (mode === 'anatomy-cutaway') return 'Render as a polished, anatomically plausible 3D sectional/cutaway medical visualization with clear internal layers and spatial relationships.';
   if (mode === 'procedure-closeup') return 'Render as a clinically plausible close or macro treatment view with the relevant tool/material/action clearly readable, clean and non-gory.';
   if (mode === 'symbolic-medical') return 'Render as a simple premium medical/scientific visual metaphor using a few tangible objects or structures; keep it literal enough that the narration makes the meaning obvious.';
-  if (mode === 'clinic-support') return 'Render as a premium realistic clinic/environment/detail shot because the setting or appointment itself is part of this story beat; avoid generic stock-photo staging.';
+  if (mode === 'clinic-support') return 'Render as a premium realistic contemporary Indian clinic/environment/detail shot because the setting or appointment itself is part of this story beat. If people are needed, they should appear naturally Indian, with no generic foreign stock-photo styling, and any patient reference must retain the original identity.';
   return 'Render as premium educational 3D/scientific visualization with a clear central concept, readable depth and animation-friendly separated elements.';
 }
 function generatedImagePrompt(scene: BrollScene, plan: BrollPlan, regenerationComment?: string) {
@@ -424,6 +424,7 @@ KEY POINT: ${scene.keyPoint || scene.visualIntent}
 VIEWER TAKEAWAY: ${scene.viewerTakeaway || scene.visualIntent}
 VISUAL MODE: ${scene.visualMode || 'educational-3d'}
 MODE DIRECTION: ${visualModeDirective(scene.visualMode)}
+HUMAN CASTING: If people are essential, use authentic Indian subjects and a contemporary Indian context unless the narration or reference says otherwise. Preserve any real reference patient's exact identity and appearance; do not introduce people in anatomy/3D scenes unless they clarify the point.
 
 FINAL QUALITY BAR: ${BROLL_STYLE_PRESET}
 
@@ -585,29 +586,41 @@ export async function createVideoPrompt(options: { textConfig: TextModelConfig; 
     },
   };
   await fs.writeFile(schemaPath, JSON.stringify(schema, null, 2)); const duration = Math.max(2, Math.min(12, scene.sourceEnd - scene.sourceStart));
-  const prompt = `You are the animation director for one B-roll story beat. The still image is the FIRST FRAME, not the finished idea. Design a short visual micro-story whose motion helps the viewer understand the spoken point.
+  const prompt = \`You are an expert storyboard artist, medical-animation director, camera operator and image-to-video prompt engineer. Write a precise, production-ready motion prompt that turns the supplied still image into a clear VISUAL EXPLANATION matching the narration. The still is the exact FIRST FRAME: its composition, people, identity, anatomy, colors, lighting, framing, camera angle, clothing, tools, objects and all clinically important structures must stay consistent unless the story explicitly needs a physically plausible change.
 
-Narration: ${scene.narration}
-Beat type: ${scene.beatType || 'supporting'}
-Key point: ${scene.keyPoint || scene.visualIntent}
-Why this visual matters: ${scene.whyThisVisualMatters || scene.visualIntent}
-Viewer takeaway: ${scene.viewerTakeaway || scene.visualIntent}
-Visual mode: ${scene.visualMode || 'educational-3d'}
-Visual intent: ${scene.visualIntent}
-Shot type: ${scene.shotType}
-Still-image prompt: ${scene.imagePrompt}
-Target frame: ${resolveSceneAssetAspect(options.plan, scene)}.
-Target duration: about ${duration.toFixed(1)} seconds.
+NARRATED STORY (do not introduce unsupported medical claims):
+Narration: \${scene.narration}
+Beat type: \${scene.beatType || 'supporting'}
+Key point: \${scene.keyPoint || scene.visualIntent}
+Why this visual matters: \${scene.whyThisVisualMatters || scene.visualIntent}
+Viewer takeaway: \${scene.viewerTakeaway || scene.visualIntent}
+Visual mode: \${scene.visualMode || 'educational-3d'}
+Visual intent: \${scene.visualIntent}
+Shot type: \${scene.shotType}
+First-frame image prompt: \${scene.imagePrompt}
+Aspect ratio: \${resolveSceneAssetAspect(options.plan, scene)}
+DURATION: \${duration.toFixed(1)} seconds; no cuts unless narration absolutely requires one.
 
-First create a structured animationPlan:
-- motionType: the storytelling mechanism (reveal, progression, transformation, comparison, demonstration, natural live-action motion, etc.).
-- cameraMove: one restrained camera move that improves comprehension.
-- subjectMotion: exactly what should move or change in the subject.
-- revealSequence: ordered visual beats across the clip; use an empty array if no reveal is needed.
-- highlightTargets: structures/objects/regions that should receive attention through focus, light, color, movement or framing; no text labels.
-- avoidMotion: important things that must remain stable to prevent AI warping or factual confusion.
+DESIGN THE MOTION, NOT JUST A CAMERA SWAY. First return a structured animationPlan with:
+- motionType: a concrete narrative mechanism (e.g. tooth and gum separation showing cause and effect), not "cinematic animation".
+- cameraMove: direction, framing, speed, start/end composition, focus/depth-of-field changes, and WHY this camera move clarifies the key point. Keep camera stationary when movement would harm clarity.
+- subjectMotion: exact subject/object/structure, realistic trajectory, magnitude, pace, interacting objects and starting/ending states. For a 3D mechanism, describe what must move versus what stays anchored.
+- revealSequence: 3 ordered beats covering approximately 0–25%, 25–75%, 75–100% of the clip, including a clear final hold. Every beat must visibly teach the viewer something; use an empty array only if a continuous believable real-life action is more appropriate.
+- highlightTargets: specific existing tissues, objects, anatomy or regions highlighted by focus, lighting, material, contrast or restrained glow WITHOUT any words, labels, arrows or synthetic UI.
+- avoidMotion: exact elements to keep geometrically fixed and negative constraints specific to this image, including identity, teeth count/shape, root/bone anatomy, instrument placement, unwanted camera wobble, warping or physically impossible transformations.
 
-Then write ONE production-ready videoPrompt based on that plan. Motion must advance the idea, not merely add ambience. Educational/3D/cutaway scenes may reveal layers, show progression, move tools/materials, highlight structures or demonstrate cause-and-effect when supported by the narration. Hyperreal scenes should favor believable human/environment motion and restrained camera movement. Preserve identity, anatomy, composition and clinically important details from the starting image. Do not invent unsupported people, objects, tools, procedures, text or logos. No random morphing, dramatic cuts, lip-sync unless explicitly needed, or decorative motion unrelated to the key point.`;
+Write videoPrompt as a DETAILED, STANDALONE animation instruction of at least 200 words. Include:
+1. A precise description of the reference FIRST FRAME and which existing elements to preserve.
+2. A second-by-second or three-phase timeline with visible start, development, resolution and a final 0.3–0.6 s hold, scaled to \${duration.toFixed(1)} s.
+3. Camera path, lens/framing, speed and focus shift only if necessary.
+4. Physically credible anatomical/mechanical changes and their cause/effect. Prefer one strong continuous explanatory action over unrelated moving elements.
+5. Subject movement versus background, material/lighting continuity, perspective and appropriate pacing for narration.
+6. End-frame composition conveying the viewer takeaway and matching the narrated claim.
+7. Explicit, image-specific negative instructions: no identity changes, extra teeth/fingers/tools, anatomy melting, random object creation, rubbery morphs, lip sync, jump cuts, camera shake, captions, watermarks or unrelated motion.
+
+If humans are present, they remain the SAME people as in the reference still. For any newly invented person, preserve an authentic Indian context unless the narration/reference specifies otherwise; do not replace an existing patient's identity or ethnicity. When explaining internal anatomy use clinically believable educational 3D instead of inserting unrelated people. Maintain exact starting-frame continuity throughout. Do not claim a clinical process happens at real-time speed just because the demonstration is time-lapsed.
+
+Return valid JSON exactly matching the supplied schema: one detailed animationPlan and one production-ready videoPrompt, with NO surrounding prose.\`;
   const raw: any = await generateStructuredText({ config: options.textConfig, choice: { provider: options.plan.settings.planningProvider || 'codex-cli', model: options.plan.settings.planningModel || '' }, workDir: options.workDir, prompt, schema, outputName: scene.id + '-video-prompt' });
   const videoPrompt = String(raw.videoPrompt ?? '').trim(); const animation = raw.animationPlan ?? {};
   if (videoPrompt.length < 50) throw new Error(`${planningModelLabel({ provider: options.plan.settings.planningProvider || 'codex-cli', model: options.plan.settings.planningModel || '' })} returned an unusable video prompt`);
