@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { CJCutEditor, type CJCutClip, type CJCutProject, type CJCutTrack } from '@cjcut/editor';
+import { CJCutEditor, type CJCutClip, type CJCutMediaAsset, type CJCutProject, type CJCutTrack } from '@cjcut/editor';
 import { api, type BrollDisplayTemplate, type BrollPlan, type BrollScene, type Edl, type ExportStatus, type Project, type Word } from './api';
 
 type Props = {
@@ -184,9 +184,11 @@ function reconcileSaved(saved: CJCutProject | null, fresh: CJCutProject): CJCutP
   const freshTracksByExternal = new Map(fresh.tracks.filter((track) => track.externalId).map((track) => [track.externalId!, track]));
   const freshClipsByExternal = new Map(fresh.tracks.flatMap((track) => track.clips).filter((clip) => clip.externalId).map((clip) => [clip.externalId!, clip]));
   const seenTracks = new Set<string>();
+  const suppressed = new Set(saved.suppressedManagedTrackIds ?? []);
 
   const tracks: CJCutTrack[] = saved.tracks.flatMap((track) => {
     if (!track.externalId) return [clone(track)];
+    if (suppressed.has(track.externalId)) return [];
     const currentTrack = freshTracksByExternal.get(track.externalId);
     if (!currentTrack) return [];
     seenTracks.add(track.externalId);
@@ -200,7 +202,7 @@ function reconcileSaved(saved: CJCutProject | null, fresh: CJCutProject): CJCutP
   });
 
   for (const track of fresh.tracks) {
-    if (track.externalId && !seenTracks.has(track.externalId)) tracks.push(clone(track));
+    if (track.externalId && !seenTracks.has(track.externalId) && !suppressed.has(track.externalId)) tracks.push(clone(track));
   }
   const duration = Math.max(fresh.duration, ...tracks.flatMap((track) => track.clips.map((clip) => clip.start + clip.duration)), 1);
   return { ...clone(saved), name: fresh.name, width: fresh.width, height: fresh.height, fps: fresh.fps, duration, tracks };
@@ -218,6 +220,42 @@ export default function LiveEditor({ project, words, edl, broll, exportVideo, ex
   const [exportPreparing, setExportPreparing] = useState(false);
 
   const seed = useMemo(() => freshProject(project, words, edl, broll), [project, words, edl, broll]);
+  // Generated assets remain draggable after the original managed track is removed.
+  // The exporter maps these IDs back to known local project media.
+  const hostMedia = useMemo<CJCutMediaAsset[]>(() => {
+    const assets: CJCutMediaAsset[] = [];
+    const seen = new Set<string>();
+    for (const clip of seed.tracks.flatMap(track => track.clips).filter(clip => clip.role === 'base')) {
+      const sourceClipId = String(clip.metadata?.sourceClipId ?? clip.externalId ?? clip.id);
+      if (seen.has(sourceClipId) || !clip.url) continue;
+      seen.add(sourceClipId);
+      assets.push({
+        id: 'source:' + sourceClipId, name: clip.name, kind: 'video', url: clip.url,
+        duration: clip.sourceDuration, sourceDuration: clip.sourceDuration, sourceStart: 0,
+        role: 'base', externalId: clip.externalId, metadata: clip.metadata,
+        width: project.media.width, height: project.media.height,
+      });
+    }
+    for (const scene of broll?.scenes ?? []) {
+      if (!scene.enabled || scene.imageStatus === 'generating' || scene.imageStatus === 'failed') continue;
+      const duration = Math.max(0.5, scene.sourceEnd - scene.sourceStart);
+      const metadata = { managed: true, sceneId: scene.id };
+      if (scene.imageFile) assets.push({
+        id: 'image:' + scene.id, name: scene.title + ' · still', kind: 'image',
+        url: api.brollImageUrl(project.id, scene.id, scene.generatedAt),
+        duration, sourceDuration: duration, role: 'broll', externalId: scene.id,
+        metadata: { ...metadata, assetKind: 'image', assetVersion: scene.generatedAt || '' },
+      });
+      if (hasCurrentVideo(scene)) assets.push({
+        id: 'video:' + scene.id, name: scene.title + ' · video', kind: 'video',
+        url: api.brollVideoUrl(project.id, scene.id, scene.videoGeneratedAt),
+        duration, sourceDuration: duration, role: 'broll', externalId: scene.id,
+        metadata: { ...metadata, assetKind: 'video', assetVersion: scene.videoGeneratedAt || '' },
+      });
+    }
+    return assets;
+  }, [seed, broll?.scenes, project.id, project.media.width, project.media.height]);
+
   // A new asset changes the editor seed; an unrelated project timestamp does not.
   // Never re-fetch a stale persisted timeline over active unsaved CJCut edits.
   const seedKey = useMemo(() => JSON.stringify({
@@ -294,7 +332,7 @@ export default function LiveEditor({ project, words, edl, broll, exportVideo, ex
   function handleChange(next: CJCutProject) {
     if (latestTimeline.current && JSON.stringify(next) === JSON.stringify(latestTimeline.current)) return;
     latestTimeline.current = next;
-    setEditorProject(next);
+    // CJCut already owns this edit; avoid resetting playhead/undo on every drag.
     pendingAutosave.current = true;
     if (saveTimer.current !== null) window.clearTimeout(saveTimer.current);
     saveTimer.current = window.setTimeout(() => {
@@ -345,6 +383,7 @@ export default function LiveEditor({ project, words, edl, broll, exportVideo, ex
         embedded
         brandName="Video Cleaner · CJCut"
         allowMediaImport={false}
+        hostMedia={hostMedia}
         onProjectChange={handleChange}
         onSave={saveNow}
       />
