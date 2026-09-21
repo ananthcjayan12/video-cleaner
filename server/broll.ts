@@ -573,6 +573,7 @@ export async function generateBrollImage(options: { config: ImageProviderConfig;
 
 export async function createVideoPrompt(options: { textConfig: TextModelConfig; workDir: string; plan: BrollPlan; sceneId: string }) {
   const scene = options.plan.scenes.find((candidate) => candidate.id === options.sceneId); if (!scene) throw new Error('B-roll scene not found'); if (!scene.imageFile) throw new Error('Add or generate a B-roll image before creating video');
+  const isMagnificPrompt = options.plan.settings.videoProvider === 'magnific';
   const schemaPath = path.join(options.workDir, `${scene.id}-video-prompt.schema.json`); const outputPath = path.join(options.workDir, `${scene.id}-video-prompt.json`);
   const schema = {
     type: 'object', additionalProperties: false, required: ['animationPlan', 'videoPrompt'], properties: {
@@ -582,7 +583,7 @@ export async function createVideoPrompt(options: { textConfig: TextModelConfig; 
           revealSequence: { type: 'array', items: { type: 'string' } }, highlightTargets: { type: 'array', items: { type: 'string' } }, avoidMotion: { type: 'array', items: { type: 'string' } },
         },
       },
-      videoPrompt: { type: 'string' },
+      videoPrompt: { type: 'string', ...(isMagnificPrompt ? { maxLength: MAGNIFIC_GENERATED_PROMPT_MAX_CHARACTERS } : {}) },
     },
   };
   await fs.writeFile(schemaPath, JSON.stringify(schema, null, 2)); const duration = Math.max(2, Math.min(12, scene.sourceEnd - scene.sourceStart));
@@ -609,7 +610,7 @@ DESIGN THE MOTION, NOT JUST A CAMERA SWAY. First return a structured animationPl
 - highlightTargets: specific existing tissues, objects, anatomy or regions highlighted by focus, lighting, material, contrast or restrained glow WITHOUT any words, labels, arrows or synthetic UI.
 - avoidMotion: exact elements to keep geometrically fixed and negative constraints specific to this image, including identity, teeth count/shape, root/bone anatomy, instrument placement, unwanted camera wobble, warping or physically impossible transformations.
 
-Write videoPrompt as a DETAILED, STANDALONE animation instruction of at least 200 words. Include:
+Write videoPrompt as a DETAILED, STANDALONE animation instruction${isMagnificPrompt ? ` between 1,200 and ${MAGNIFIC_GENERATED_PROMPT_MAX_CHARACTERS.toLocaleString('en-US')} characters including spaces. This is a strict Magnific API constraint: never exceed ${MAGNIFIC_GENERATED_PROMPT_MAX_CHARACTERS.toLocaleString('en-US')} characters; use concise, information-dense sentences` : ' of at least 200 words'}. Include:
 1. A precise description of the reference FIRST FRAME and which existing elements to preserve.
 2. A second-by-second or three-phase timeline with visible start, development, resolution and a final 0.3–0.6 s hold, scaled to ${duration.toFixed(1)} s.
 3. Camera path, lens/framing, speed and focus shift only if necessary.
@@ -631,7 +632,7 @@ Return valid JSON exactly matching the supplied schema: one detailed animationPl
     avoidMotion: Array.isArray(animation.avoidMotion) ? animation.avoidMotion.map((item: unknown) => String(item).trim()).filter(Boolean) : [],
   };
   if (!animationPlan.motionType || !animationPlan.cameraMove || !animationPlan.subjectMotion) throw new Error(`${planningModelLabel({ provider: options.plan.settings.planningProvider || 'codex-cli', model: options.plan.settings.planningModel || '' })} returned an incomplete animation plan`);
-  scene.animationPlan = animationPlan; scene.videoPrompt = videoPrompt; await saveBrollPlan(options.workDir, options.plan); return scene;
+  scene.animationPlan = animationPlan; scene.videoPrompt = isMagnificPrompt ? fitMagnificPromptSection(videoPrompt, MAGNIFIC_GENERATED_PROMPT_MAX_CHARACTERS) : videoPrompt; await saveBrollPlan(options.workDir, options.plan); return scene;
 }
 export async function generateBrollVideoWithGrokCli(options: { config: ImageProviderConfig; workDir: string; plan: BrollPlan; sceneId: string; regenerationComment?: string }) {
   const scene = options.plan.scenes.find((candidate) => candidate.id === options.sceneId); if (!scene) throw new Error('B-roll scene not found'); if (!scene.imageFile) throw new Error('Add or generate a B-roll image first'); if (!scene.videoPrompt) throw new Error('Create a Codex video prompt first'); if (!options.config.grokBin) throw new Error('Grok CLI was not found. Configure GROK_BIN or install Grok Build.'); const duration = Math.max(2, Math.min(12, scene.sourceEnd - scene.sourceStart)); const videoModel = options.config.grokVideoModel || 'grok-imagine-video-1.5';
@@ -652,8 +653,7 @@ export async function generateBrollVideoWithMagnific(options: { config: ImagePro
 
   const { model, endpoint } = resolveMagnificVideoConfig(options.config.magnificVideoModel, options.config.magnificVideoEndpoint);
   const fetchMagnific = options.config.magnificFetch ?? fetch;
-  const requestedChange = options.regenerationComment?.trim() ? `\n\nUSER REQUEST FOR THIS REGENERATION:\n${options.regenerationComment.trim()}` : '';
-  const prompt = `${scene.videoPrompt}${requestedChange}`.trim();
+  const prompt = buildMagnificPrompt(scene.videoPrompt, options.regenerationComment);
   const displayModel = `Magnific · MiniMax · ${model}`;
   const attempt = newVideoAttempt(scene, 'magnific', displayModel, prompt);
   const outputPath = await videoAttemptPath(options.workDir, scene.id, attempt.id);
@@ -672,8 +672,8 @@ export async function generateBrollVideoWithMagnific(options: { config: ImagePro
         duration: 6,
       }),
     });
-    const createBody: any = await createResponse.json().catch(() => ({}));
-    if (!createResponse.ok) throw new Error(`Magnific video submission failed (${createResponse.status}): ${createBody?.message || createBody?.error || JSON.stringify(createBody)}`);
+    const createBody: any = await readMagnificResponse(createResponse);
+    if (!createResponse.ok) throw new Error(`Magnific video submission failed (${createResponse.status}): ${formatMagnificResponse(createBody)}`);
     const taskId = String(createBody?.data?.task_id || createBody?.task_id || '');
     if (!taskId) throw new Error(`Magnific video submission returned no task_id: ${JSON.stringify(createBody)}`);
 
@@ -683,8 +683,8 @@ export async function generateBrollVideoWithMagnific(options: { config: ImagePro
     while (Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, options.config.magnificPollIntervalMs ?? 3000));
       const statusResponse = await fetchMagnific(`${endpoint}/${encodeURIComponent(taskId)}`, { headers: { 'x-magnific-api-key': options.config.magnificApiKey } });
-      const statusBody: any = await statusResponse.json().catch(() => ({}));
-      if (!statusResponse.ok) throw new Error(`Magnific task polling failed (${statusResponse.status}): ${statusBody?.message || statusBody?.error || JSON.stringify(statusBody)}`);
+      const statusBody: any = await readMagnificResponse(statusResponse);
+      if (!statusResponse.ok) throw new Error(`Magnific task polling failed (${statusResponse.status}): ${formatMagnificResponse(statusBody)}`);
       const data = statusBody?.data ?? statusBody;
       lastStatus = String(data?.status || '').toUpperCase() || lastStatus;
       const generated = Array.isArray(data?.generated) ? data.generated[0] : data?.generated;
@@ -709,6 +709,48 @@ export async function generateBrollVideoWithMagnific(options: { config: ImagePro
 }
 
 export const DEFAULT_MAGNIFIC_VIDEO_MODEL = 'minimax-hailuo-2-3-768p-fast';
+// Magnific rejects prompts above 2,000 characters. Keep a small margin so
+// provider-side normalization cannot push a request over the validation limit.
+export const MAGNIFIC_PROMPT_MAX_CHARACTERS = 1900;
+export const MAGNIFIC_GENERATED_PROMPT_MAX_CHARACTERS = 1800;
+const MAGNIFIC_REGENERATION_MAX_CHARACTERS = 600;
+const MAGNIFIC_TRUNCATION_MARKER = '\n\n[…]\n\n';
+const MAGNIFIC_REGENERATION_LABEL = '\n\nUSER REQUEST FOR THIS REGENERATION:\n';
+
+function unicodeCharacters(value: string) { return Array.from(value); }
+
+function fitMagnificPromptSection(value: string, maximum: number) {
+  const characters = unicodeCharacters(value.trim());
+  if (characters.length <= maximum) return characters.join('');
+  const marker = unicodeCharacters(MAGNIFIC_TRUNCATION_MARKER);
+  if (maximum <= marker.length) return characters.slice(0, maximum).join('');
+  const available = maximum - marker.length;
+  const headLength = Math.ceil(available * 0.75);
+  return [...characters.slice(0, headLength), ...marker, ...characters.slice(-(available - headLength))].join('');
+}
+
+export function buildMagnificPrompt(videoPrompt: string, regenerationComment?: string) {
+  const base = videoPrompt.trim();
+  const requestedChange = regenerationComment?.trim() || '';
+  if (!requestedChange) return fitMagnificPromptSection(base, MAGNIFIC_PROMPT_MAX_CHARACTERS);
+
+  const labelLength = unicodeCharacters(MAGNIFIC_REGENERATION_LABEL).length;
+  const changeBudget = Math.min(MAGNIFIC_REGENERATION_MAX_CHARACTERS, MAGNIFIC_PROMPT_MAX_CHARACTERS - labelLength);
+  const fittedChange = fitMagnificPromptSection(requestedChange, changeBudget);
+  const baseBudget = MAGNIFIC_PROMPT_MAX_CHARACTERS - labelLength - unicodeCharacters(fittedChange).length;
+  return `${fitMagnificPromptSection(base, baseBudget)}${MAGNIFIC_REGENERATION_LABEL}${fittedChange}`;
+}
+
+async function readMagnificResponse(response: Response) {
+  const text = await response.text();
+  if (!text) return {};
+  try { return JSON.parse(text); } catch { return text; }
+}
+
+function formatMagnificResponse(body: unknown) {
+  if (typeof body === 'string') return body || 'Empty response';
+  try { return JSON.stringify(body); } catch { return String(body); }
+}
 
 export function resolveMagnificVideoConfig(configuredModel?: string, configuredEndpoint?: string) {
   const legacyModel = configuredModel?.trim() === 'minimax-h3-max-turbo';
