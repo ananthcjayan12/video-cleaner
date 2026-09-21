@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { CJCutEditor, type CJCutClip, type CJCutMediaAsset, type CJCutProject, type CJCutTrack } from '@cjcut/editor';
-import { api, type BrollDisplayTemplate, type BrollPlan, type BrollScene, type Edl, type ExportStatus, type Project, type Word } from './api';
+import { api, uploadEditorMedia, type EditorMediaEntry, type BrollDisplayTemplate, type BrollPlan, type BrollScene, type Edl, type ExportStatus, type Project, type Word } from './api';
 
 type Props = {
   project: Project;
@@ -188,7 +188,7 @@ function reconcileSaved(saved: CJCutProject | null, fresh: CJCutProject, broll: 
   const suppressed = new Set(saved.suppressedManagedTrackIds ?? []);
 
   const refreshClip = (clip: CJCutClip, trackId: string): CJCutClip | null => {
-    if (!clip.externalId) return { ...clone(clip), trackId };
+    if (!clip.externalId || clip.role === 'imported') return { ...clone(clip), trackId };
     if (clip.role === 'broll') {
       const scene = scenesById.get(String(clip.metadata?.sceneId || clip.externalId));
       if (!scene?.enabled || scene.imageStatus === 'generating' || scene.imageStatus === 'failed') return null;
@@ -237,12 +237,46 @@ export default function LiveEditor({ project, words, edl, broll, exportVideo, ex
   const [editorProject, setEditorProject] = useState<CJCutProject | null>(null);
   const [status, setStatus] = useState('Preparing live editor…');
   const [error, setError] = useState('');
+  const [importedMedia, setImportedMedia] = useState<EditorMediaEntry[]>([]);
+  const [mediaImportBusy, setMediaImportBusy] = useState(false);
   const saveTimer = useRef<number | null>(null);
   const pendingWrites = useRef<Promise<unknown>>(Promise.resolve());
   const latestTimeline = useRef<CJCutProject | null>(null);
   const pendingAutosave = useRef(false);
   const hydratedProjectId = useRef<string | null>(null);
   const [exportPreparing, setExportPreparing] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    setImportedMedia([]);
+    void api.editorMedia(project.id).then(result => {
+      if (active) setImportedMedia(result.media);
+    }).catch(err => {
+      if (active) setError(err instanceof Error ? err.message : String(err));
+    });
+    return () => { active = false; };
+  }, [project.id]);
+
+  async function importFiles(files: File[]) {
+    if (!files.length) return;
+    if (mediaImportBusy) throw new Error('A media import is already in progress.');
+    setMediaImportBusy(true);
+    setError('');
+    let imported = 0;
+    try {
+      for (const file of files) {
+        setStatus(`Importing ${file.name} (${imported + 1}/${files.length})…`);
+        const entry = await uploadEditorMedia(project.id, file);
+        setImportedMedia(current => [...current.filter(item => item.id !== entry.id), entry]);
+        imported += 1;
+      }
+      setStatus(`${imported} file${imported === 1 ? '' : 's'} imported. Drag them from Media onto any timeline layer.`);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      setError(`${imported} file(s) imported. ${detail}`);
+      throw error;
+    } finally { setMediaImportBusy(false); }
+  }
 
   const seed = useMemo(() => freshProject(project, words, edl, broll), [project, words, edl, broll]);
   // Generated assets remain draggable after the original managed track is removed.
@@ -278,8 +312,24 @@ export default function LiveEditor({ project, words, edl, broll, exportVideo, ex
         metadata: { ...metadata, assetKind: 'video', assetVersion: scene.videoGeneratedAt || '' },
       });
     }
+    for (const item of importedMedia) {
+      assets.push({
+        id: 'imported:' + item.id,
+        name: item.name,
+        kind: item.kind,
+        url: api.editorMediaUrl(project.id, item.id),
+        duration: item.duration,
+        sourceStart: 0,
+        sourceDuration: item.duration,
+        width: item.width,
+        height: item.height,
+        role: 'imported',
+        externalId: item.id,
+        metadata: { editorMediaId: item.id },
+      });
+    }
     return assets;
-  }, [seed, broll?.scenes, project.id, project.media.width, project.media.height]);
+  }, [seed, broll?.scenes, importedMedia, project.id, project.media.width, project.media.height]);
 
   // A new asset changes the editor seed; an unrelated project timestamp does not.
   // Never re-fetch a stale persisted timeline over active unsaved CJCut edits.
@@ -401,14 +451,16 @@ export default function LiveEditor({ project, words, edl, broll, exportVideo, ex
       <div className="liveEditorExportActions"><button className="primary" onClick={() => void exportCurrentTimeline()} disabled={exportBusy || exportPreparing || !project.sourceAvailable}>{exportPreparing ? 'Saving timeline…' : 'Export edited MP4'}</button>{exportJob?.state === 'running' && <button onClick={() => void onStopExport()}>Stop</button>}<span>{status}</span>{error && <strong>{error}</strong>}</div>
     </div>
     {exportJob && exportJob.state !== 'idle' && <div className={`liveEditorRenderStatus panel ${exportJob.state}`}><strong>{exportJob.state === 'completed' ? 'Edited MP4 ready' : exportJob.state === 'failed' ? 'Edited render failed' : exportJob.state === 'running' ? 'Rendering edited timeline…' : 'Render stopped'}</strong><span>{Math.min(100, Math.max(0, exportJob.progress || 0)).toFixed(1)}% · {exportJob.speed || exportJob.encoder || ''}</span><div className="progressTrack"><span style={{ width: `${Math.min(100, Math.max(0, exportJob.progress || 0))}%` }} /></div>{exportJob.outputPath && <small>{exportJob.outputPath}</small>}{exportJob.error && <strong className="error">{exportJob.error}</strong>}</div>}
+    {mediaImportBusy && <div className="panel" role="status">Importing media into the project library…</div>}
     <div className="liveEditorHost">
       <CJCutEditor
         initialProject={editorProject}
         projectKey={seedKey}
         embedded
         brandName="Video Cleaner · CJCut"
-        allowMediaImport={false}
+        allowMediaImport={true}
         hostMedia={hostMedia}
+        onImportFiles={importFiles}
         onProjectChange={handleChange}
         onSave={saveNow}
       />
