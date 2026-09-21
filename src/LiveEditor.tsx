@@ -179,32 +179,57 @@ function freshProject(project: Project, words: Word[], edl: Edl | null, broll: B
   };
 }
 
-function reconcileSaved(saved: CJCutProject | null, fresh: CJCutProject): CJCutProject {
-  if (!saved?.tracks?.length) return fresh;
-  const freshTracksByExternal = new Map(fresh.tracks.filter((track) => track.externalId).map((track) => [track.externalId!, track]));
-  const freshClipsByExternal = new Map(fresh.tracks.flatMap((track) => track.clips).filter((clip) => clip.externalId).map((clip) => [clip.externalId!, clip]));
+function reconcileSaved(saved: CJCutProject | null, fresh: CJCutProject, broll: BrollPlan | null, projectId: string): CJCutProject {
+  if (!saved) return fresh;
+  const freshTracksByExternal = new Map(fresh.tracks.filter(track => track.externalId).map(track => [track.externalId!, track]));
+  const freshClipsByExternal = new Map(fresh.tracks.flatMap(track => track.clips).filter(clip => clip.externalId).map(clip => [clip.externalId!, clip]));
+  const scenesById = new Map((broll?.scenes ?? []).map(scene => [scene.id, scene]));
   const seenTracks = new Set<string>();
   const suppressed = new Set(saved.suppressedManagedTrackIds ?? []);
 
-  const tracks: CJCutTrack[] = saved.tracks.flatMap((track) => {
-    if (!track.externalId) return [clone(track)];
-    if (suppressed.has(track.externalId)) return [];
-    const currentTrack = freshTracksByExternal.get(track.externalId);
-    if (!currentTrack) return [];
-    seenTracks.add(track.externalId);
-    const clips = track.clips.flatMap((clip) => {
-      if (!clip.externalId) return [clone(clip)];
-      const current = freshClipsByExternal.get(clip.externalId);
-      if (!current) return [];
-      return [{ ...clone(clip), trackId: track.id, type: current.type, url: current.url, sourceDuration: current.sourceDuration, metadata: current.metadata }];
-    });
-    return [{ ...clone(track), type: currentTrack.type, role: currentTrack.role, clips }];
-  });
+  const refreshClip = (clip: CJCutClip, trackId: string): CJCutClip | null => {
+    if (!clip.externalId) return { ...clone(clip), trackId };
+    if (clip.role === 'broll') {
+      const scene = scenesById.get(String(clip.metadata?.sceneId || clip.externalId));
+      if (!scene?.enabled || scene.imageStatus === 'generating' || scene.imageStatus === 'failed') return null;
+      const wantsImage = clip.type === 'image' || clip.metadata?.assetKind === 'image';
+      if (wantsImage && scene.imageFile) return {
+        ...clone(clip), trackId, type: 'image',
+        url: api.brollImageUrl(projectId, scene.id, scene.generatedAt),
+        metadata: { ...clip.metadata, assetKind: 'image', assetVersion: scene.generatedAt || '' },
+      };
+      if (hasCurrentVideo(scene)) return {
+        ...clone(clip), trackId, type: 'video',
+        url: api.brollVideoUrl(projectId, scene.id, scene.videoGeneratedAt),
+        metadata: { ...clip.metadata, assetKind: 'video', assetVersion: scene.videoGeneratedAt || '' },
+      };
+      if (scene.imageFile) return {
+        ...clone(clip), trackId, type: 'image',
+        url: api.brollImageUrl(projectId, scene.id, scene.generatedAt),
+        metadata: { ...clip.metadata, assetKind: 'image', assetVersion: scene.generatedAt || '' },
+      };
+      return null;
+    }
+    const current = freshClipsByExternal.get(clip.externalId);
+    if (!current) return null;
+    return { ...clone(clip), trackId, type: current.type, url: current.url, sourceDuration: current.sourceDuration, metadata: current.metadata };
+  };
 
+  const tracks: CJCutTrack[] = saved.tracks.flatMap(track => {
+    if (track.externalId && suppressed.has(track.externalId)) return [];
+    const currentTrack = track.externalId ? freshTracksByExternal.get(track.externalId) : undefined;
+    if (track.externalId && !currentTrack) return [];
+    if (track.externalId) seenTracks.add(track.externalId);
+    const clips = track.clips.flatMap(clip => {
+      const refreshed = refreshClip(clip, track.id);
+      return refreshed ? [refreshed] : [];
+    });
+    return [{ ...clone(track), type: currentTrack?.type ?? track.type, role: currentTrack?.role ?? track.role, clips }];
+  });
   for (const track of fresh.tracks) {
     if (track.externalId && !seenTracks.has(track.externalId) && !suppressed.has(track.externalId)) tracks.push(clone(track));
   }
-  const duration = Math.max(fresh.duration, ...tracks.flatMap((track) => track.clips.map((clip) => clip.start + clip.duration)), 1);
+  const duration = Math.max(fresh.duration, ...tracks.flatMap(track => track.clips.map(clip => clip.start + clip.duration)), 1);
   return { ...clone(saved), name: fresh.name, width: fresh.width, height: fresh.height, fps: fresh.fps, duration, tracks };
 }
 
@@ -278,7 +303,7 @@ export default function LiveEditor({ project, words, edl, broll, exportVideo, ex
         .then(() => api.getEditorProject<CJCutProject>(project.id))
         .then(({ project: saved }) => {
           if (cancelled) return;
-          const next = reconcileSaved(saved, seed);
+          const next = reconcileSaved(saved, seed, broll, project.id);
           hydratedProjectId.current = project.id;
           latestTimeline.current = next;
           setEditorProject(next);
@@ -291,7 +316,7 @@ export default function LiveEditor({ project, words, edl, broll, exportVideo, ex
           setError(err instanceof Error ? err.message : String(err));
         });
     } else if (latestTimeline.current) {
-      const merged = reconcileSaved(latestTimeline.current, seed);
+      const merged = reconcileSaved(latestTimeline.current, seed, broll, project.id);
       if (JSON.stringify(merged) !== JSON.stringify(latestTimeline.current)) {
         latestTimeline.current = merged;
         setEditorProject(merged);
