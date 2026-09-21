@@ -2,6 +2,7 @@ import { colorVideoFilter } from './color.js';
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
+import { loadEditorMedia, importEditorMedia, resolveEditorMedia, type EditorMediaKind } from './editor-media.js';
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
@@ -763,6 +764,27 @@ app.get('/api/projects/:id/editor/base-clips/:clipId', route(async (req, res) =>
   const source = await fs.stat(clip.sourcePath).catch(() => null);
   if (!source?.isFile()) throw new Error('Base clip is not available. Relink the source media first.');
   res.sendFile(clip.sourcePath);
+}));
+app.get('/api/projects/:id/editor/media', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id));
+  res.json({ media: await loadEditorMedia(project.workDir) });
+}));
+app.post('/api/projects/:id/editor/media', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id));
+  if (req.headers['content-type'] !== 'application/octet-stream') return void res.status(415).json({ error: 'Expected raw media upload' });
+  const kind = String(req.query.kind || '') as EditorMediaKind;
+  const name = String(req.query.name || '');
+  if (!['video', 'audio', 'image'].includes(kind) || !name) return void res.status(400).json({ error: 'Choose a supported video, audio or picture file' });
+  const entry = await importEditorMedia({ workDir: project.workDir, fileName: name, kind, stream: req, probe });
+  res.status(201).json({ media: entry });
+}));
+app.get('/api/projects/:id/editor/media/:mediaId', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id));
+  const match = await resolveEditorMedia(project.workDir, routeParam(req.params.mediaId));
+  if (!match) return void res.status(404).json({ error: 'Imported media was not found' });
+  res.setHeader('Cache-Control', 'private, max-age=3600');
+  res.setHeader('Accept-Ranges', 'bytes');
+  res.sendFile(match.file);
 }));
 app.get('/api/projects/:id/editor-project', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id));
