@@ -18,8 +18,8 @@ export function colorVideoFilter(media: ColorProfile = {}, hdr = false) {
   const targetT = hdr ? 'arib-std-b67' : 'bt709';
   const targetM = hdr ? 'bt2020nc' : 'bt709';
   const filters = rgb ? ['format=gbrpf32le'] : [];
-  filters.push(`zscale=pin=${primaries}:tin=${transfer}:min=${matrix}:rin=${range}:p=${targetP}:t=linear:m=gbr:r=full:npl=${inputHdr ? 203 : 100}`, 'format=gbrpf32le');
-  if (inputHdr && !hdr) filters.push('tonemap=mobius:desat=0');
+  filters.push(`zscale=pin=${primaries}:tin=${transfer}:min=${matrix}:rin=${range}:p=${targetP}:t=linear:m=gbr:r=full:npl=100`, 'format=gbrpf32le');
+  if (inputHdr && !hdr) filters.push('tonemap=hable:desat=0');
   filters.push(`zscale=pin=${targetP}:tin=linear:min=gbr:rin=full:p=${targetP}:t=${targetT}:m=${targetM}:r=limited:npl=${hdr ? 203 : 100}`, `format=${hdr ? 'yuv420p10le' : 'yuv420p'}`, `setparams=range=limited:color_primaries=${targetP}:color_trc=${targetT}:colorspace=${targetM}`);
   return filters.join(',');
 }

@@ -4,6 +4,7 @@ import type { Project } from './project-store.js';
 import { projectClips } from './project-store.js';
 import type { BrollPlan, BrollScene } from './broll.js';
 import { resolveEditorMedia } from './editor-media.js';
+import { colorVideoFilter, type ColorProfile } from './color.js';
 import { ffmpegKeyframeExpression, type AudioKeyframe } from '@cjcut/editor/audio';
 
 export type EditorClip = {
@@ -21,7 +22,7 @@ export type EditorTrack = {
 export type EditorTimeline = {
   name: string; width: number; height: number; fps: number; duration: number; tracks: EditorTrack[];
 };
-type ResolvedClip = EditorClip & { filePath?: string; hasAudio: boolean; role: string };
+type ResolvedClip = EditorClip & { filePath?: string; hasAudio: boolean; role: string; colorProfile?: ColorProfile };
 export type EditorRender = {
   args: string[];
   duration: number;
@@ -29,7 +30,7 @@ export type EditorRender = {
   audioClips: number;
   outputPath: string;
 };
-export type MediaInfo = { duration?: number; audioCodec?: string };
+export type MediaInfo = ColorProfile & { duration?: number; audioCodec?: string };
 
 const MAX_CLIPS = 250;
 const MIN_LENGTH = 0.04;
@@ -121,6 +122,7 @@ async function resolveClips(options: {
       let filePath: string;
       let audioAllowed = false;
       let sourceDuration = clip.sourceDuration;
+      let media: MediaInfo | undefined;
       if (role === 'base') {
         const sourceClipId = clip.metadata?.sourceClipId;
         const base = typeof sourceClipId === 'string' ? sourceClips.find(item => item.id === sourceClipId) : sourceClips.length === 1 ? sourceClips[0] : undefined;
@@ -128,6 +130,7 @@ async function resolveClips(options: {
         filePath = base.sourcePath;
         sourceDuration = base.media.duration;
         audioAllowed = Boolean(base.media.audioCodec);
+        media = base.media;
       } else if (role === 'broll') {
         const id = sceneId(clip);
         const scene = id ? sceneMap.get(id) : undefined;
@@ -154,11 +157,12 @@ async function resolveClips(options: {
         throw new Error('Unsupported editor media: ' + clip.name + '. Only project base, imported media and generated B-roll can be exported.');
       }
       if (!await exists(filePath)) throw new Error('Missing media file for ' + clip.name + ': ' + path.basename(filePath));
+      if (clip.type === 'video' && !media) media = await probe(filePath);
       if (clip.type !== 'image' && clip.sourceStart >= sourceDuration - 0.001 && role === 'base') throw new Error('Talking-head trim exceeds the source in ' + clip.name);
       if (clip.type !== 'image' && ['base', 'imported'].includes(role) && clip.sourceStart + clip.duration * clip.speed > sourceDuration + 0.05) {
         throw new Error('Trim or playback speed extends past the source file in ' + clip.name);
       }
-      resolved.push({ clip: { ...clip, role, filePath, hasAudio: audioAllowed && clip.volume > 0 && !track.muted && (track.volume ?? 1) > 0 }, trackIndex });
+      resolved.push({ clip: { ...clip, role, filePath, colorProfile: media, hasAudio: audioAllowed && clip.volume > 0 && !track.muted && (track.volume ?? 1) > 0 }, trackIndex });
     }
   }
   return resolved;
@@ -244,9 +248,11 @@ export async function buildEditorRender(options: {
     const opacity = seconds(clamp01(clip.opacity));
     const angle = seconds(clip.rotation * Math.PI / 180);
     const rotate = Math.abs(clip.rotation) > 0.001 ? ',rotate=' + angle + ':ow=rotw(' + angle + '):oh=roth(' + angle + '):c=none' : '';
+    const normalizeColor = clip.type === 'video' ? ',' + colorVideoFilter(clip.colorProfile, false) : '';
     const label = 'clip' + id;
     filters.push('[' + id + ':v]' + trim + ',setpts=(PTS-STARTPTS)/' + seconds(clip.speed) +
       '+' + seconds(clip.start) + '/TB,fps=' + fps +
+      normalizeColor +
       ',scale=' + scaledW + ':' + scaledH + ':force_original_aspect_ratio=decrease:flags=lanczos' +
       ',format=rgba,pad=' + scaledW + ':' + scaledH + ':(ow-iw)/2:(oh-ih)/2:color=black@0' +
       ',colorchannelmixer=aa=' + opacity + rotate + ',format=yuva420p[' + label + ']');
@@ -269,7 +275,7 @@ export async function buildEditorRender(options: {
   filters.push('[' + videoLabel + ']format=yuv420p[vout]');
   if (audioLabels.length) {
     filters.push(audioLabels.map(label => '[' + label + ']').join('') +
-      (audioLabels.length > 1 ? 'amix=inputs=' + audioLabels.length + ':duration=longest:dropout_transition=0,' : '') +
+      (audioLabels.length > 1 ? 'amix=inputs=' + audioLabels.length + ':duration=longest:dropout_transition=0:normalize=0,alimiter=limit=0.98:attack=5:release=50:latency=1,' : '') +
       'atrim=duration=' + seconds(duration) + ',asetpts=PTS-STARTPTS[aout]');
   } else {
     args.push('-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000');

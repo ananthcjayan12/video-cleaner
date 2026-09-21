@@ -16,6 +16,14 @@ function exec(binary: string, args: string[]) {
   assert.equal(result.status, 0, result.stderr || result.stdout);
 }
 
+function meanVolume(file: string, start: number, duration: number) {
+  const result = spawnSync('ffmpeg', ['-hide_banner', '-nostats', '-ss', String(start), '-t', String(duration), '-i', file, '-vn', '-af', 'volumedetect', '-f', 'null', '-'], { encoding: 'utf8', timeout: 120_000 });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const match = result.stderr.match(/mean_volume:\s*(-?[\d.]+) dB/);
+  assert.ok(match, result.stderr);
+  return Number(match[1]);
+}
+
 const baseClip = (start: number, duration: number, sourceStart: number, id: string) => ({
   id, trackId: 'base', type: 'video' as const, name: id, role: 'base',
   metadata: { sourceClipId: 'clip-1' }, start, duration, sourceStart, sourceDuration: 2,
@@ -76,6 +84,10 @@ test('CJCut timeline produces a playable layered MP4 with talking-head audio', {
     assert.ok(Math.abs(Number(result.format.duration) - 2) < 0.2);
     assert.ok(result.streams.some((stream: { codec_type: string }) => stream.codec_type === 'video'));
     assert.ok(result.streams.some((stream: { codec_type: string }) => stream.codec_type === 'audio'));
+    assert.match(render.args[render.args.indexOf('-filter_complex') + 1], /amix=.*normalize=0,alimiter=/);
+    const sourceLevel = meanVolume(source, 0.1, 0.5);
+    const renderedLevel = meanVolume(output, 0.1, 0.5);
+    assert.ok(Math.abs(sourceLevel - renderedLevel) < 1, `Expected editor gain to be preserved; source ${sourceLevel} dB, render ${renderedLevel} dB`);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
@@ -88,7 +100,8 @@ test('CJCut render accepts the host export encoder and hardware decode options',
     exec('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y',
       '-f', 'lavfi', '-i', 'testsrc2=size=96x160:rate=15', '-t', '1',
       '-c:v', 'mpeg4', '-q:v', '5', '-pix_fmt', 'yuv420p', source]);
-    const media = { duration: 1, size: 20000, width: 96, height: 160, frameRate: 15, hdr: false };
+    const media = { duration: 1, size: 20000, width: 96, height: 160, frameRate: 15, hdr: true,
+      pixelFormat: 'yuv420p10le', colorPrimaries: 'bt2020', colorTransfer: 'arib-std-b67', colorSpace: 'bt2020nc', colorRange: 'tv' };
     const project = {
       id: 'encoder-test', name: 'Encoder test', workDir: dir, sourcePath: source, sourceName: 'source.mp4',
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), media,
@@ -110,6 +123,11 @@ test('CJCut render accepts the host export encoder and hardware decode options',
     const inputIndex = render.args.indexOf(source);
     assert.deepEqual(render.args.slice(inputIndex - 3, inputIndex), ['-threads', '2', '-i']);
     assert.ok(render.args.includes('-color_primaries'));
+    const filterGraph = render.args[render.args.indexOf('-filter_complex') + 1];
+    assert.match(filterGraph, /tin=arib-std-b67/);
+    assert.match(filterGraph, /npl=100/);
+    assert.match(filterGraph, /tonemap=hable:desat=0/);
+    assert.match(filterGraph, /color_trc=bt709/);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }

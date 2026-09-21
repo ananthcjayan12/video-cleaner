@@ -377,14 +377,21 @@ async function concatPreparedFiles(ffmpegBin: string, inputs: string[], outputPa
   return outputPath;
 }
 
+const PROXY_COLOR_PIPELINE_VERSION = 2;
+
 async function prepareProjectMedia(project: Project, includeProxy: boolean) {
   await requireSource(project); const settings = await resolvedSettings(); if (!settings.ffmpegBin) throw new Error('FFmpeg was not found.'); const capabilities = await ffmpegCapabilities(settings.ffmpegBin); const clips = syncProjectTimeline(project); const dimensions = proxySize(project.media); const inputAcceleration = capabilities.videoToolboxDecode ? ['-hwaccel', 'videotoolbox'] : []; const proxyEncoder = capabilities.h264VideoToolbox ? ['-c:v', 'h264_videotoolbox', '-realtime', '1', '-prio_speed', '1', '-allow_sw', '1', '-b:v', '1500k', '-maxrate', '2500k', '-bufsize', '4M'] : ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '28'];
   for (const clip of clips) {
-    const clipDir = path.join(project.workDir, 'clips', clip.id); await fs.mkdir(clipDir, { recursive: true }); const audioPath = path.join(clipDir, 'analysis.m4a'); const proxyPath = path.join(clipDir, 'proxy.mp4');
-    const audioReady = await fs.stat(audioPath).then((stat) => stat.isFile() && stat.size > 1000).catch(() => false); const proxyReady = await fs.stat(proxyPath).then((stat) => stat.isFile() && stat.size > 10_000).catch(() => false);
+    const clipDir = path.join(project.workDir, 'clips', clip.id); await fs.mkdir(clipDir, { recursive: true }); const audioPath = path.join(clipDir, 'analysis.m4a'); const proxyPath = path.join(clipDir, 'proxy.mp4'); const proxyMetaPath = path.join(clipDir, 'proxy.meta.json');
+    const audioReady = await fs.stat(audioPath).then((stat) => stat.isFile() && stat.size > 1000).catch(() => false); let proxyReady = await fs.stat(proxyPath).then((stat) => stat.isFile() && stat.size > 10_000).catch(() => false);
+    if (proxyReady && clip.media.hdr) {
+      const [existingProxy, proxyMeta] = await Promise.all([probe(proxyPath).catch(() => null), fs.readFile(proxyMetaPath, 'utf8').then((value) => JSON.parse(value)).catch(() => null)]);
+      proxyReady = proxyMeta?.colorPipeline === PROXY_COLOR_PIPELINE_VERSION && existingProxy?.colorPrimaries === 'bt709' && existingProxy?.colorTransfer === 'bt709' && existingProxy?.colorSpace === 'bt709';
+    }
     if (includeProxy && (!audioReady || !proxyReady)) {
-      const rotation = rotationFilter(clip.media.rotation); const proxyFilter = [rotation, `scale=${dimensions.width}:${dimensions.height}:flags=fast_bilinear`, 'fps=30', 'format=yuv420p'].filter(Boolean).join(',');
-      await run(settings.ffmpegBin, ['-hide_banner', '-y', '-noautorotate', '-display_rotation:v', '0', ...inputAcceleration, '-i', clip.sourcePath, '-map', '0:v:0', '-map', '0:a:0', '-vf', proxyFilter, ...proxyEncoder, '-c:a', 'aac', '-b:a', '96k', '-movflags', '+faststart', proxyPath, '-map', '0:a:0', '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'aac', '-b:a', '48k', audioPath], undefined, 7_200_000);
+      const rotation = rotationFilter(clip.media.rotation); const proxyFilter = [rotation, colorVideoFilter(clip.media), `scale=${dimensions.width}:${dimensions.height}:flags=fast_bilinear`, 'fps=30', 'format=yuv420p'].filter(Boolean).join(',');
+      await run(settings.ffmpegBin, ['-hide_banner', '-y', '-noautorotate', '-display_rotation:v', '0', ...inputAcceleration, '-i', clip.sourcePath, '-map', '0:v:0', '-map', '0:a:0', '-vf', proxyFilter, ...proxyEncoder, ...bt709ColorArgs(), '-c:a', 'aac', '-b:a', '96k', '-movflags', '+faststart', proxyPath, '-map', '0:a:0', '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'aac', '-b:a', '48k', audioPath], undefined, 7_200_000);
+      await atomicWriteJson(proxyMetaPath, { colorPipeline: PROXY_COLOR_PIPELINE_VERSION, generatedAt: new Date().toISOString() });
     } else if (!audioReady) {
       await run(settings.ffmpegBin, ['-hide_banner', '-loglevel', 'error', '-y', '-i', clip.sourcePath, '-map', '0:a:0', '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'aac', '-b:a', '48k', audioPath], undefined, 1_800_000);
     }

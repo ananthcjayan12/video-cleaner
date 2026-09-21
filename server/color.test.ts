@@ -18,5 +18,9 @@ for (const [name, input, profile] of cases) for (const hdr of [false, true]) {
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stderr, new RegExp(`color_trc:${hdr ? 'arib-std-b67' : 'bt709'}`));
     assert.match(result.stderr, new RegExp(`color_primaries:${hdr ? 'bt2020' : 'bt709'}`));
+    if (name === 'HLG' && !hdr) {
+      assert.match(colorVideoFilter(profile, hdr), /npl=100/);
+      assert.match(colorVideoFilter(profile, hdr), /tonemap=hable:desat=0/);
+    }
   });
 }
