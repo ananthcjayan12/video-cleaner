@@ -66,6 +66,7 @@ test('CJCut timeline produces a playable layered MP4 with talking-head audio', {
     });
     assert.equal(render.visualClips, 3);
     assert.equal(render.audioClips, 2);
+    assert.ok(render.args.includes('libx264'));
     exec('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', ...render.args]);
     const stat = await fs.stat(output);
     assert.ok(stat.size > 1000);
@@ -75,6 +76,40 @@ test('CJCut timeline produces a playable layered MP4 with talking-head audio', {
     assert.ok(Math.abs(Number(result.format.duration) - 2) < 0.2);
     assert.ok(result.streams.some((stream: { codec_type: string }) => stream.codec_type === 'video'));
     assert.ok(result.streams.some((stream: { codec_type: string }) => stream.codec_type === 'audio'));
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('CJCut render accepts the host export encoder and hardware decode options', { skip: !hasFfmpeg }, async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cjcut-encoder-test-'));
+  try {
+    const source = path.join(dir, 'source.mp4');
+    exec('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y',
+      '-f', 'lavfi', '-i', 'testsrc2=size=96x160:rate=15', '-t', '1',
+      '-c:v', 'mpeg4', '-q:v', '5', '-pix_fmt', 'yuv420p', source]);
+    const media = { duration: 1, size: 20000, width: 96, height: 160, frameRate: 15, hdr: false };
+    const project = {
+      id: 'encoder-test', name: 'Encoder test', workDir: dir, sourcePath: source, sourceName: 'source.mp4',
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), media,
+      clips: [{ id: 'clip-1', sourcePath: source, sourceName: 'source.mp4', media, timelineStart: 0, timelineEnd: 1 }],
+    } as Project;
+    const timeline: EditorTimeline = {
+      name: 'Encoder test', width: 96, height: 160, fps: 15, duration: 1,
+      tracks: [{ id: 'base', name: 'Base', type: 'video', role: 'base', visible: true, locked: false,
+        clips: [baseClip(0, 1, 0, 'base-1')] }],
+    };
+    const render = await buildEditorRender({
+      project, timeline, broll: null, ffmpegBin: 'ffmpeg', outputPath: path.join(dir, 'output.mp4'),
+      workDir: path.join(dir, 'render'), mode: 'quality', inputVideoArgs: ['-threads', '2'],
+      outputVideoArgs: ['-c:v', 'mpeg4', '-q:v', '4', '-pix_fmt', 'yuv420p'],
+      outputColorArgs: ['-color_primaries', 'bt709'], probe: async () => ({ duration: 1 }),
+    });
+    assert.ok(render.args.includes('mpeg4'));
+    assert.ok(!render.args.includes('libx264'));
+    const inputIndex = render.args.indexOf(source);
+    assert.deepEqual(render.args.slice(inputIndex - 3, inputIndex), ['-threads', '2', '-i']);
+    assert.ok(render.args.includes('-color_primaries'));
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }

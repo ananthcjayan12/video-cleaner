@@ -250,3 +250,75 @@ textarea:focus { border-color:#71717a; }
 .liveEditorRenderStatus .progressTrack > span {display:block;height:100%;background:#38bdf8;}
 .liveEditorRenderStatus.completed .progressTrack > span {background:#4ade80;}
 @media (max-width:1000px) {.liveEditorExportActions {max-width:none;align-items:flex-start;text-align:left;}}
+
+/* Unified creator workspace: scoped separately from CJCut's embedded UI */
+.creatorNavigator {padding:15px 17px;display:flex;flex-direction:column;gap:15px;margin:10px 0 18px;border:1px solid #155e75;background:linear-gradient(135deg,rgba(8,47,73,.25),rgba(9,9,11,.95) 68%)}
+.creatorNavHeader,.creatorStageIntro,.creatorNextActions,.creatorProjectStrip {display:flex;align-items:center;justify-content:space-between;gap:16px}
+.creatorBreadcrumb,.creatorGlobalActions {display:flex;align-items:center;gap:10px;min-width:0}
+.creatorBreadcrumb button {padding:4px 7px;border:0;background:transparent;color:#67e8f9;font-size:11px}
+.creatorBreadcrumb strong {color:#f4f4f5;font-size:12px;max-width:310px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.creatorBreadcrumb span,.creatorSavedState {color:#71717a;font-size:10px}
+.creatorGlobalActions .primary {white-space:nowrap}
+.creatorStageRail {display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:7px}
+.creatorStage {min-width:0;min-height:66px;display:flex;align-items:center;gap:8px;text-align:left;padding:10px 9px;border:1px solid #30363f;border-radius:10px;background:#171b21;color:#d4d4d8;transition:border-color .15s,background .15s}
+.creatorStage:hover,.creatorStage:focus-visible {border-color:#38bdf8;outline:2px solid transparent}
+.creatorStage.active {background:#0c4148;border-color:#2dd4bf;box-shadow:inset 0 0 0 1px rgba(45,212,191,.15)}
+.creatorStage.complete .creatorStepNo {background:#155e54;color:#99f6e4}
+.creatorStage.needs-source:not(.active) {opacity:.78}
+.creatorStepNo {display:grid;place-items:center;flex:0 0 21px;width:21px;height:21px;border-radius:50%;background:#30363f;color:#d4d4d8;font-size:10px;font-weight:700}
+.creatorStepWords {min-width:0;display:flex;flex-direction:column;gap:5px}
+.creatorStepWords strong {font-size:10px;line-height:1.15;color:inherit}
+.creatorStepWords small {font-size:8px;line-height:1.3;color:#a1a1aa}
+.creatorStageIntro {border-top:1px solid #174e57;padding-top:12px;align-items:flex-end}
+.creatorStageIntro h2 {margin:4px 0;font-size:19px;letter-spacing:-.02em;color:#f4f4f5}
+.creatorStageIntro p {margin:0;color:#d4d4d8;font-size:11px;line-height:1.55}
+.creatorStageIntro p span {color:#a1a1aa}
+.creatorStageIntro > button {white-space:nowrap}
+.creatorProjectStrip {padding:12px 16px;margin-top:10px}
+.creatorProjectStrip > div,.creatorNextActions > div {display:flex;flex-direction:column;gap:5px;min-width:0}
+.creatorProjectStrip strong,.creatorNextActions strong {font-size:12px;color:#e4e4e7}
+.creatorProjectStrip small,.creatorNextActions small {font-size:10px;color:#a1a1aa;line-height:1.45}
+.creatorNextActions {margin:15px 0;padding:13px 16px;justify-content:flex-end;flex-wrap:wrap}
+.creatorNextActions > div {flex:1 1 250px}
+.creatorNextActions button {white-space:nowrap}
+.creatorExportStage {display:flex;flex-direction:column;gap:16px}
+.creatorExportHero {padding:22px;display:flex;align-items:flex-start;justify-content:space-between;gap:24px;background:linear-gradient(120deg,#10242c,#151719)}
+.creatorExportHero h3 {font-size:22px;margin:7px 0}
+.creatorExportHero p {max-width:670px;color:#a1a1aa;line-height:1.6;font-size:12px}
+.creatorExportFacts {min-width:175px;display:grid;gap:9px}
+.creatorExportFacts span {padding:9px 12px;background:#092f34;border-radius:8px;font-size:10px;color:#ccfbf1}
+.creatorExportOptions {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.creatorExportOptions>.panel {min-height:155px;display:flex;flex-direction:column;gap:10px;padding:17px}
+.creatorExportOptions h3 {margin:0;font-size:13px}
+.creatorExportOptions p {flex:1;margin:0;color:#a1a1aa;font-size:11px;line-height:1.55}
+.creatorExportOptions button {align-self:start}
+.creatorExportThumbnail {height:130px;width:auto;object-fit:cover;border-radius:7px;align-self:flex-start}
+.creatorEditorOverlay {position:fixed;inset:12px;z-index:80;background:#090d10;display:flex;flex-direction:column;padding:12px;border:1px solid #155e75;border-radius:14px;box-shadow:0 18px 90px rgba(0,0,0,.8);overflow:hidden}
+.creatorEditorOverlayBar {display:flex;align-items:center;justify-content:space-between;gap:12px;padding:4px 6px 12px}
+.creatorEditorOverlayBar>div {display:flex;flex-direction:column;gap:5px}
+.creatorEditorOverlayBar>div:last-child {flex-direction:row}
+.creatorEditorOverlayBar strong {font-size:13px;color:#e4e4e7}
+.creatorEditorOverlayBar small {font-size:10px;color:#a1a1aa}
+.creatorEditorOverlay .liveEditorTab {flex:1;min-height:0}
+.creatorEditorOverlay .liveEditorHost {height:calc(100vh - 185px);min-height:0}
+.brollPanel[data-focus="thumbnail"] {max-width:1100px;margin:auto}
+.brollPanel[data-focus="thumbnail"] .brollConfig,.brollPanel[data-focus="thumbnail"] .brollModeHelp {display:none}
+.brollPanel[data-focus="story"] .assetActions,.brollPanel[data-focus="story"] .batchSelect,.brollPanel[data-focus="story"] .videoAttempts,.brollPanel[data-focus="story"] .sceneButtons {display:none}
+.brollPanel[data-focus="assets"] .brollConfig label:nth-child(n+7) {display:none}
+.brollPanel[data-focus="assets"] .storyBrief {display:none}
+.brollPanel[data-focus="assets"] .brollModeHelp {display:none}
+.brollPanel[data-focus="story"] .brollImage {max-height:250px}
+@media(max-width:1280px) {.creatorStageRail {grid-template-columns:repeat(4,minmax(0,1fr))}.creatorSavedState {display:none}}
+@media(max-width:760px) {
+ .creatorNavHeader,.creatorStageIntro,.creatorExportHero {align-items:flex-start;flex-direction:column}
+ .creatorGlobalActions,.creatorGlobalActions>.primary {width:100%}
+ .creatorGlobalActions>.primary {justify-content:center}
+ .creatorStageRail {grid-template-columns:none;display:flex;overflow-x:auto;scroll-snap-type:x mandatory;padding-bottom:5px}
+ .creatorStage {flex:0 0 140px;scroll-snap-align:start}
+ .creatorExportOptions {grid-template-columns:1fr}
+ .creatorNextActions {justify-content:flex-start}
+ .creatorEditorOverlay {inset:0;border-radius:0}
+ .creatorEditorOverlayBar {align-items:stretch;flex-direction:column}
+ .creatorEditorOverlay .liveEditorHost {overflow:auto}
+}
+@media(prefers-reduced-motion:reduce){.creatorStage {transition:none}}
