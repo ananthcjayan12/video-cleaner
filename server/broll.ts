@@ -586,20 +586,20 @@ export async function createVideoPrompt(options: { textConfig: TextModelConfig; 
     },
   };
   await fs.writeFile(schemaPath, JSON.stringify(schema, null, 2)); const duration = Math.max(2, Math.min(12, scene.sourceEnd - scene.sourceStart));
-  const prompt = \`You are an expert storyboard artist, medical-animation director, camera operator and image-to-video prompt engineer. Write a precise, production-ready motion prompt that turns the supplied still image into a clear VISUAL EXPLANATION matching the narration. The still is the exact FIRST FRAME: its composition, people, identity, anatomy, colors, lighting, framing, camera angle, clothing, tools, objects and all clinically important structures must stay consistent unless the story explicitly needs a physically plausible change.
+  const prompt = `You are an expert storyboard artist, medical-animation director, camera operator and image-to-video prompt engineer. Write a precise, production-ready motion prompt that turns the supplied still image into a clear VISUAL EXPLANATION matching the narration. The still is the exact FIRST FRAME: its composition, people, identity, anatomy, colors, lighting, framing, camera angle, clothing, tools, objects and all clinically important structures must stay consistent unless the story explicitly needs a physically plausible change.
 
 NARRATED STORY (do not introduce unsupported medical claims):
-Narration: \${scene.narration}
-Beat type: \${scene.beatType || 'supporting'}
-Key point: \${scene.keyPoint || scene.visualIntent}
-Why this visual matters: \${scene.whyThisVisualMatters || scene.visualIntent}
-Viewer takeaway: \${scene.viewerTakeaway || scene.visualIntent}
-Visual mode: \${scene.visualMode || 'educational-3d'}
-Visual intent: \${scene.visualIntent}
-Shot type: \${scene.shotType}
-First-frame image prompt: \${scene.imagePrompt}
-Aspect ratio: \${resolveSceneAssetAspect(options.plan, scene)}
-DURATION: \${duration.toFixed(1)} seconds; no cuts unless narration absolutely requires one.
+Narration: ${scene.narration}
+Beat type: ${scene.beatType || 'supporting'}
+Key point: ${scene.keyPoint || scene.visualIntent}
+Why this visual matters: ${scene.whyThisVisualMatters || scene.visualIntent}
+Viewer takeaway: ${scene.viewerTakeaway || scene.visualIntent}
+Visual mode: ${scene.visualMode || 'educational-3d'}
+Visual intent: ${scene.visualIntent}
+Shot type: ${scene.shotType}
+First-frame image prompt: ${scene.imagePrompt}
+Aspect ratio: ${resolveSceneAssetAspect(options.plan, scene)}
+DURATION: ${duration.toFixed(1)} seconds; no cuts unless narration absolutely requires one.
 
 DESIGN THE MOTION, NOT JUST A CAMERA SWAY. First return a structured animationPlan with:
 - motionType: a concrete narrative mechanism (e.g. tooth and gum separation showing cause and effect), not "cinematic animation".
@@ -611,7 +611,7 @@ DESIGN THE MOTION, NOT JUST A CAMERA SWAY. First return a structured animationPl
 
 Write videoPrompt as a DETAILED, STANDALONE animation instruction of at least 200 words. Include:
 1. A precise description of the reference FIRST FRAME and which existing elements to preserve.
-2. A second-by-second or three-phase timeline with visible start, development, resolution and a final 0.3–0.6 s hold, scaled to \${duration.toFixed(1)} s.
+2. A second-by-second or three-phase timeline with visible start, development, resolution and a final 0.3–0.6 s hold, scaled to ${duration.toFixed(1)} s.
 3. Camera path, lens/framing, speed and focus shift only if necessary.
 4. Physically credible anatomical/mechanical changes and their cause/effect. Prefer one strong continuous explanatory action over unrelated moving elements.
 5. Subject movement versus background, material/lighting continuity, perspective and appropriate pacing for narration.
@@ -620,7 +620,7 @@ Write videoPrompt as a DETAILED, STANDALONE animation instruction of at least 20
 
 If humans are present, they remain the SAME people as in the reference still. For any newly invented person, preserve an authentic Indian context unless the narration/reference specifies otherwise; do not replace an existing patient's identity or ethnicity. When explaining internal anatomy use clinically believable educational 3D instead of inserting unrelated people. Maintain exact starting-frame continuity throughout. Do not claim a clinical process happens at real-time speed just because the demonstration is time-lapsed.
 
-Return valid JSON exactly matching the supplied schema: one detailed animationPlan and one production-ready videoPrompt, with NO surrounding prose.\`;
+Return valid JSON exactly matching the supplied schema: one detailed animationPlan and one production-ready videoPrompt, with NO surrounding prose.`;
   const raw: any = await generateStructuredText({ config: options.textConfig, choice: { provider: options.plan.settings.planningProvider || 'codex-cli', model: options.plan.settings.planningModel || '' }, workDir: options.workDir, prompt, schema, outputName: scene.id + '-video-prompt' });
   const videoPrompt = String(raw.videoPrompt ?? '').trim(); const animation = raw.animationPlan ?? {};
   if (videoPrompt.length < 50) throw new Error(`${planningModelLabel({ provider: options.plan.settings.planningProvider || 'codex-cli', model: options.plan.settings.planningModel || '' })} returned an unusable video prompt`);
