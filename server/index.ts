@@ -16,6 +16,7 @@ import {
   deleteBrollScene,
   displayTemplateNeedsPresenterMatte,
   generateBrollImage,
+  fixSceneForMetaPolicy,
   generateBrollVideoWithGoogleFlow,
   generateBrollVideoWithGrokCli,
   generateBrollVideoWithMagnific,
@@ -36,7 +37,8 @@ import {
 import { ensurePresenterMatte, mattingSystemStatus, presenterMatteStatus, type PresenterMatteSpecInput } from './presenter.js';
 import { exportProjectZip, normalizeProjectExportOptions } from './project-export.js';
 import { buildEditorRender } from './editor-render.js';
-import { availableAgyModels, generateStructuredText, type TextModelChoice, type TextProvider } from './text-models.js';
+import { formatMetaFinding, metaTextGuidelinesPrompt, scanMetaText } from './meta-guidelines.js';
+import { availableAgyModels, availableCodexModels, generateStructuredText, type TextModelChoice, type TextProvider } from './text-models.js';
 import { generateProjectThumbnail, loadThumbnailState, replaceThumbnailReferences, thumbnailImageFile, thumbnailReferenceFile, thumbnailStateView } from './thumbnail.js';
 import {
   atomicWriteJson,
@@ -68,7 +70,7 @@ type LocalSettings = {
   // Legacy names from the initial Magnific integration; retained for automatic migration.
   freepikApiKey?: string; freepikVideoModel?: string; freepikVideoEndpoint?: string;
   cleanProvider?: TextProvider; cleanModel?: string; planningProvider?: TextProvider; planningModel?: string; codexModel?: string; agyBin?: string;
-  codexBin?: string; grokBin?: string; gflowBin?: string; ffmpegBin?: string; ffprobeBin?: string; projectsDir?: string;
+  codexBin?: string; claudeBin?: string; grokBin?: string; gflowBin?: string; ffmpegBin?: string; ffprobeBin?: string; projectsDir?: string;
 };
 type FfmpegCapabilities = { videoToolboxDecode: boolean; h264VideoToolbox: boolean; hevcVideoToolbox: boolean };
 type ExportJob = {
@@ -103,7 +105,8 @@ async function run(command: string, args: string[], stdin?: string, timeoutMs = 
     child.stdout.on('data', (chunk) => (stdout += chunk.toString())); child.stderr.on('data', (chunk) => (stderr += chunk.toString()));
     child.on('error', (error) => { if (timer) clearTimeout(timer); reject(error); });
     child.on('close', (code) => { if (timer) clearTimeout(timer); if (code === 0) resolve({ stdout, stderr }); else reject(new Error(`${command} failed (${code})\n${stderr || stdout}`)); });
-    child.stdin.end(stdin ?? '');
+    child.stdin.on('error', (error: NodeJS.ErrnoException) => { if (error.code !== 'EPIPE') reject(error); });
+    if (stdin) child.stdin.end(stdin); else child.stdin.end();
   });
 }
 
@@ -135,7 +138,7 @@ async function detectBinary(name: string) {
   return '';
 }
 function providerValue(value: unknown): ImageProvider { return ['openai', 'gemini', 'grok-cli', 'codex-cli'].includes(String(value)) ? value as ImageProvider : 'gemini'; }
-function textProviderValue(value: unknown): TextProvider { return ['codex-cli', 'agy-cli', 'gemini', 'openai'].includes(String(value)) ? value as TextProvider : 'codex-cli'; }
+function textProviderValue(value: unknown): TextProvider { return ['codex-cli', 'claude-cli', 'agy-cli', 'gemini', 'openai'].includes(String(value)) ? value as TextProvider : 'codex-cli'; }
 function videoProviderValue(value: unknown): VideoProvider { return ['grok-cli', 'google-flow', 'magnific'].includes(String(value)) ? value as VideoProvider : 'grok-cli'; }
 function displayTemplateValue(value: unknown): BrollDisplayTemplate {
   const candidate = String(value || 'full-frame') as BrollDisplayTemplate;
@@ -144,6 +147,7 @@ function displayTemplateValue(value: unknown): BrollDisplayTemplate {
 
 async function resolvedSettings() {
   const codexOverride = localSettings.codexBin || process.env.CODEX_BIN || '';
+  const claudeOverride = localSettings.claudeBin || process.env.CLAUDE_BIN || '';
   const agyOverride = localSettings.agyBin || process.env.AGY_BIN || '';
   const grokOverride = localSettings.grokBin || process.env.GROK_BIN || '';
   const gflowOverride = localSettings.gflowBin || process.env.GFLOW_BIN || '';
@@ -170,7 +174,7 @@ async function resolvedSettings() {
     gflowVideoModel: localSettings.gflowVideoModel || process.env.GFLOW_VIDEO_MODEL || 'veo-fast',
     magnificVideoModel: magnific.model,
     magnificVideoEndpoint: magnific.endpoint,
-    codexBin: codexOverride || await detectBinary('codex'), agyBin: agyOverride || await detectBinary('agy'), grokBin: grokOverride || await detectBinary('grok'), gflowBin: gflowOverride || await detectBinary('gflow'),
+    codexBin: codexOverride || await detectBinary('codex'), claudeBin: claudeOverride || await detectBinary('claude'), agyBin: agyOverride || await detectBinary('agy'), grokBin: grokOverride || await detectBinary('grok'), gflowBin: gflowOverride || await detectBinary('gflow'),
     ffmpegBin: ffmpegOverride || await detectBinary('ffmpeg'), ffprobeBin: ffprobeOverride || await detectBinary('ffprobe'),
     projectsDir: localSettings.projectsDir || process.env.PROJECTS_DIR || path.join(os.homedir(), 'VideoCleaner', 'projects'),
   };
@@ -185,6 +189,10 @@ async function hydrateProjects(clear = false) {
 }
 
 async function canRun(binary: string, args: string[]) { if (!binary) return false; try { await run(binary, args, undefined, 5000); return true; } catch { return false; } }
+async function claudeSignedIn(binary: string) {
+  try { const { stdout } = await run(binary, ['auth', 'status', '--json'], undefined, 5000); return JSON.parse(stdout).loggedIn === true; }
+  catch { return false; }
+}
 async function hasGflowSession(binary: string, profile?: string) {
   if (!binary) return false;
   try {
@@ -207,15 +215,17 @@ async function ffmpegCapabilities(ffmpegBin: string): Promise<FfmpegCapabilities
 
 async function systemStatus() {
   const settings = await resolvedSettings();
-  const [codexInstalled, grokInstalled, gflowInstalled, ffmpegInstalled, ffprobeInstalled] = await Promise.all([canRun(settings.codexBin, ['--version']), canRun(settings.grokBin, ['version']), canRun(settings.gflowBin, ['--version']), canRun(settings.ffmpegBin, ['-version']), canRun(settings.ffprobeBin, ['-version'])]);
-  const [codexAuthenticated, gflowAuthenticated, capabilities, matting] = await Promise.all([
+  const [codexInstalled, claudeInstalled, grokInstalled, gflowInstalled, ffmpegInstalled, ffprobeInstalled] = await Promise.all([canRun(settings.codexBin, ['--version']), canRun(settings.claudeBin, ['--version']), canRun(settings.grokBin, ['version']), canRun(settings.gflowBin, ['--version']), canRun(settings.ffmpegBin, ['-version']), canRun(settings.ffprobeBin, ['-version'])]);
+  const [codexAuthenticated, claudeAuthenticated, gflowAuthenticated, capabilities, matting] = await Promise.all([
     codexInstalled ? canRun(settings.codexBin, ['login', 'status']) : Promise.resolve(false),
+    claudeInstalled ? claudeSignedIn(settings.claudeBin) : Promise.resolve(false),
     gflowInstalled ? hasGflowSession(settings.gflowBin, settings.gflowProfile) : Promise.resolve(false),
     ffmpegInstalled ? ffmpegCapabilities(settings.ffmpegBin) : Promise.resolve({ videoToolboxDecode: false, h264VideoToolbox: false, hevcVideoToolbox: false }),
     mattingSystemStatus(ffmpegInstalled ? settings.ffmpegBin : ''),
   ]);
   return {
     codex: { installed: codexInstalled, authenticated: codexAuthenticated, path: settings.codexBin || null },
+    claude: { installed: claudeInstalled, authenticated: claudeAuthenticated, path: settings.claudeBin || null },
     agy: { installed: Boolean(settings.agyBin) && await canRun(settings.agyBin, ['--version']), path: settings.agyBin || null },
     textModels: { clean: { provider: settings.cleanProvider, model: settings.cleanModel }, planning: { provider: settings.planningProvider, model: settings.planningModel }, codexModel: settings.codexModel },
     grok: { installed: grokInstalled, path: settings.grokBin || null, model: settings.grokModel || 'CLI default', videoModel: settings.grokVideoModel },
@@ -669,13 +679,14 @@ async function ensureProjectPresenterMattes(project: Project, plan: BrollPlan, f
 
 app.get('/api/system/status', route(async (_req, res) => { res.json(await systemStatus()); }));
 app.get('/api/models/agy', route(async (_req, res) => { const settings = await resolvedSettings(); res.json({ models: await availableAgyModels(settings.agyBin) }); }));
-app.get('/api/settings', route(async (_req, res) => { const status = await systemStatus(); res.json({ ...status, overrides: { codexBin: localSettings.codexBin ?? '', agyBin: localSettings.agyBin ?? '', cleanProvider: localSettings.cleanProvider ?? '', cleanModel: localSettings.cleanModel ?? '', planningProvider: localSettings.planningProvider ?? '', planningModel: localSettings.planningModel ?? '', codexModel: localSettings.codexModel ?? '', grokBin: localSettings.grokBin ?? '', gflowBin: localSettings.gflowBin ?? '', ffmpegBin: localSettings.ffmpegBin ?? '', ffprobeBin: localSettings.ffprobeBin ?? '', projectsDir: localSettings.projectsDir ?? '', imageProvider: localSettings.imageProvider ?? '', openAiImageModel: localSettings.openAiImageModel ?? '', geminiImageModel: localSettings.geminiImageModel ?? '', grokModel: localSettings.grokModel ?? '', grokVideoModel: localSettings.grokVideoModel ?? '', gflowProfile: localSettings.gflowProfile ?? '', gflowVideoModel: localSettings.gflowVideoModel ?? '', magnificVideoModel: localSettings.magnificVideoModel ?? '', magnificVideoEndpoint: localSettings.magnificVideoEndpoint ?? '' } }); }));
+app.get('/api/models/codex', route(async (_req, res) => { const settings = await resolvedSettings(); res.json({ models: await availableCodexModels(settings.codexBin) }); }));
+app.get('/api/settings', route(async (_req, res) => { const status = await systemStatus(); res.json({ ...status, overrides: { codexBin: localSettings.codexBin ?? '', claudeBin: localSettings.claudeBin ?? '', agyBin: localSettings.agyBin ?? '', cleanProvider: localSettings.cleanProvider ?? '', cleanModel: localSettings.cleanModel ?? '', planningProvider: localSettings.planningProvider ?? '', planningModel: localSettings.planningModel ?? '', codexModel: localSettings.codexModel ?? '', grokBin: localSettings.grokBin ?? '', gflowBin: localSettings.gflowBin ?? '', ffmpegBin: localSettings.ffmpegBin ?? '', ffprobeBin: localSettings.ffprobeBin ?? '', projectsDir: localSettings.projectsDir ?? '', imageProvider: localSettings.imageProvider ?? '', openAiImageModel: localSettings.openAiImageModel ?? '', geminiImageModel: localSettings.geminiImageModel ?? '', grokModel: localSettings.grokModel ?? '', grokVideoModel: localSettings.grokVideoModel ?? '', gflowProfile: localSettings.gflowProfile ?? '', gflowVideoModel: localSettings.gflowVideoModel ?? '', magnificVideoModel: localSettings.magnificVideoModel ?? '', magnificVideoEndpoint: localSettings.magnificVideoEndpoint ?? '' } }); }));
 app.put('/api/settings', route(async (req, res) => {
   const body = req.body ?? {}; const previousProjectsDir = (await resolvedSettings()).projectsDir;
   if (typeof body.elevenLabsApiKey === 'string' && body.elevenLabsApiKey.trim()) localSettings.elevenLabsApiKey = body.elevenLabsApiKey.trim(); if (typeof body.openAiApiKey === 'string' && body.openAiApiKey.trim()) localSettings.openAiApiKey = body.openAiApiKey.trim(); if (typeof body.geminiApiKey === 'string' && body.geminiApiKey.trim()) localSettings.geminiApiKey = body.geminiApiKey.trim(); if (typeof body.magnificApiKey === 'string' && body.magnificApiKey.trim()) localSettings.magnificApiKey = body.magnificApiKey.trim(); if (typeof body.imageProvider === 'string') localSettings.imageProvider = providerValue(body.imageProvider);
   if (typeof body.cleanProvider === 'string') localSettings.cleanProvider = textProviderValue(body.cleanProvider);
   if (typeof body.planningProvider === 'string') localSettings.planningProvider = textProviderValue(body.planningProvider);
-  for (const key of ['cleanModel', 'planningModel', 'codexModel', 'agyBin', 'codexBin', 'grokBin', 'gflowBin', 'ffmpegBin', 'ffprobeBin', 'projectsDir', 'openAiImageModel', 'geminiImageModel', 'grokModel', 'grokVideoModel', 'gflowProfile', 'gflowVideoModel', 'magnificVideoModel', 'magnificVideoEndpoint'] as const) if (typeof body[key] === 'string') localSettings[key] = body[key].trim() || undefined;
+  for (const key of ['cleanModel', 'planningModel', 'codexModel', 'agyBin', 'codexBin', 'claudeBin', 'grokBin', 'gflowBin', 'ffmpegBin', 'ffprobeBin', 'projectsDir', 'openAiImageModel', 'geminiImageModel', 'grokModel', 'grokVideoModel', 'gflowProfile', 'gflowVideoModel', 'magnificVideoModel', 'magnificVideoEndpoint'] as const) if (typeof body[key] === 'string') localSettings[key] = body[key].trim() || undefined;
   capabilityCache.clear(); await saveSettings(); const nextProjectsDir = (await resolvedSettings()).projectsDir; if (nextProjectsDir !== previousProjectsDir) await hydrateProjects(true); res.json(await systemStatus());
 }));
 
@@ -810,14 +821,14 @@ app.put('/api/projects/:id/editor-project', route(async (req, res) => {
 app.post('/api/projects/:id/transcribe', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const transcript = await transcribeProject(project); res.json({ transcript, edl: project.edl }); }));
 app.post('/api/projects/:id/clean', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id)); const settings = await resolvedSettings(); const intensity = ['light', 'balanced', 'aggressive'].includes(req.body?.intensity) ? req.body.intensity : 'balanced'; if (!project.transcript) await transcribeProject(project); const choice: TextModelChoice = { provider: settings.cleanProvider, model: settings.cleanModel };
-  const schemaPath = path.join(project.workDir, 'edl.schema.json'); const outputPath = path.join(project.workDir, 'codex-edl.json'); await atomicWriteJson(schemaPath, EDL_SCHEMA); const transcript = project.transcript!.words.map((word) => `[${word.id} ${word.start.toFixed(3)}-${word.end.toFixed(3)}] ${word.text}`).join('\n'); const prompt = `You are a decisive professional talking-head dialogue editor. Produce a concise, natural final narration containing only material that earns its place.\n\nThis is DELETE-ONLY editing. Never invent, paraphrase, replace, reorder, or combine spoken words. Keep source chronology. Return only ranges of ORIGINAL words to keep, and never cut inside a word.\n\nREMOVE ALL NON-ESSENTIAL MATERIAL:\n- Silence, dead air, setup time, and unnecessarily long pauses. Infer silence from the timestamp gap between consecutive words. Split keep ranges around removable gaps instead of returning one range that bridges them.\n- Repeated sentences, repeated ideas, duplicate takes, and attempts where the speaker says the same thing again. Keep only the clearest, most complete, most natural version.\n- Fillers, verbal clutter, false starts, abandoned phrases, self-corrections, stumbles, off-topic remarks, production chatter, and low-value tangents.\n- Redundant lead-ins and conclusions that do not add meaning.\n\nPRESERVE:\n- The complete intended meaning, important facts, necessary context, and the speaker's natural voice.\n- Short pauses that make speech understandable or emotionally natural. Make cuts at safe phrase/sentence boundaries so the result remains grammatical and does not sound rushed.\n\nCleanup intensity: ${intensity}.\nLight: remove obvious mistakes, duplicate takes, fillers, and long silence while retaining relaxed pacing.\nBalanced: remove all clear repetition and non-essential wording, tighten ordinary pauses, and preserve only useful context.\nAggressive: keep the shortest coherent version of every necessary idea and remove nearly all avoidable pause or redundancy.\n\nFor every returned keep range, provide a short reason describing why that exact passage is necessary. In notes, summarize removed duplicate takes and major silence cleanup.\n\nSOURCE WORDS:\n${transcript}`;
-  const raw = await generateStructuredText({ choice, config: settings, workDir: project.workDir, prompt, schema: EDL_SCHEMA, outputName: 'clean-edl' }); project.edl = validateEdl(project.transcript!.words, raw); await invalidateBroll(project); await Promise.all([atomicWriteJson(path.join(project.workDir, 'edl.json'), project.edl), touchProject(project)]); res.json(project.edl);
+  const schemaPath = path.join(project.workDir, 'edl.schema.json'); const outputPath = path.join(project.workDir, 'codex-edl.json'); await atomicWriteJson(schemaPath, EDL_SCHEMA); const transcript = project.transcript!.words.map((word) => `[${word.id} ${word.start.toFixed(3)}-${word.end.toFixed(3)}] ${word.text}`).join('\n'); const prompt = `You are a decisive professional talking-head dialogue editor. Produce a concise, natural final narration containing only material that earns its place.\n\nThis is DELETE-ONLY editing. Never invent, paraphrase, replace, reorder, or combine spoken words. Keep source chronology. Return only ranges of ORIGINAL words to keep, and never cut inside a word.\n\nREMOVE ALL NON-ESSENTIAL MATERIAL:\n- Silence, dead air, setup time, and unnecessarily long pauses. Infer silence from the timestamp gap between consecutive words. Split keep ranges around removable gaps instead of returning one range that bridges them.\n- Repeated sentences, repeated ideas, duplicate takes, and attempts where the speaker says the same thing again. Keep only the clearest, most complete, most natural version.\n- Fillers, verbal clutter, false starts, abandoned phrases, self-corrections, stumbles, off-topic remarks, production chatter, and low-value tangents.\n- Redundant lead-ins and conclusions that do not add meaning.\n\nPRESERVE:\n- The complete intended meaning, important facts, necessary context, and the speaker's natural voice.\n- Short pauses that make speech understandable or emotionally natural. Make cuts at safe phrase/sentence boundaries so the result remains grammatical and does not sound rushed.\n\nCleanup intensity: ${intensity}.\nLight: remove obvious mistakes, duplicate takes, fillers, and long silence while retaining relaxed pacing.\nBalanced: remove all clear repetition and non-essential wording, tighten ordinary pauses, and preserve only useful context.\nAggressive: keep the shortest coherent version of every necessary idea and remove nearly all avoidable pause or redundancy.\n\nFor every returned keep range, provide a short reason describing why that exact passage is necessary. In notes, summarize removed duplicate takes and major silence cleanup.\n\n${metaTextGuidelinesPrompt()}\nBecause editing is delete-only, you may REMOVE a sentence that clearly breaks these policies (e.g. a guaranteed-cure claim or a superiority claim) when the remaining narration still makes sense, and you must say so in notes prefixed \"Meta policy:\". Never rewrite or add words.\n\nSOURCE WORDS:\n${transcript}`;
+  const raw = await generateStructuredText({ choice, config: settings, workDir: project.workDir, prompt, schema: EDL_SCHEMA, outputName: 'clean-edl' }); project.edl = validateEdl(project.transcript!.words, raw); { const wordIndex = new Map(project.transcript!.words.map((word, i) => [word.id, i])); const keptText = project.edl.keepRanges.map((range: KeepRange) => project.transcript!.words.slice(wordIndex.get(range.startWordId), wordIndex.get(range.endWordId)! + 1).map((word) => word.text).join(' ')).join(' '); project.edl.notes = [...(project.edl.notes ?? []), ...scanMetaText(keptText).map((finding) => formatMetaFinding(finding, 'the cleaned narration'))]; } await invalidateBroll(project); await Promise.all([atomicWriteJson(path.join(project.workDir, 'edl.json'), project.edl), touchProject(project)]); res.json(project.edl);
 }));
 app.put('/api/projects/:id/edl', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); if (!project.transcript) throw new Error('Missing transcript'); project.edl = validateEdl(project.transcript.words, { keepRanges: req.body?.keepRanges, notes: ['Manually adjusted'] }); await invalidateBroll(project); await atomicWriteJson(path.join(project.workDir, 'edl.json'), project.edl); res.json(project.edl); }));
 
 app.post('/api/projects/:id/broll/plan', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const settings = await resolvedSettings(); const transcript = await transcribeProject(project); const requested = (req.body?.settings ?? {}) as Partial<BrollPlanSettings>; const workflowMode = ['cleaned-video', 'raw-video', 'assets-only'].includes(String(requested.workflowMode)) ? requested.workflowMode : 'cleaned-video'; const keepRanges = workflowMode === 'cleaned-video' ? project.edl?.keepRanges : undefined; const orientation = (project.media.height || 0) > (project.media.width || 0) ? 'portrait' : 'landscape'; const plan = await createBrollPlan({ textConfig: settings, workDir: project.workDir, words: transcript.words, keepRanges, orientation, settings: { ...requested, provider: requested.provider || settings.imageProvider, planningProvider: requested.planningProvider || settings.planningProvider, planningModel: requested.planningModel ?? settings.planningModel } }); brollPlans.set(project.id, plan); await touchProject(project); res.json({ plan, transcript, edl: project.edl }); }));
 app.get('/api/projects/:id/broll', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const cached = brollPlans.get(project.id); const plan = await reconcileBrollFiles(project, cached ?? await loadBrollPlan(project.workDir)); if (!plan) return void res.status(404).json({ error: 'B-roll plan has not been created yet' }); brollPlans.set(project.id, plan); res.json(plan); }));
-app.put('/api/projects/:id/broll/settings', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet'); const patch: Partial<Pick<BrollPlanSettings, 'provider' | 'imageModel' | 'planningProvider' | 'planningModel' | 'videoProvider' | 'returnVideoWithAudio'>> = {}; if (typeof req.body?.provider === 'string') patch.provider = providerValue(req.body.provider); if (typeof req.body?.imageModel === 'string') patch.imageModel = req.body.imageModel.trim().slice(0, 120); if (typeof req.body?.planningProvider === 'string') patch.planningProvider = textProviderValue(req.body.planningProvider); if (typeof req.body?.planningModel === 'string') patch.planningModel = req.body.planningModel.trim().slice(0, 120); if (typeof req.body?.videoProvider === 'string') patch.videoProvider = videoProviderValue(req.body.videoProvider); if (typeof req.body?.returnVideoWithAudio === 'boolean') patch.returnVideoWithAudio = req.body.returnVideoWithAudio; const updated = await updateBrollSettings(project.workDir, plan, patch); brollPlans.set(project.id, updated); await touchProject(project); res.json(updated); }));
+app.put('/api/projects/:id/broll/settings', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet'); const patch: Partial<Pick<BrollPlanSettings, 'provider' | 'imageModel' | 'planningProvider' | 'planningModel' | 'videoPromptProvider' | 'videoPromptModel' | 'videoProvider' | 'returnVideoWithAudio'>> = {}; if (typeof req.body?.provider === 'string') patch.provider = providerValue(req.body.provider); if (typeof req.body?.imageModel === 'string') patch.imageModel = req.body.imageModel.trim().slice(0, 120); if (typeof req.body?.planningProvider === 'string') patch.planningProvider = textProviderValue(req.body.planningProvider); if (typeof req.body?.planningModel === 'string') patch.planningModel = req.body.planningModel.trim().slice(0, 120); if (typeof req.body?.videoPromptProvider === 'string') patch.videoPromptProvider = req.body.videoPromptProvider ? textProviderValue(req.body.videoPromptProvider) : undefined; if (typeof req.body?.videoPromptModel === 'string') patch.videoPromptModel = req.body.videoPromptModel.trim().slice(0, 120); if (typeof req.body?.videoProvider === 'string') patch.videoProvider = videoProviderValue(req.body.videoProvider); if (typeof req.body?.returnVideoWithAudio === 'boolean') patch.returnVideoWithAudio = req.body.returnVideoWithAudio; const updated = await updateBrollSettings(project.workDir, plan, patch); brollPlans.set(project.id, updated); await touchProject(project); res.json(updated); }));
 app.put('/api/projects/:id/broll/scenes/:sceneId', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id)); const sceneId = routeParam(req.params.sceneId); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet');
   const displayTemplate = req.body?.displayTemplate === 'default' ? 'default' : typeof req.body?.displayTemplate === 'string' ? displayTemplateValue(req.body.displayTemplate) : undefined;
@@ -854,8 +865,9 @@ app.post('/api/projects/:id/thumbnail/generate', route(async (req, res) => {
     provider,
     config: {
       geminiApiKey: settings.geminiApiKey,
-      geminiModel: settings.geminiImageModel,
+      geminiModel: (provider === 'gemini' && plan?.settings.imageModel?.trim()) || settings.geminiImageModel,
       codexBin: settings.codexBin,
+      codexModel: (provider === 'codex-cli' && plan?.settings.imageModel?.trim()) || settings.codexModel,
       ffmpegBin: settings.ffmpegBin,
     },
   });
@@ -895,6 +907,12 @@ app.post('/api/projects/:id/broll/scenes/:sceneId/manual-image', route(async (re
 app.post('/api/projects/:id/broll/scenes/:sceneId/manual-video', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const settings = await resolvedSettings(); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet'); const sourcePath = await pickNativeFile('Choose a completed B-roll video'); if (!sourcePath) return void res.status(400).json({ error: 'No video selected' }); const media = await probe(sourcePath); if (!media.videoCodec) throw new Error('The selected file does not contain a video stream.'); const scene = await importBrollVideo({ workDir: project.workDir, plan, sceneId: routeParam(req.params.sceneId), sourcePath, ffmpegBin: settings.ffmpegBin }); brollPlans.set(project.id, plan); await touchProject(project); res.json({ scene, videoUrl: `/api/projects/${project.id}/broll/scenes/${scene.id}/video?v=${encodeURIComponent(scene.videoGeneratedAt ?? '')}` }); }));
 app.get('/api/projects/:id/broll/scenes/:sceneId/image', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const loaded = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); const plan = await reconcileBrollFiles(project, loaded); const scene = plan?.scenes.find((candidate) => candidate.id === routeParam(req.params.sceneId)); const imagePath = scene ? await resolveBrollAssetPath(project.workDir, scene, 'image') : undefined; if (!plan || !scene || !imagePath) return void res.status(404).json({ error: 'B-roll image has not been generated yet' }); brollPlans.set(project.id, plan); res.setHeader('Cache-Control', 'private, max-age=31536000, immutable'); res.sendFile(imagePath); }));
 
+app.post('/api/projects/:id/broll/scenes/:sceneId/fix-meta', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id)); const settings = await resolvedSettings();
+  const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet');
+  const scene = await fixSceneForMetaPolicy({ textConfig: settings, workDir: project.workDir, plan, sceneId: routeParam(req.params.sceneId), config: { openAiApiKey: settings.openAiApiKey, openAiModel: settings.openAiImageModel, geminiApiKey: settings.geminiApiKey, geminiModel: settings.geminiImageModel, grokBin: settings.grokBin, grokModel: settings.grokModel, grokVideoModel: settings.grokVideoModel, codexBin: settings.codexBin, codexModel: settings.codexModel, ffmpegBin: settings.ffmpegBin } });
+  brollPlans.set(project.id, plan); await touchProject(project); res.json(scene);
+}));
 app.post('/api/projects/:id/broll/scenes/:sceneId/video-prompt', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const settings = await resolvedSettings(); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet'); const scene = await createVideoPrompt({ textConfig: settings, workDir: project.workDir, plan, sceneId: routeParam(req.params.sceneId) }); brollPlans.set(project.id, plan); await touchProject(project); res.json(scene); }));
 app.post('/api/projects/:id/broll/scenes/:sceneId/video', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id)); const settings = await resolvedSettings(); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet'); const sceneId = routeParam(req.params.sceneId); let scene = plan.scenes.find((candidate) => candidate.id === sceneId); if (!scene) throw new Error('B-roll scene not found'); if (!scene.videoPrompt) { scene = await createVideoPrompt({ textConfig: settings, workDir: project.workDir, plan, sceneId }); }

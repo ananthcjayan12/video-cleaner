@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { ImageProvider, ImageProviderConfig } from './broll.js';
+import { metaVisualGuidelinesPrompt } from './meta-guidelines.js';
 
 export type ThumbnailReference = { id: string; name: string; file: string; bytes: number };
 export type ThumbnailState = {
@@ -31,7 +32,8 @@ async function run(command: string, args: string[], stdin?: string, timeoutMs = 
     child.stderr.on('data', (chunk) => (stderr += chunk.toString()));
     child.on('error', (error) => { if (timer) clearTimeout(timer); reject(error); });
     child.on('close', (code) => { if (timer) clearTimeout(timer); if (code === 0) resolve({ stdout, stderr }); else reject(new Error(`${command} failed (${code})\n${stderr || stdout}`)); });
-    child.stdin.end(stdin ?? '');
+    child.stdin.on('error', (error: NodeJS.ErrnoException) => { if (error.code !== 'EPIPE') reject(error); });
+    if (stdin) child.stdin.end(stdin); else child.stdin.end();
   });
 }
 
@@ -158,6 +160,9 @@ COMPOSITION:
 - Avoid clutter, tiny text, long paragraphs, extra unrelated procedures, fake UI, watermarks, or random branding.
 - Do not reproduce the reference person's identity unless that exact person is intentionally part of the selected reference and the prompt explicitly requires them.
 
+${metaVisualGuidelinesPrompt()}
+Thumbnail-specific: the headline hook must not be a personal-attribute question, guaranteed result, fear claim or before/after comparison; the only text allowed is the hook and the clinic's own supplied branding.
+
 The final result should feel like a professionally art-directed thumbnail in the same visual family as the supplied references, while being specific to this video's actual topic.`;
 }
 
@@ -206,7 +211,7 @@ ${outputName}
 
 Use Codex built-in image generation. Do NOT call the OpenAI API manually. Do NOT create a Python image generation script. Actually inspect the references and generate the image.`;
   const env: NodeJS.ProcessEnv = { ...process.env }; delete env.OPENAI_API_KEY; delete env.CODEX_API_KEY;
-  await run(config.codexBin, ['exec', '--ephemeral', '--sandbox', 'workspace-write', agentPrompt], undefined, 900000, { cwd: dir, env });
+  await run(config.codexBin, ['exec', '--ephemeral', ...(config.codexModel ? ['--model', config.codexModel] : []), '--sandbox', 'workspace-write', agentPrompt], undefined, 900000, { cwd: dir, env });
   const stat = await fs.stat(outputPath).catch(() => null);
   if (!stat?.isFile() || stat.size < 10_000) throw new Error('Codex completed without creating a usable thumbnail image.');
   return 'Codex $imagegen (high)';

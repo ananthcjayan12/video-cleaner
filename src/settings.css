@@ -322,3 +322,4 @@ textarea:focus { border-color:#71717a; }
  .creatorEditorOverlay .liveEditorHost {overflow:auto}
 }
 @media(prefers-reduced-motion:reduce){.creatorStage {transition:none}}
+.metaFixButton { border-color:#f59e0b; color:#fbbf24; }

@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { assertMetaVisualCompliant, formatMetaFinding, MetaPolicyError, metaTextGuidelinesPrompt, metaVisualGuidelinesPrompt, scanMetaText, scanMetaVisual } from './meta-guidelines.js';
 import { generateStructuredText, type TextModelChoice, type TextModelConfig, type TextProvider } from './text-models.js';
 
 export type BrollWord = { id: string; text: string; start: number; end: number };
@@ -42,6 +43,8 @@ export type BrollPlanSettings = {
   imageModel?: string;
   planningProvider?: TextProvider;
   planningModel?: string;
+  videoPromptProvider?: TextProvider;
+  videoPromptModel?: string;
   videoProvider: VideoProvider;
   countMode: BrollCountMode;
   targetCount: number;
@@ -54,8 +57,14 @@ export type BrollPlanSettings = {
   returnVideoWithAudio: boolean;
 };
 
+// Video prompts use their own model when chosen; otherwise fall back to the planning model.
+function videoPromptChoice(settings: BrollPlanSettings): TextModelChoice {
+  return settings.videoPromptProvider
+    ? { provider: settings.videoPromptProvider, model: settings.videoPromptModel || '' }
+    : { provider: settings.planningProvider || 'codex-cli', model: settings.planningModel || '' };
+}
 function planningModelLabel(choice: TextModelChoice): string {
-  const provider = choice.provider === 'agy-cli' ? 'AGY' : choice.provider === 'codex-cli' ? 'Codex' : choice.provider === 'openai' ? 'OpenAI' : 'Gemini';
+  const provider = choice.provider === 'agy-cli' ? 'AGY' : choice.provider === 'codex-cli' ? 'Codex' : choice.provider === 'claude-cli' ? 'Claude' : choice.provider === 'openai' ? 'OpenAI' : 'Gemini';
   return choice.model ? `${provider} (${choice.model})` : provider;
 }
 
@@ -151,7 +160,8 @@ async function run(command: string, args: string[], stdin?: string, timeoutMs = 
     child.stdout.on('data', (chunk) => (stdout += chunk.toString())); child.stderr.on('data', (chunk) => (stderr += chunk.toString()));
     child.on('error', (error) => { if (timer) clearTimeout(timer); reject(error); });
     child.on('close', (code) => { if (timer) clearTimeout(timer); if (code === 0) resolve({ stdout, stderr }); else reject(new Error(`${command} failed (${code})\n${stderr || stdout}`)); });
-    child.stdin.end(stdin ?? '');
+    child.stdin.on('error', (error: NodeJS.ErrnoException) => { if (error.code !== 'EPIPE') reject(error); });
+    if (stdin) child.stdin.end(stdin); else child.stdin.end();
   });
 }
 
@@ -231,8 +241,9 @@ function normalizeSettings(raw: Partial<BrollPlanSettings> | undefined): BrollPl
   const videoProvider: VideoProvider = ['grok-cli', 'google-flow', 'magnific'].includes(String(raw?.videoProvider)) ? raw!.videoProvider as VideoProvider : 'grok-cli';
   const countMode: BrollCountMode = ['auto', 'exact', 'per-minute', 'interval'].includes(String(raw?.countMode)) ? raw!.countMode as BrollCountMode : 'auto';
   const aspectRatio = ['auto', '9:16', '16:9'].includes(String(raw?.aspectRatio)) ? raw!.aspectRatio as BrollPlanSettings['aspectRatio'] : 'auto';
-  const planningProvider: TextProvider = ['codex-cli', 'agy-cli', 'gemini', 'openai'].includes(String(raw?.planningProvider)) ? raw!.planningProvider as TextProvider : 'codex-cli';
-  return { workflowMode, provider, imageModel: raw?.imageModel?.trim() || '', planningProvider, planningModel: raw?.planningModel?.trim() || '', videoProvider, countMode, targetCount: Math.max(1, Math.min(40, Number(raw?.targetCount) || 6)), imagesPerMinute: Math.max(0.5, Math.min(20, Number(raw?.imagesPerMinute) || 5)), intervalSeconds: Math.max(10, Math.min(300, Number(raw?.intervalSeconds) || 20)), minSceneDuration: Math.max(1, Math.min(20, Number(raw?.minSceneDuration) || 3)), maxSceneDuration: Math.max(2, Math.min(30, Number(raw?.maxSceneDuration) || 8)), aspectRatio, displayTemplate: normalizeDisplayTemplate(raw?.displayTemplate), returnVideoWithAudio: raw?.returnVideoWithAudio === true };
+  const planningProvider: TextProvider = ['codex-cli', 'claude-cli', 'agy-cli', 'gemini', 'openai'].includes(String(raw?.planningProvider)) ? raw!.planningProvider as TextProvider : 'codex-cli';
+  const videoPromptProvider: TextProvider | undefined = ['codex-cli', 'claude-cli', 'agy-cli', 'gemini', 'openai'].includes(String(raw?.videoPromptProvider)) ? raw!.videoPromptProvider as TextProvider : undefined;
+  return { workflowMode, provider, imageModel: raw?.imageModel?.trim() || '', videoPromptProvider, videoPromptModel: raw?.videoPromptModel?.trim() || '', planningProvider, planningModel: raw?.planningModel?.trim() || '', videoProvider, countMode, targetCount: Math.max(1, Math.min(40, Number(raw?.targetCount) || 6)), imagesPerMinute: Math.max(0.5, Math.min(20, Number(raw?.imagesPerMinute) || 5)), intervalSeconds: Math.max(10, Math.min(300, Number(raw?.intervalSeconds) || 20)), minSceneDuration: Math.max(1, Math.min(20, Number(raw?.minSceneDuration) || 3)), maxSceneDuration: Math.max(2, Math.min(30, Number(raw?.maxSceneDuration) || 8)), aspectRatio, displayTemplate: normalizeDisplayTemplate(raw?.displayTemplate), returnVideoWithAudio: raw?.returnVideoWithAudio === true };
 }
 function validateStoryPlan(words: BrollWord[], keepRanges: BrollKeepRange[] | undefined, raw: any, settings: BrollPlanSettings) {
   const { index, kept } = keptWordIndexes(words, keepRanges); const { times } = keptTimeline(words, keepRanges);
@@ -278,7 +289,7 @@ async function createVisualPlan(options: { textConfig: TextModelConfig; choice: 
     id: beat.id, narration: beat.narration, beatType: beat.beatType, keyPoint: beat.keyPoint, whyThisVisualMatters: beat.whyThisVisualMatters,
     viewerTakeaway: beat.viewerTakeaway, visualMode: beat.visualMode, visualIntent: beat.visualIntent, shotType: beat.shotType,
   }));
-  const basePrompt = `You are the visual-development director for a premium talking-head story. The story editor has already selected the B-roll beats. Your job is to write the strongest possible STARTING-FRAME image prompt for each beat.\n\nDo not add, remove, merge or reorder beats. Return exactly one prompt for every supplied id.\n\nTARGET FRAME: ${options.targetAspect}.\n\nGLOBAL STORYTELLING BAR:\n${BROLL_STYLE_PRESET}\n\nVISUAL MODE RULES:\n- hyperreal-clinical: premium documentary/live-action realism only when a real person, visible symptom, consultation, environment or tangible action is essential to the spoken idea. When people are needed, depict authentic Indian patients/clinicians in an everyday contemporary Indian setting unless narration or a supplied person/reference requires otherwise; do not change a supplied patient's identity. Natural people; never generic stock posing.\n- educational-3d: polished cinematic 3D/scientific visualization for mechanisms, concepts, progression, prevention or treatment logic.\n- anatomy-cutaway: anatomically plausible sectional/cutaway view that clearly exposes the internal relationship being explained.\n- procedure-closeup: precise close or macro view of a treatment/action/tool interacting with the relevant structure; clinically plausible, clean and non-gory.\n- symbolic-medical: simple premium object-based metaphor for an abstract point such as timing, prevention, protection, risk or recurrence; still grounded in the narration.\n- clinic-support: realistic environment/detail shot only when the clinic, appointment, equipment or consultation itself is part of the story; when people are relevant use a believable modern Indian clinic with Indian staff/patients unless the script or user-supplied reference says otherwise. Never use this as filler.\n\nEvery imagePrompt must describe ONE coherent frame, not a collage or infographic. It must be animation-ready: clear depth layers, separated movable elements, readable subject, clean background, no baked-in motion blur. Do not include text, labels, arrows with words, logos, watermarks or poster layouts. The prompt must directly express the key point and viewer takeaway; do not introduce unrelated topics.\n\nSTORY BEATS:\n${JSON.stringify(beatPayload, null, 2)}`;
+  const basePrompt = `You are the visual-development director for a premium talking-head story. The story editor has already selected the B-roll beats. Your job is to write the strongest possible STARTING-FRAME image prompt for each beat.\n\nDo not add, remove, merge or reorder beats. Return exactly one prompt for every supplied id.\n\nTARGET FRAME: ${options.targetAspect}.\n\nGLOBAL STORYTELLING BAR:\n${BROLL_STYLE_PRESET}\n\nVISUAL MODE RULES:\n- hyperreal-clinical: premium documentary/live-action realism only when a real person, visible symptom, consultation, environment or tangible action is essential to the spoken idea. When people are needed, depict authentic Indian patients/clinicians in an everyday contemporary Indian setting unless narration or a supplied person/reference requires otherwise; do not change a supplied patient's identity. Natural people; never generic stock posing.\n- educational-3d: polished cinematic 3D/scientific visualization for mechanisms, concepts, progression, prevention or treatment logic.\n- anatomy-cutaway: anatomically plausible sectional/cutaway view that clearly exposes the internal relationship being explained.\n- procedure-closeup: precise close or macro view of a treatment/action/tool interacting with the relevant structure; clinically plausible, clean and non-gory.\n- symbolic-medical: simple premium object-based metaphor for an abstract point such as timing, prevention, protection, risk or recurrence; still grounded in the narration.\n- clinic-support: realistic environment/detail shot only when the clinic, appointment, equipment or consultation itself is part of the story; when people are relevant use a believable modern Indian clinic with Indian staff/patients unless the script or user-supplied reference says otherwise. Never use this as filler.\n\nEvery imagePrompt must describe ONE coherent frame, not a collage or infographic. It must be animation-ready: clear depth layers, separated movable elements, readable subject, clean background, no baked-in motion blur. Do not include text, labels, arrows with words, logos, watermarks or poster layouts. The prompt must directly express the key point and viewer takeaway; do not introduce unrelated topics.\n\n${metaVisualGuidelinesPrompt()}\n\nSTORY BEATS:\n${JSON.stringify(beatPayload, null, 2)}`;
   let attemptPrompt = basePrompt; let lastIssues: string[] = [];
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     let raw: any;
@@ -291,6 +302,8 @@ async function createVisualPlan(options: { textConfig: TextModelConfig; choice: 
         if (!options.beats.some((beat) => beat.id === id)) { issues.push(`Unknown visual-plan id ${id || '(blank)'}.`); continue; }
         if (byId.has(id)) { issues.push(`Duplicate visual-plan id ${id}.`); continue; }
         if (imagePrompt.length < 80) { issues.push(`${id} has an incomplete image prompt (${imagePrompt.length} characters).`); continue; }
+        const blocked = scanMetaVisual(imagePrompt).filter((finding) => finding.severity === 'block');
+        if (blocked.length) { issues.push(`${id} violates Meta ad policy: ${blocked.map((finding) => formatMetaFinding(finding)).join(' ')}`); continue; }
         byId.set(id, imagePrompt);
       }
       for (const beat of options.beats) if (!byId.has(beat.id)) issues.push(`Missing image prompt for ${beat.id}.`);
@@ -317,7 +330,7 @@ export async function createBrollPlan(options: { textConfig: TextModelConfig; wo
   const cadenceInstruction = settings.countMode === 'interval'
     ? `Aim for approximately one beat in every ${settings.intervalSeconds}-second section, but choose the most meaningful spoken idea in that section rather than generic filler.`
     : 'Distribute beats across the narration according to narrative value. Do not bunch them together and do not illustrate every sentence.';
-  const prompt = `You are the story editor for a polished talking-head video. Decide WHERE B-roll genuinely improves understanding or storytelling before anyone writes image prompts.\n\n${countInstruction}\n${cadenceInstruction}\n\nHARD SCHEDULING RULE: after one B-roll ends, leave at least ${MIN_BROLL_GAP_SECONDS} full seconds of uninterrupted talking-head footage before the next B-roll starts. This is an end-to-next-start gap, not a start-to-start gap. Never overlap or place B-roll scenes back-to-back. Measure gaps using the final timestamps supplied for each word.\n\nAnalyze ONLY the supplied narration. Identify the key story progression: hook, problem, cause, anatomy/mechanism, progression/consequence, solution, prevention, CTA or a genuinely useful supporting beat. Each chosen beat must add new information or emotional clarity. Reject decorative scenes that merely show a generic clinic, smiling person, doctor, tool or object without helping the viewer understand the current sentence.\n\nFor every beat explain:\n- keyPoint: the single spoken idea this visual must communicate.\n- whyThisVisualMatters: why cutting away from the talking head is worth it here.\n- viewerTakeaway: what the viewer should understand after seeing it.\n- visualMode: select the best storytelling language. Use hyperreal-clinical only when real-world human/environment realism carries the idea. Prefer educational-3d/anatomy-cutaway/procedure-closeup for internal mechanisms and treatment logic; symbolic-medical for abstract ideas; clinic-support only when the clinic itself matters.\n\nTARGET FRAME: ${targetAspect}.\nTARGET B-ROLL DURATION: normally ${plannedMinDuration}-${plannedMaxDuration} seconds.\n\nDo NOT write image prompts yet. This pass is only story structure and visual strategy. Every scene must use supplied word IDs and stay chronological.\n\nNARRATION WORDS:\n${transcript}`;
+  const prompt = `You are the story editor for a polished talking-head video. Decide WHERE B-roll genuinely improves understanding or storytelling before anyone writes image prompts.\n\n${countInstruction}\n${cadenceInstruction}\n\nHARD SCHEDULING RULE: after one B-roll ends, leave at least ${MIN_BROLL_GAP_SECONDS} full seconds of uninterrupted talking-head footage before the next B-roll starts. This is an end-to-next-start gap, not a start-to-start gap. Never overlap or place B-roll scenes back-to-back. Measure gaps using the final timestamps supplied for each word.\n\nAnalyze ONLY the supplied narration. Identify the key story progression: hook, problem, cause, anatomy/mechanism, progression/consequence, solution, prevention, CTA or a genuinely useful supporting beat. Each chosen beat must add new information or emotional clarity. Reject decorative scenes that merely show a generic clinic, smiling person, doctor, tool or object without helping the viewer understand the current sentence.\n\nFor every beat explain:\n- keyPoint: the single spoken idea this visual must communicate.\n- whyThisVisualMatters: why cutting away from the talking head is worth it here.\n- viewerTakeaway: what the viewer should understand after seeing it.\n- visualMode: select the best storytelling language. Use hyperreal-clinical only when real-world human/environment realism carries the idea. Prefer educational-3d/anatomy-cutaway/procedure-closeup for internal mechanisms and treatment logic; symbolic-medical for abstract ideas; clinic-support only when the clinic itself matters.\n\nTARGET FRAME: ${targetAspect}.\nTARGET B-ROLL DURATION: normally ${plannedMinDuration}-${plannedMaxDuration} seconds.\n\n${metaTextGuidelinesPrompt()}\nSkip or reframe any beat whose spoken claim would force a non-compliant visual (before/after, graphic, guaranteed-result, real-patient claims); use an educational or symbolic visual instead. Add a short note for any narration passage that itself looks risky for Meta ads.\n\nDo NOT write image prompts yet. This pass is only story structure and visual strategy. Every scene must use supplied word IDs and stay chronological.\n\nNARRATION WORDS:\n${transcript}`;
   let attemptPrompt = prompt; let lastIssues: string[] = []; let story: { beats: PlannedStoryBeat[]; notes: string[] } | null = null;
   for (let attempt = 1; attempt <= MAX_BROLL_PLAN_ATTEMPTS; attempt += 1) {
     let raw: any;
@@ -337,7 +350,9 @@ export async function createBrollPlan(options: { textConfig: TextModelConfig; wo
     throw new Error(`${planningModelLabel(choice)} could not produce a valid B-roll story plan after ${MAX_BROLL_PLAN_ATTEMPTS} attempts.${logPath ? ` Diagnostic log: ${logPath}` : ''}\nRemaining issues:\n${lastIssues.map((issue) => `- ${issue}`).join('\n')}`);
   }
   const scenes = await createVisualPlan({ textConfig: options.textConfig, choice, workDir, beats: story.beats, targetAspect });
-  const plan: BrollPlan = { version: 2, orientation, stylePreset: BROLL_STYLE_PRESET, settings, scenes, notes: story.notes };
+  const narrationText = words.filter((_, index) => kept.has(index)).map((word) => word.text).join(' ');
+  const complianceNotes = scanMetaText(narrationText).map((finding) => formatMetaFinding(finding, 'the narration'));
+  const plan: BrollPlan = { version: 2, orientation, stylePreset: BROLL_STYLE_PRESET, settings, scenes, notes: [...story.notes, ...complianceNotes] };
   await saveBrollPlan(workDir, plan); return plan;
 }
 
@@ -398,7 +413,7 @@ export async function updateBrollScene(workDir: string, plan: BrollPlan, sceneId
   if (scene.imageFile) { scene.generatedAspectRatio ??= previousAspect; scene.orientationChanged = scene.generatedAspectRatio !== resolveSceneAssetAspect(plan, scene); } else scene.orientationChanged = false;
   scene.sourceStart = nextStart; scene.sourceEnd = nextEnd; await saveBrollPlan(workDir, plan); return scene;
 }
-export async function updateBrollSettings(workDir: string, plan: BrollPlan, patch: Partial<Pick<BrollPlanSettings, 'provider' | 'imageModel' | 'planningProvider' | 'planningModel' | 'videoProvider' | 'returnVideoWithAudio'>>) { plan.settings = normalizeSettings({ ...plan.settings, ...patch }); await saveBrollPlan(workDir, plan); return plan; }
+export async function updateBrollSettings(workDir: string, plan: BrollPlan, patch: Partial<Pick<BrollPlanSettings, 'provider' | 'imageModel' | 'planningProvider' | 'planningModel' | 'videoPromptProvider' | 'videoPromptModel' | 'videoProvider' | 'returnVideoWithAudio'>>) { plan.settings = normalizeSettings({ ...plan.settings, ...patch }); await saveBrollPlan(workDir, plan); return plan; }
 export async function deleteBrollScene(workDir: string, plan: BrollPlan, sceneId: string) { const index = plan.scenes.findIndex((scene) => scene.id === sceneId); if (index < 0) throw new Error('B-roll scene not found'); const [scene] = plan.scenes.splice(index, 1); const files = new Set([scene.imageFile, scene.videoFile, ...(scene.videoAttempts ?? []).map((attempt) => attempt.localFile), ...(scene.videoAttempts ?? []).map((attempt) => attempt.errorLogFile)].filter((value): value is string => Boolean(value))); await Promise.all([...files].map((file) => fs.rm(file, { force: true }))); await saveBrollPlan(workDir, plan); return plan; }
 
 export function resolveSceneDisplayTemplate(plan: BrollPlan, scene: BrollScene) { return scene.displayTemplate || plan.settings.displayTemplate || 'full-frame'; }
@@ -427,6 +442,8 @@ MODE DIRECTION: ${visualModeDirective(scene.visualMode)}
 HUMAN CASTING: If people are essential, use authentic Indian subjects and a contemporary Indian context unless the narration or reference says otherwise. Preserve any real reference patient's exact identity and appearance; do not introduce people in anatomy/3D scenes unless they clarify the point.
 
 FINAL QUALITY BAR: ${BROLL_STYLE_PRESET}
+
+${metaVisualGuidelinesPrompt()}
 
 Deliver exactly ONE ${resolveSceneAssetAspect(plan, scene)} starting frame for a short image-to-video B-roll clip. This is not a finished poster: keep one dominant idea, clean depth layers and visually separable elements that can later move, reveal, highlight or be explored by the camera. Keep the essential subject safely centered. Absolutely no text, captions, labels, logos, watermarks, UI, collage or graphic-design elements.`;
 }
@@ -542,6 +559,7 @@ export async function generateBrollImage(options: { config: ImageProviderConfig;
   const customModel = plan.settings.imageModel?.trim();
   const imageConfig: ImageProviderConfig = { ...config, ...(customModel ? (provider === 'openai' ? { openAiModel: customModel } : provider === 'gemini' ? { geminiModel: customModel } : provider === 'grok-cli' ? { grokModel: customModel } : { codexModel: customModel }) : {}) };
   const aspect = resolveSceneAssetAspect(plan, scene);
+  assertMetaVisualCompliant('image prompt', `${scene.imagePrompt}\n${options.regenerationComment ?? ''}`);
   const prompt = generatedImagePrompt(scene, plan, options.regenerationComment);
   const brollDir = path.join(workDir, 'broll');
   await fs.mkdir(brollDir, { recursive: true });
@@ -571,7 +589,23 @@ export async function generateBrollImage(options: { config: ImageProviderConfig;
   }
 }
 
+function complianceFeedback(findings: ReturnType<typeof scanMetaVisual>) {
+  return `\n\nPOLICY CORRECTION: your previous draft was rejected by the Meta ad-policy check. Rewrite it so it does NOT contain these:\n${findings.map((finding) => `- "${finding.match}" (${finding.title}): ${finding.fix}`).join('\n')}\nDo not even mention the forbidden words in negated form (e.g. write nothing about watermarks/logos/text instead of "no watermark"); simply describe only what is visible.`;
+}
+
+/** Writes a video prompt, automatically retrying with corrective feedback when the draft trips the Meta policy check. */
 export async function createVideoPrompt(options: { textConfig: TextModelConfig; workDir: string; plan: BrollPlan; sceneId: string }) {
+  let feedback = '';
+  for (let attempt = 0; ; attempt += 1) {
+    try { return await createVideoPromptOnce(options, feedback); }
+    catch (error) {
+      if (!(error instanceof MetaPolicyError) || attempt >= 2) throw error;
+      feedback = complianceFeedback(error.findings);
+    }
+  }
+}
+
+async function createVideoPromptOnce(options: { textConfig: TextModelConfig; workDir: string; plan: BrollPlan; sceneId: string }, feedback = '') {
   const scene = options.plan.scenes.find((candidate) => candidate.id === options.sceneId); if (!scene) throw new Error('B-roll scene not found'); if (!scene.imageFile) throw new Error('Add or generate a B-roll image before creating video');
   const isMagnificPrompt = options.plan.settings.videoProvider === 'magnific';
   const schemaPath = path.join(options.workDir, `${scene.id}-video-prompt.schema.json`); const outputPath = path.join(options.workDir, `${scene.id}-video-prompt.json`);
@@ -621,17 +655,18 @@ Write videoPrompt as a DETAILED, STANDALONE animation instruction${isMagnificPro
 
 If humans are present, they remain the SAME people as in the reference still. For any newly invented person, preserve an authentic Indian context unless the narration/reference specifies otherwise; do not replace an existing patient's identity or ethnicity. When explaining internal anatomy use clinically believable educational 3D instead of inserting unrelated people. Maintain exact starting-frame continuity throughout. Do not claim a clinical process happens at real-time speed just because the demonstration is time-lapsed.
 
-Return valid JSON exactly matching the supplied schema: one detailed animationPlan and one production-ready videoPrompt, with NO surrounding prose.`;
-  const raw: any = await generateStructuredText({ config: options.textConfig, choice: { provider: options.plan.settings.planningProvider || 'codex-cli', model: options.plan.settings.planningModel || '' }, workDir: options.workDir, prompt, schema, outputName: scene.id + '-video-prompt' });
+${metaVisualGuidelinesPrompt()}\nThe motion must not introduce blood, graphic tissue, before/after transformations, text, logos or exaggerated results.\n\nReturn valid JSON exactly matching the supplied schema: one detailed animationPlan and one production-ready videoPrompt, with NO surrounding prose.${feedback}`;
+  const raw: any = await generateStructuredText({ config: options.textConfig, choice: videoPromptChoice(options.plan.settings), workDir: options.workDir, prompt, schema, outputName: scene.id + '-video-prompt' });
   const videoPrompt = String(raw.videoPrompt ?? '').trim(); const animation = raw.animationPlan ?? {};
-  if (videoPrompt.length < 50) throw new Error(`${planningModelLabel({ provider: options.plan.settings.planningProvider || 'codex-cli', model: options.plan.settings.planningModel || '' })} returned an unusable video prompt`);
+  if (videoPrompt.length < 50) throw new Error(`${planningModelLabel(videoPromptChoice(options.plan.settings))} returned an unusable video prompt`);
   const animationPlan: BrollAnimationPlan = {
     motionType: String(animation.motionType ?? '').trim(), cameraMove: String(animation.cameraMove ?? '').trim(), subjectMotion: String(animation.subjectMotion ?? '').trim(),
     revealSequence: Array.isArray(animation.revealSequence) ? animation.revealSequence.map((item: unknown) => String(item).trim()).filter(Boolean) : [],
     highlightTargets: Array.isArray(animation.highlightTargets) ? animation.highlightTargets.map((item: unknown) => String(item).trim()).filter(Boolean) : [],
     avoidMotion: Array.isArray(animation.avoidMotion) ? animation.avoidMotion.map((item: unknown) => String(item).trim()).filter(Boolean) : [],
   };
-  if (!animationPlan.motionType || !animationPlan.cameraMove || !animationPlan.subjectMotion) throw new Error(`${planningModelLabel({ provider: options.plan.settings.planningProvider || 'codex-cli', model: options.plan.settings.planningModel || '' })} returned an incomplete animation plan`);
+  if (!animationPlan.motionType || !animationPlan.cameraMove || !animationPlan.subjectMotion) throw new Error(`${planningModelLabel(videoPromptChoice(options.plan.settings))} returned an incomplete animation plan`);
+  assertMetaVisualCompliant('generated video prompt', videoPrompt);
   scene.animationPlan = animationPlan; scene.videoPrompt = isMagnificPrompt ? fitMagnificPromptSection(videoPrompt, MAGNIFIC_GENERATED_PROMPT_MAX_CHARACTERS) : videoPrompt; await saveBrollPlan(options.workDir, options.plan); return scene;
 }
 export async function generateBrollVideoWithGrokCli(options: { config: ImageProviderConfig; workDir: string; plan: BrollPlan; sceneId: string; regenerationComment?: string }) {
@@ -769,6 +804,7 @@ export function resolveMagnificVideoConfig(configuredModel?: string, configuredE
 }
 
 function newVideoAttempt(scene: BrollScene, source: BrollVideoAttempt['source'], model: string, prompt: string) {
+  assertMetaVisualCompliant('video prompt', prompt);
   const attempt: BrollVideoAttempt = { id: randomUUID(), source, status: 'submitted', startedAt: new Date().toISOString(), model, prompt, sourceImageRevision: currentImageRevision(scene) };
   scene.videoAttempts ??= []; scene.videoAttempts.push(attempt); scene.videoStatus = 'generating'; return attempt;
 }
@@ -911,4 +947,44 @@ export function buildBrollOverlayFilter(options: { plan: BrollPlan; width: numbe
     parts.push(`[${previous}]${outputFormat}setpts=PTS-STARTPTS[vout]`); if (options.includeAudio !== false) parts.push('[0:a]asetpts=PTS-STARTPTS[aout]');
   }
   return { filter: parts.join(';'), activeScenes: active, needsPresenterMatte: presenterScenes.length > 0 };
+}
+
+
+/**
+ * One-click recovery for a scene blocked by the Meta policy check: rewrites the image prompt into a compliant,
+ * richer one, regenerates the image, then writes a fresh video prompt from the new image.
+ */
+export async function fixSceneForMetaPolicy(options: { config: ImageProviderConfig; textConfig: TextModelConfig; workDir: string; plan: BrollPlan; sceneId: string }) {
+  const { workDir, plan } = options;
+  const scene = plan.scenes.find((candidate) => candidate.id === options.sceneId);
+  if (!scene) throw new Error('B-roll scene not found');
+  const choice: TextModelChoice = { provider: plan.settings.planningProvider || 'codex-cli', model: plan.settings.planningModel || '' };
+  const schema = { type: 'object', additionalProperties: false, required: ['imagePrompt'], properties: { imagePrompt: { type: 'string' } } };
+  let feedback = scanMetaVisual(`${scene.imagePrompt}\n${scene.videoPrompt ?? ''}`).filter((finding) => finding.severity === 'block');
+  let rewritten = '';
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const raw: any = await generateStructuredText({
+      config: options.textConfig, choice, workDir, schema, outputName: `${scene.id}-meta-fix`,
+      prompt: `You are an expert art director for educational dental/medical short-form video. Rewrite the first-frame image prompt below into a NEW, vivid, polished prompt that explains the same key point but complies with Meta ad policy.
+
+Narration: ${scene.narration}
+Key point: ${scene.keyPoint || scene.visualIntent}
+Visual mode: ${scene.visualMode || 'educational-3d'}
+Aspect ratio: ${resolveSceneAssetAspect(plan, scene)}
+Current image prompt: ${scene.imagePrompt}
+${feedback.length ? `\nIssues to eliminate:\n${feedback.map((finding) => `- "${finding.match}" (${finding.title}): ${finding.fix}`).join('\n')}\nDo not mention the forbidden words even in negated form; describe only what is visible.\n` : ''}
+Write one detailed prompt covering subject, composition, depth layers, lighting, materials and colour palette. Show a single state (never before/after or split-screen), no text, logos or watermarks, keep the essential subject centered.
+
+${metaVisualGuidelinesPrompt()}`,
+    });
+    rewritten = String(raw?.imagePrompt ?? '').trim();
+    const remaining = rewritten.length < 40 ? [] : scanMetaVisual(rewritten).filter((finding) => finding.severity === 'block');
+    if (rewritten.length >= 40 && !remaining.length) break;
+    if (attempt === 2) throw new Error(`${planningModelLabel(choice)} could not produce a Meta-compliant image prompt. Edit the prompt manually.`);
+    feedback = remaining;
+  }
+  scene.imagePrompt = rewritten;
+  await saveBrollPlan(workDir, plan);
+  await generateBrollImage({ config: options.config, workDir, plan, sceneId: scene.id });
+  return await createVideoPrompt({ textConfig: options.textConfig, workDir, plan, sceneId: scene.id });
 }

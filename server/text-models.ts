@@ -2,10 +2,10 @@ import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
-export type TextProvider = 'codex-cli' | 'agy-cli' | 'gemini' | 'openai';
+export type TextProvider = 'codex-cli' | 'claude-cli' | 'agy-cli' | 'gemini' | 'openai';
 export type TextModelChoice = { provider: TextProvider; model: string };
 export type TextModelConfig = {
-  codexBin?: string; agyBin?: string; openAiApiKey?: string; geminiApiKey?: string;
+  codexBin?: string; claudeBin?: string; agyBin?: string; openAiApiKey?: string; geminiApiKey?: string;
 };
 export type ModelOption = { id: string; label: string };
 
@@ -37,7 +37,10 @@ async function command(bin: string, args: string[], input?: string, cwd?: string
       }
       else resolve(stdout);
     });
-    child.stdin.end(input ?? '');
+    child.stdin.on('error', (error: NodeJS.ErrnoException) => {
+      if (error.code !== 'EPIPE' && !settled) { settled = true; clearTimeout(timer); reject(error); }
+    });
+    if (input) child.stdin.end(input); else child.stdin.end();
   });
 }
 
@@ -58,6 +61,20 @@ export async function availableAgyModels(bin?: string): Promise<ModelOption[]> {
   const models = parseAgyModels(await command(bin, ['models'], undefined, undefined, 12000));
   if (!models.length) throw new Error('AGY CLI returned no recognizable models. Run `agy models` in Terminal to verify the signed-in account.');
   return models;
+}
+
+export function parseCodexModels(output: string): ModelOption[] {
+  const catalog = JSON.parse(output) as { models?: Array<{ slug?: unknown; display_name?: unknown; visibility?: unknown; priority?: unknown }> };
+  if (!Array.isArray(catalog.models)) throw new Error('Codex CLI returned an invalid model catalog.');
+  return catalog.models
+    .filter(model => model.visibility === 'list' && typeof model.slug === 'string' && model.slug.length > 0)
+    .sort((left, right) => Number(left.priority ?? 999) - Number(right.priority ?? 999))
+    .map(model => ({ id: model.slug as string, label: typeof model.display_name === 'string' ? model.display_name : model.slug as string }));
+}
+
+export async function availableCodexModels(bin?: string): Promise<ModelOption[]> {
+  if (!bin) return [];
+  return parseCodexModels(await command(bin, ['debug', 'models'], undefined, undefined, 15000));
 }
 
 export function parseModelJson(text: string): unknown {
@@ -133,6 +150,18 @@ export async function generateStructuredText(options: {
     args.push('--output-schema', schemaFile, '--output-last-message', outputFile, '-');
     await command(config.codexBin, args, jsonPrompt, workDir);
     return parseModelJson(await fs.readFile(outputFile, 'utf8'));
+  }
+  if (choice.provider === 'claude-cli') {
+    if (!config.claudeBin) throw new Error('Claude CLI was not found.');
+    const args = ['--print', '--no-session-persistence', '--disable-slash-commands', '--strict-mcp-config', '--tools', '', '--output-format', 'json', '--json-schema', JSON.stringify(schema)];
+    if (model) args.push('--model', model);
+    const envelope = parseModelJson(await command(config.claudeBin, args, jsonPrompt, workDir)) as {
+      is_error?: boolean; result?: string; structured_output?: unknown;
+    };
+    if (envelope?.is_error) throw new Error('Claude CLI: ' + (envelope.result || 'Generation failed.'));
+    const parsed = envelope?.structured_output != null ? envelope.structured_output : parseModelJson(envelope?.result || '');
+    await fs.writeFile(path.join(workDir, options.outputName + '.json'), JSON.stringify(parsed, null, 2));
+    return parsed;
   }
   if (choice.provider === 'agy-cli') {
     if (!config.agyBin) throw new Error('AGY CLI is not installed or configured.');

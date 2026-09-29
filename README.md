@@ -4,7 +4,7 @@ Local-first talking-head video cleaner with semantic B-roll image/video generati
 
 ## Core architecture
 
-The browser is only the editor UI. The local Node service owns filesystem access and runs `ffprobe`, `ffmpeg`, `codex`, and optionally `grok`. The original iPhone/master video stays referenced in place; it is not uploaded or copied into the project workspace.
+The browser is only the editor UI. The local Node service owns filesystem access and runs `ffprobe`, `ffmpeg`, the selected text CLI (`codex`, `claude`, or `agy`), and optionally `grok`. The original iPhone/master video stays referenced in place; it is not uploaded or copied into the project workspace.
 
 Dialogue cleaning remains non-destructive: FFmpeg creates a tiny analysis-audio file and optional 30 fps proxy, ElevenLabs provides word timestamps, Codex returns a delete-only EDL, and final export reads the untouched master once.
 
@@ -74,7 +74,7 @@ Generates individual B-roll assets and exports editable `broll-timing.json`. The
 
 ## B-roll planning
 
-Codex CLI groups narration into semantic scenes and writes structured data containing:
+The selected text CLI groups narration into semantic scenes and writes structured data containing:
 
 - source word IDs and editable source start/end timestamps
 - narration, visual intent and shot type
@@ -92,7 +92,7 @@ Every B-roll card supports:
 - **Generate image** with the selected provider
 - **Add/replace image manually** using a native local file picker; the selected source image is never modified or deleted
 - **Delete B-roll** to remove the entire scene plus its generated project copies
-- **Create video prompt** / **Rewrite video prompt** using Codex CLI
+- **Create video prompt** / **Rewrite video prompt** using the selected planning text provider
 - **Create video** / **Regenerate video** using Grok Build CLI
 - editable title, image prompt, video prompt, source start/end timing and enabled state
 
@@ -121,7 +121,11 @@ Experimental local image provider. The app auto-detects `grok` (or uses `GROK_BI
 
 ### Codex CLI
 
-Experimental local image provider. Codex remains the required planner/cleaner and uses the existing `codex login`. Pixel generation requires an image-generation tool/skill to be available inside that local Codex environment.
+Experimental local image provider. Codex uses the existing `codex login`. Pixel generation requires an image-generation tool/skill to be available inside that local Codex environment.
+
+### Claude Code CLI for text tasks
+
+Claude Code can clean dialogue, plan B-roll scenes and visuals, and write motion prompts. Install and sign in with `claude auth login`, then choose Claude Code CLI in the cleaning or planning model picker. The model selector includes Claude Code's documented aliases (`best`, `fable`, `opus`, `sonnet`, `haiku`, and the 1M context variants) and current pinned model IDs from Anthropic's model overview. A custom model ID can also be entered. Leave the model on CLI default to use your existing Claude Code setting. Claude Code is not an image or video generation provider in this app.
 
 ### OpenAI Images API
 
@@ -151,7 +155,7 @@ You can also enter these values in **Settings → Magnific API key**. If Magnifi
 
 The video action is intentionally separated into two responsibilities:
 
-1. **Codex CLI** writes a scene-specific motion prompt designed to preserve the still's identity, anatomy, wardrobe, environment, clinical details and composition while adding subtle realistic movement.
+1. **The selected planning text provider** writes a scene-specific motion prompt designed to preserve the still's identity, anatomy, wardrobe, environment, clinical details and composition while adding subtle realistic movement.
 2. **Grok Build CLI** runs headlessly in the local project directory and is instructed to use an available xAI/Grok Imagine image-to-video capability, preferring `grok-imagine-video-1.5`, and save a real MP4 at the exact project path.
 
 The app validates that the MP4 exists, has a useful file size, and can be decoded by FFmpeg before accepting it. There is no silent API/provider fallback. Because Grok Build's documented headless CLI is an agent interface rather than a dedicated `grok video` subcommand, this bridge is marked **experimental** and requires the local Grok environment to have suitable image-to-video capability/authentication.
@@ -189,7 +193,7 @@ The existing source-aware hardware-first H.264/HEVC export path is reused, inclu
 
 - Node.js 20+
 - FFmpeg / ffprobe
-- Codex CLI installed and authenticated (`codex login`)
+- A signed-in text provider: Codex CLI (`codex login`), Claude Code CLI (`claude auth login`), AGY CLI, or a configured Gemini/OpenAI API key
 - ElevenLabs API key
 - at least one configured/available B-roll image provider
 - at least one B-roll video provider: Magnific API, Google Flow, or Grok Build CLI
@@ -250,3 +254,16 @@ The master source and manually selected source images are never moved/deleted by
 ## HDR note
 
 HDR sources are detected. HEVC/Main10 and source color tags are preserved where the local encoder supports them, but Dolby Vision dynamic metadata preservation is not guaranteed; validate HDR output before production use.
+
+## Meta ads compliance guidelines
+
+All content is meant to be posted and boosted on Facebook/Instagram, so Meta's ad standards are built in. The rules live in one place, [server/meta-guidelines.ts](server/meta-guidelines.ts) (with a `META_GUIDELINES_REVIEWED` date); update that file when Meta's policy changes.
+
+They are applied at every stage:
+
+- **Cleaning** — the model is told the policy and may drop a clearly non-compliant sentence (delete-only); the kept narration is also scanned and warnings are added to the EDL notes as `Meta policy: …`.
+- **B-roll story and visual planning** — policy is part of both prompts; image prompts containing hard-blocked patterns (before/after, graphic/gory, nudity, on-image text/logos, celebrities) are rejected and repaired; narration warnings are added to the plan notes.
+- **Image and video generation** — the policy is appended to every image prompt and video-prompt request, and prompts (including your manual edits and regeneration comments) that hit a hard-block pattern are refused with an explanation before any provider is called.
+- **Thumbnails** — the same visual policy is added to the thumbnail prompt.
+
+The scan is a keyword safety net, not a guarantee of approval. Enable Meta's AI-generated label for posts that use generated B-roll.
