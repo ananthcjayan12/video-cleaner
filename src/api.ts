@@ -71,6 +71,7 @@ export type SystemStatus = {
   };
   videoProviders: { grokCli: { configured: boolean; model: string; experimental: boolean }; googleFlow: { configured: boolean; model: string; profile: string; experimental: boolean }; magnific: { configured: boolean; model: string; endpoint: string; experimental: boolean } };
   brollVideo?: { configured: boolean; provider: string; model: string; experimental: boolean };
+  motionGraphics?: { browserPath: string | null; renderer: string };
   matting?: { configured: boolean; pythonInstalled: boolean; dependenciesInstalled: boolean; pythonPath: string | null; detail: string };
   projectsDir: string;
   overrides?: {
@@ -128,6 +129,28 @@ export type ProjectSnapshot = {
   proxyUrl: string | null;
 };
 
+export type MotionGraphicType = 'lower-third' | 'stat-callout' | 'kinetic-title' | 'animated-chart' | 'process-steps' | 'comparison' | 'checklist' | 'quote-card' | 'timeline' | 'icon-diagram';
+export type MotionPlacement = 'top' | 'center' | 'bottom' | 'full';
+export type MotionItem = { label: string; value: string };
+export type MotionSettings = {
+  planningProvider: TextProvider; planningModel: string; codeProvider?: TextProvider; codeModel?: string;
+  countMode: 'auto' | 'exact' | 'per-minute'; targetCount: number; perMinute: number; minDuration: number; maxDuration: number;
+  accentColor: string; secondaryColor: string; styleNotes: string; defaultTemplateId?: string;
+};
+export type MotionTemplate = { id: string; name: string; notes: string; file: string; createdAt: string };
+export type MotionScene = {
+  id: string; title: string; startWordId: string; endWordId: string; sourceStart: number; sourceEnd: number; narration: string;
+  graphicType: MotionGraphicType; placement: MotionPlacement; keyPoint: string; whyThisGraphicMatters: string; viewerTakeaway: string;
+  content: { headline: string; subhead: string; items: MotionItem[] }; designBrief: string; enabled: boolean;
+  templateId?: string; codeGeneratedAt?: string; codeModel?: string; videoFile?: string; renderedAt?: string; renderProgress?: number;
+  status: 'none' | 'generating' | 'ready' | 'failed'; error?: string;
+};
+export type MotionPlan = { version: 1; orientation: 'portrait' | 'landscape'; settings: MotionSettings; scenes: MotionScene[]; notes: string[] };
+export type MotionScenePatch = {
+  title?: string; enabled?: boolean; sourceStart?: number; sourceEnd?: number; graphicType?: MotionGraphicType; placement?: MotionPlacement; templateId?: string | null;
+  headline?: string; subhead?: string; items?: MotionItem[]; designBrief?: string;
+};
+
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, { ...init, headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) } });
   const body = await response.json().catch(() => ({}));
@@ -158,6 +181,29 @@ export const api = {
   setEdl: (id: string, keepRanges: KeepRange[]) => request<Edl>(`/api/projects/${id}/edl`, { method: 'PUT', body: JSON.stringify({ keepRanges }) }),
   planBroll: (id: string, settings: Partial<BrollPlanSettings>) => request<{ plan: BrollPlan; transcript: { text?: string; words: Word[] }; edl: Edl }>(`/api/projects/${id}/broll/plan`, { method: 'POST', body: JSON.stringify({ settings: { ...settings, displayTemplate: undefined } }) }),
   getBroll: (id: string) => request<BrollPlan>(`/api/projects/${id}/broll`),
+  motionTemplates: () => request<{ templates: MotionTemplate[] }>('/api/motion-templates'),
+  uploadMotionTemplate: async (file: File, name: string, notes: string): Promise<MotionTemplate> => {
+    const response = await fetch(`/api/motion-templates?fileName=${encodeURIComponent(file.name)}&name=${encodeURIComponent(name)}&notes=${encodeURIComponent(notes)}`, { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: file });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || `Template upload failed (${response.status})`);
+    return body as MotionTemplate;
+  },
+  updateMotionTemplate: (id: string, patch: { name?: string; notes?: string }) => request<MotionTemplate>(`/api/motion-templates/${id}`, { method: 'PUT', body: JSON.stringify(patch) }),
+  deleteMotionTemplate: (id: string) => request<{ deleted: boolean }>(`/api/motion-templates/${id}`, { method: 'DELETE' }),
+  motionTemplateImageUrl: (id: string) => `/api/motion-templates/${id}/image`,
+  getMotion: async (id: string): Promise<MotionPlan | null> => {
+    const response = await fetch(`/api/projects/${id}/motion`);
+    if (response.status === 404) return null;
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || `Request failed (${response.status})`);
+    return body as MotionPlan;
+  },
+  planMotion: (id: string, settings: Partial<MotionSettings>) => request<MotionPlan>(`/api/projects/${id}/motion/plan`, { method: 'POST', body: JSON.stringify({ settings }) }),
+  updateMotionSettings: (id: string, patch: Partial<MotionSettings>) => request<MotionPlan>(`/api/projects/${id}/motion/settings`, { method: 'PUT', body: JSON.stringify(patch) }),
+  updateMotionScene: (id: string, sceneId: string, patch: MotionScenePatch) => request<MotionScene>(`/api/projects/${id}/motion/scenes/${sceneId}`, { method: 'PUT', body: JSON.stringify(patch) }),
+  deleteMotionScene: (id: string, sceneId: string) => request<MotionPlan>(`/api/projects/${id}/motion/scenes/${sceneId}`, { method: 'DELETE' }),
+  generateMotionScene: (id: string, sceneId: string, options: { regenerateCode?: boolean; comment?: string } = {}) => request<MotionScene>(`/api/projects/${id}/motion/scenes/${sceneId}/generate`, { method: 'POST', body: JSON.stringify(options) }),
+  motionVideoUrl: (id: string, sceneId: string, version?: string) => `/api/projects/${id}/motion/scenes/${sceneId}/video${version ? `?v=${encodeURIComponent(version)}` : ''}`,
   getEditorProject: <T = unknown>(id: string) => request<{ project: T | null }>(`/api/projects/${id}/editor-project`),
   editorMedia: (id: string) => request<{ media: EditorMediaEntry[] }>(`/api/projects/${id}/editor/media`),
   editorMediaUrl: (id: string, mediaId: string) => `/api/projects/${encodeURIComponent(id)}/editor/media/${encodeURIComponent(mediaId)}`,

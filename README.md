@@ -72,6 +72,25 @@ A proxy is optional. If no transcript exists, the server extracts only lightweig
 
 Generates individual B-roll assets and exports editable `broll-timing.json`. The package can include PNG stills and MP4 clips, so the timing/prompt data can be reused in another editor.
 
+## Motion graphics (Remotion)
+
+The **B-roll plan** stage has a second section, **Motion graphics**, for professional animated overlays: lower thirds, stat callouts, kinetic titles, animated charts, process steps, comparisons, checklists, quote cards, timelines and icon diagrams.
+
+1. **Plan** — the selected text CLI (Claude, Codex or AGY) reads the narration and picks moments where a number, list, sequence or key phrase deserves a graphic. It is given the planned B-roll windows and must stay clear of them (0.25 s margin) and of other graphics (2 s gap). Every graphic is one continuous spoken passage of 1.5–15 s. On-screen text is checked against the Meta ad rules.
+2. **Design** — per graphic, the same CLI writes a self-contained Remotion (React) component using your accent/card colours. Generated code is statically checked before it runs: only `react`, `remotion` and a few `@remotion/*` helpers may be imported, and network, filesystem, `eval`, `Math.random` and `Date` are rejected.
+3. **Render** — Remotion renders it to a transparent VP9 WebM (`motion/motion-NNN.webm` in the project folder). If the code fails to bundle or render, the error is sent back to the model for up to three attempts.
+4. **Edit** — headline, subhead, items and timing are editable; text and timing edits re-render the stored code without another AI call. Changing type, placement or the design brief (or using *Redesign with AI* / an “ask for a change” note) asks the model for new code.
+
+**Reference templates:** upload a brand design (PNG/JPG/WebP, e.g. a contact sheet of short-form layouts) in the Motion graphics panel. The AI looks at it when writing each component and rebuilds its palette, card shapes, typography and icon style as animated vector graphics (photos and logos are not embedded). Choose a project default or a template per graphic; changing it triggers a redesign. Templates live in `~/.video-cleaner/motion-templates` (or `MOTION_TEMPLATES_DIR`) and are shared across projects. Supported with Claude, Codex, Gemini and OpenAI; AGY cannot receive images.
+
+Rendered graphics appear in the Live Editor on their own top-most tracks, above B-roll and the talking head, and are composited into **Export edited MP4**. Because the overlay carries an alpha channel, the final render decodes it with `libvpx-vp9` (your FFmpeg needs that decoder; Homebrew's has it).
+
+Rendering uses an installed Chrome/Chromium/Brave/Edge automatically (or `CHROME_BIN`); otherwise Remotion downloads a headless browser on first use. A 3-second 1080×1920 graphic takes roughly 40 s to bundle and render.
+
+**Licence note:** Remotion is free for individuals and small teams, but companies above its size threshold need a paid Remotion licence. Check https://www.remotion.dev/license before commercial use.
+
+Motion graphics are not yet part of the editable project ZIP or the legacy B-roll-only export; they are used by the Live Editor / edited-MP4 export.
+
 ## B-roll planning
 
 The selected text CLI groups narration into semantic scenes and writes structured data containing:

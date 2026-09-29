@@ -63,12 +63,12 @@ function videoPromptChoice(settings: BrollPlanSettings): TextModelChoice {
     ? { provider: settings.videoPromptProvider, model: settings.videoPromptModel || '' }
     : { provider: settings.planningProvider || 'codex-cli', model: settings.planningModel || '' };
 }
-function planningModelLabel(choice: TextModelChoice): string {
+export function planningModelLabel(choice: TextModelChoice): string {
   const provider = choice.provider === 'agy-cli' ? 'AGY' : choice.provider === 'codex-cli' ? 'Codex' : choice.provider === 'claude-cli' ? 'Claude' : choice.provider === 'openai' ? 'OpenAI' : 'Gemini';
   return choice.model ? `${provider} (${choice.model})` : provider;
 }
 
-async function writePlanningFailureLog(workDir: string, stage: string, choice: TextModelChoice, attempts: number, issues: string[]): Promise<string | undefined> {
+export async function writePlanningFailureLog(workDir: string, stage: string, choice: TextModelChoice, attempts: number, issues: string[]): Promise<string | undefined> {
   try {
     const directory = path.join(workDir, 'generation-logs', 'text');
     await fs.mkdir(directory, { recursive: true });
@@ -166,12 +166,12 @@ async function run(command: string, args: string[], stdin?: string, timeoutMs = 
 }
 
 function allWordsRange(words: BrollWord[]): BrollKeepRange[] { return words.length ? [{ startWordId: words[0].id, endWordId: words.at(-1)!.id }] : []; }
-function keptWordIndexes(words: BrollWord[], ranges?: BrollKeepRange[]) {
+export function keptWordIndexes(words: BrollWord[], ranges?: BrollKeepRange[]) {
   const activeRanges = ranges?.length ? ranges : allWordsRange(words); const index = new Map(words.map((word, position) => [word.id, position])); const kept = new Set<number>();
   for (const range of activeRanges) { const start = index.get(range.startWordId); const end = index.get(range.endWordId); if (start === undefined || end === undefined || start > end) continue; for (let position = start; position <= end; position += 1) kept.add(position); }
   return { index, kept, activeRanges };
 }
-function keptTimeline(words: BrollWord[], ranges?: BrollKeepRange[]) {
+export function keptTimeline(words: BrollWord[], ranges?: BrollKeepRange[]) {
   const { index, activeRanges } = keptWordIndexes(words, ranges);
   const times = new Map<number, { start: number; end: number }>();
   let cursor = 0;

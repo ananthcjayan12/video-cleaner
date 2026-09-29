@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { Project } from './project-store.js';
 import { projectClips } from './project-store.js';
 import type { BrollPlan, BrollScene } from './broll.js';
+import type { MotionPlan } from './motion.js';
 import { resolveEditorMedia } from './editor-media.js';
 import { colorVideoFilter, type ColorProfile } from './color.js';
 import { ffmpegKeyframeExpression, type AudioKeyframe } from '@cjcut/editor/audio';
@@ -97,12 +98,13 @@ function sceneId(clip: EditorClip): string | undefined {
 }
 
 async function resolveClips(options: {
-  project: Project; editor: EditorTimeline; broll: BrollPlan | null;
+  project: Project; editor: EditorTimeline; broll: BrollPlan | null; motion: MotionPlan | null;
   probe: (file: string) => Promise<MediaInfo>;
 }): Promise<Array<{ clip: ResolvedClip; trackIndex: number }>> {
-  const { project, editor, broll } = options;
+  const { project, editor, broll, motion } = options;
   const sourceClips = projectClips(project);
   const sceneMap = new Map((broll?.scenes ?? []).map(scene => [scene.id, scene]));
+  const motionMap = new Map((motion?.scenes ?? []).map(scene => [scene.id, scene]));
   const mediaInfo = new Map<string, MediaInfo>();
   const resolved: Array<{ clip: ResolvedClip; trackIndex: number }> = [];
   const probe = async (file: string) => {
@@ -114,7 +116,9 @@ async function resolveClips(options: {
     if (!track.visible) continue;
     for (const clip of track.clips) {
       if (clip.duration < MIN_LENGTH || clip.opacity === 0 && clip.type !== 'audio') continue;
-      const role = clip.role || track.role || (clip.type === 'text' ? 'caption' : '');
+      // CJCut's role union has no "motion"; motion clips are "overlay" clips that carry metadata.motionId.
+      const isMotion = clip.role === 'motion' || typeof clip.metadata?.motionId === 'string';
+      const role = isMotion ? 'motion' : clip.role || track.role || (clip.type === 'text' ? 'caption' : '');
       if (clip.type === 'text') {
         if (clip.text && clip.text.trim()) resolved.push({ clip: { ...clip, role, hasAudio: false }, trackIndex });
         continue;
@@ -144,6 +148,12 @@ async function resolveClips(options: {
           if (!scene.imageFile) throw new Error('Image for ' + scene.title + ' is missing. Refresh the editor.');
           filePath = scene.imageFile;
         }
+      } else if (role === 'motion') {
+        const id = typeof clip.metadata?.motionId === 'string' ? clip.metadata.motionId : clip.externalId;
+        const graphic = id ? motionMap.get(id) : undefined;
+        if (!graphic?.enabled) throw new Error('Motion graphic ' + (id || clip.name) + ' is missing or disabled. Refresh the editor.');
+        if (graphic.status !== 'ready' || !graphic.videoFile) throw new Error('Motion graphic ' + graphic.title + ' has not been rendered (or its text changed). Generate it again or remove its clip.');
+        filePath = graphic.videoFile;
       } else if (role === 'imported') {
         const importedId = clip.metadata?.editorMediaId;
         if (typeof importedId !== 'string') throw new Error('Imported media reference missing for ' + clip.name);
@@ -154,10 +164,10 @@ async function resolveClips(options: {
         sourceDuration = found.entry.duration;
         audioAllowed = clip.type === 'audio' || (clip.type === 'video' && Boolean(found.entry.hasAudio));
       } else {
-        throw new Error('Unsupported editor media: ' + clip.name + '. Only project base, imported media and generated B-roll can be exported.');
+        throw new Error('Unsupported editor media: ' + clip.name + '. Only project base, imported media, generated B-roll and motion graphics can be exported.');
       }
       if (!await exists(filePath)) throw new Error('Missing media file for ' + clip.name + ': ' + path.basename(filePath));
-      if (clip.type === 'video' && !media) media = await probe(filePath);
+      if (clip.type === 'video' && !media && role !== 'motion') media = await probe(filePath);
       if (clip.type !== 'image' && clip.sourceStart >= sourceDuration - 0.001 && role === 'base') throw new Error('Talking-head trim exceeds the source in ' + clip.name);
       if (clip.type !== 'image' && ['base', 'imported'].includes(role) && clip.sourceStart + clip.duration * clip.speed > sourceDuration + 0.05) {
         throw new Error('Trim or playback speed extends past the source file in ' + clip.name);
@@ -174,7 +184,7 @@ async function resolveClips(options: {
  * Track 0 is topmost, last track is bottommost, just like the CJCut preview.
  */
 export async function buildEditorRender(options: {
-  project: Project; timeline: unknown; broll: BrollPlan | null;
+  project: Project; timeline: unknown; broll: BrollPlan | null; motion?: MotionPlan | null;
   ffmpegBin: string; outputPath: string; workDir: string; mode: 'fast' | 'quality';
   inputVideoArgs?: string[]; outputVideoArgs?: string[]; outputColorArgs?: string[];
   probe: (file: string) => Promise<MediaInfo>;
@@ -183,7 +193,7 @@ export async function buildEditorRender(options: {
   const width = Math.round(numeric(editor.width, options.project.media.width || 1080, 16, 3840, 'width') / 2) * 2;
   const height = Math.round(numeric(editor.height, options.project.media.height || 1920, 16, 3840, 'height') / 2) * 2;
   const fps = numeric(editor.fps, 30, 1, 60, 'fps');
-  const resolved = await resolveClips({ project: options.project, editor, broll: options.broll, probe: options.probe });
+  const resolved = await resolveClips({ project: options.project, editor, broll: options.broll, motion: options.motion ?? null, probe: options.probe });
   const duration = Math.max(0, ...resolved.map(({ clip }) => clip.start + clip.duration));
   if (duration < MIN_LENGTH) throw new Error('The CJCut timeline contains no visible clips.');
   if (duration > 14400) throw new Error('CJCut timeline is longer than the four-hour render limit.');
@@ -239,6 +249,8 @@ export async function buildEditorRender(options: {
       continue;
     }
     if (clip.type === 'image') args.push('-loop', '1', '-framerate', String(fps), '-i', clip.filePath!);
+    // Motion graphics are VP9 WebM with an alpha plane; only libvpx-vp9 decodes it, and hardware decode would drop it.
+    else if (clip.role === 'motion') args.push('-c:v', 'libvpx-vp9', '-i', clip.filePath!);
     else args.push(...(clip.role === 'broll' ? ['-stream_loop', '-1'] : []), ...(options.inputVideoArgs ?? []), '-i', clip.filePath!);
     const trim = clip.type === 'image'
       ? 'trim=duration=' + seconds(clip.duration)
@@ -248,7 +260,7 @@ export async function buildEditorRender(options: {
     const opacity = seconds(clamp01(clip.opacity));
     const angle = seconds(clip.rotation * Math.PI / 180);
     const rotate = Math.abs(clip.rotation) > 0.001 ? ',rotate=' + angle + ':ow=rotw(' + angle + '):oh=roth(' + angle + '):c=none' : '';
-    const normalizeColor = clip.type === 'video' ? ',' + colorVideoFilter(clip.colorProfile, false) : '';
+    const normalizeColor = clip.type === 'video' && clip.role !== 'motion' ? ',' + colorVideoFilter(clip.colorProfile, false) : '';
     const label = 'clip' + id;
     filters.push('[' + id + ':v]' + trim + ',setpts=(PTS-STARTPTS)/' + seconds(clip.speed) +
       '+' + seconds(clip.start) + '/TB,fps=' + fps +

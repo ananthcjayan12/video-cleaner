@@ -9,15 +9,18 @@
     "dev:server": "tsx watch server/index.ts",
     "build": "vite build && tsc -p tsconfig.server.json",
     "start": "node dist-server/index.js",
-    "test": "node --import tsx --test server/*.test.ts",
+    "test": "node --import tsx --test server/*.test.ts src/*.test.ts",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit"
   },
   "dependencies": {
+    "@cjcut/editor": "git+https://github.com/ananthcjayan12/cjcut.git#b8ce0ebdb8730eb857b22596a970387c28eebd48",
+    "@remotion/bundler": "^4.0.530",
+    "@remotion/renderer": "^4.0.530",
     "dotenv": "^16.4.7",
     "express": "^5.1.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
-    "@cjcut/editor": "git+https://github.com/ananthcjayan12/cjcut.git#b8ce0ebdb8730eb857b22596a970387c28eebd48"
+    "remotion": "^4.0.530"
   },
   "devDependencies": {
     "@types/express": "^5.0.3",

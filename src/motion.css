@@ -1,0 +1,54 @@
+.motionPanel { padding:20px; margin-top:18px; }
+.motionPanel .sectionTitle { align-items:flex-start; }
+.motionIntro { max-width:880px; line-height:1.6; margin-bottom:12px; }
+.motionHint { background:#1c1917; border:1px solid #44403c; color:#fcd34d; border-radius:10px; padding:10px 12px; font-size:13px; margin:0 0 14px; }
+.motionConfig { display:grid; gap:14px; margin-bottom:18px; }
+.motionFields { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; }
+.motionFields label, .motionStyle, .motionForm label, .motionWide { display:flex; flex-direction:column; gap:6px; color:#a1a1aa; font-size:12px; }
+.motionColor { display:flex; align-items:center; gap:10px; }
+.motionColor input[type=color] { width:44px; height:38px; padding:2px; cursor:pointer; }
+.motionColor code { color:#d4d4d8; font-size:12px; }
+.motionNotes { color:#fcd34d; font-size:13px; line-height:1.5; margin:0 0 14px; padding-left:20px; }
+.motionEmpty { padding:18px 0 4px; }
+.motionBatch { display:flex; align-items:center; gap:10px; margin-bottom:14px; }
+.motionBatch span { color:#a1a1aa; font-size:13px; margin-right:auto; }
+.motionGrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(360px,1fr)); gap:16px; align-items:start; }
+.motionCard { border:1px solid #27272a; background:#111113; border-radius:14px; padding:14px; display:flex; flex-direction:column; gap:10px; }
+.motionCard.disabled { opacity:.55; }
+.motionCard header { display:flex; align-items:center; gap:10px; }
+.motionIndex { flex:none; width:26px; height:26px; border-radius:50%; background:#27272a; display:grid; place-items:center; font-size:12px; font-weight:700; }
+.motionTitleInput { font-weight:700; }
+.motionToggle { display:flex; align-items:center; gap:6px; font-size:12px; color:#a1a1aa; flex:none; }
+.motionToggle input { width:auto; }
+.motionMeta { display:flex; justify-content:space-between; gap:10px; font-size:12px; color:#a1a1aa; font-variant-numeric:tabular-nums; }
+.motionStatus.ready { color:#86efac; }
+.motionStatus.generating { color:#7dd3fc; }
+.motionStatus.failed { color:#fca5a5; }
+.motionWhy { margin:0; font-size:13px; line-height:1.5; color:#d4d4d8; }
+.motionWhy strong { color:#fafafa; }
+.motionNarration { margin:0; padding:8px 12px; border-left:3px solid #3f3f46; color:#a1a1aa; font-size:12px; line-height:1.5; }
+.motionPreview { border-radius:10px; overflow:hidden; border:1px solid #27272a; background:
+  linear-gradient(135deg,#334155 0,#1e293b 100%); display:flex; justify-content:center; }
+.motionPreview video { display:block; width:100%; max-height:340px; object-fit:contain; }
+.motionForm { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+.motionCard textarea { width:100%; border:1px solid #3f3f46; background:#0f0f11; color:#f4f4f5; border-radius:9px; padding:10px 11px; outline:none; resize:vertical; font:inherit; font-size:13px; }
+.motionCard textarea:focus { border-color:#71717a; }
+.motionBrief summary { cursor:pointer; color:#a1a1aa; font-size:12px; margin-bottom:8px; }
+.motionBrief textarea { margin-bottom:6px; }
+.motionError { margin:0; color:#fca5a5; font-size:12px; line-height:1.5; white-space:pre-wrap; max-height:160px; overflow:auto; }
+.motionActions { display:flex; flex-wrap:wrap; gap:8px; }
+.motionWide small { font-weight:400; opacity:.8; }
+@media (max-width:640px) { .motionGrid { grid-template-columns:1fr; } }
+
+.motionTemplates { border:1px dashed #3f3f46; border-radius:12px; padding:14px; margin-bottom:18px; display:grid; gap:12px; }
+.motionTemplatesHead { display:grid; gap:4px; }
+.motionTemplateList { display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:12px; }
+.motionTemplateList figure { margin:0; border:1px solid #27272a; border-radius:10px; overflow:hidden; background:#0f0f11; }
+.motionTemplateList figure.active { border-color:#22d3ee; }
+.motionTemplateList img { display:block; width:100%; height:150px; object-fit:cover; object-position:top; }
+.motionTemplateList figcaption { padding:8px 10px; display:grid; gap:6px; font-size:12px; }
+.motionTemplateList figcaption small { color:#71717a; }
+.motionTemplateList figcaption span { display:flex; gap:6px; }
+.motionTemplateList figcaption button { padding:6px 9px; font-size:12px; }
+.motionTemplateUpload { display:grid; grid-template-columns:1fr 1.5fr auto; gap:10px; align-items:center; }
+@media (max-width:760px) { .motionTemplateUpload { grid-template-columns:1fr; } }

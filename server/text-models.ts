@@ -44,6 +44,10 @@ async function command(bin: string, args: string[], input?: string, cwd?: string
   });
 }
 
+const IMAGE_MIME: Record<string, string> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp' };
+async function inlineImage(file: string) { return { mimeType: IMAGE_MIME[path.extname(file).toLowerCase()] || 'image/png', data: (await fs.readFile(file)).toString('base64') }; }
+async function dataUrl(file: string) { const image = await inlineImage(file); return 'data:' + image.mimeType + ';base64,' + image.data; }
+
 export function parseAgyModels(output: string): ModelOption[] {
   // AGY currently emits tab-separated rows, while older releases used aligned
   // columns. Accept both formats and ignore status/progress lines.
@@ -136,10 +140,14 @@ async function writeGenerationLog(workDir: string, outputName: string, details: 
 export async function generateStructuredText(options: {
   choice: TextModelChoice; config: TextModelConfig; workDir: string;
   prompt: string; schema: Record<string, unknown>; outputName: string;
+  /** Reference images. Files must sit inside workDir so tool-restricted CLIs may read them. */
+  images?: string[];
 }): Promise<unknown> {
   const { choice, config, workDir, schema, prompt } = options;
   const model = choice.model.trim();
-  const jsonPrompt = prompt + '\n\nReturn ONLY a complete JSON object satisfying this JSON schema, with no markdown or commentary:\n' + JSON.stringify(schema);
+  const images = options.images ?? [];
+  const imageNote = images.length ? '\n\nREFERENCE IMAGE FILES (look at every one before answering):\n' + images.map(file => '- ' + file).join('\n') : '';
+  const jsonPrompt = prompt + imageNote + '\n\nReturn ONLY a complete JSON object satisfying this JSON schema, with no markdown or commentary:\n' + JSON.stringify(schema);
   if (choice.provider === 'codex-cli') {
     if (!config.codexBin) throw new Error('Codex CLI was not found.');
     const schemaFile = path.join(workDir, options.outputName + '.schema.json');
@@ -147,13 +155,14 @@ export async function generateStructuredText(options: {
     await fs.writeFile(schemaFile, JSON.stringify(schema, null, 2));
     const args = ['exec', '--ephemeral'];
     if (model) args.push('--model', model);
+    for (const image of images) args.push('--image', image);
     args.push('--output-schema', schemaFile, '--output-last-message', outputFile, '-');
     await command(config.codexBin, args, jsonPrompt, workDir);
     return parseModelJson(await fs.readFile(outputFile, 'utf8'));
   }
   if (choice.provider === 'claude-cli') {
     if (!config.claudeBin) throw new Error('Claude CLI was not found.');
-    const args = ['--print', '--no-session-persistence', '--disable-slash-commands', '--strict-mcp-config', '--tools', '', '--output-format', 'json', '--json-schema', JSON.stringify(schema)];
+    const args = ['--print', '--no-session-persistence', '--disable-slash-commands', '--strict-mcp-config', '--tools', images.length ? 'Read' : '', ...(images.length ? ['--allowedTools', 'Read'] : []), '--output-format', 'json', '--json-schema', JSON.stringify(schema)];
     if (model) args.push('--model', model);
     const envelope = parseModelJson(await command(config.claudeBin, args, jsonPrompt, workDir)) as {
       is_error?: boolean; result?: string; structured_output?: unknown;
@@ -165,6 +174,7 @@ export async function generateStructuredText(options: {
   }
   if (choice.provider === 'agy-cli') {
     if (!config.agyBin) throw new Error('AGY CLI is not installed or configured.');
+    if (images.length) throw new Error('AGY cannot receive reference images in a tool-free request. Use Claude, Codex, Gemini or OpenAI for template-based designs.');
     // AGY is an agentic CLI and may otherwise decide to inspect the workspace
     // instead of answering a self-contained structured-output request. Keep the
     // turn explicitly tool-free; all required input is already in the prompt.
@@ -213,7 +223,7 @@ export async function generateStructuredText(options: {
     if (!config.openAiApiKey) throw new Error('OpenAI API key is missing.');
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST', headers: { Authorization: 'Bearer ' + config.openAiApiKey, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, messages: [{ role: 'user', content: jsonPrompt }], response_format: { type: 'json_object' } }),
+      body: JSON.stringify({ model, messages: [{ role: 'user', content: images.length ? [{ type: 'text', text: jsonPrompt }, ...await Promise.all(images.map(async file => ({ type: 'image_url', image_url: { url: await dataUrl(file) } })))] : jsonPrompt }], response_format: { type: 'json_object' } }),
       signal: AbortSignal.timeout(600000),
     });
     const body = await response.json() as any;
@@ -223,7 +233,7 @@ export async function generateStructuredText(options: {
   if (!config.geminiApiKey) throw new Error('Gemini API key is missing.');
   const response = await fetch('https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent', {
     method: 'POST', headers: { 'x-goog-api-key': config.geminiApiKey, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ contents: [{ parts: [{ text: jsonPrompt }] }], generationConfig: { responseMimeType: 'application/json' } }),
+    body: JSON.stringify({ contents: [{ parts: [{ text: jsonPrompt }, ...await Promise.all(images.map(async file => ({ inlineData: await inlineImage(file) })))] }], generationConfig: { responseMimeType: 'application/json' } }),
     signal: AbortSignal.timeout(600000),
   });
   const body = await response.json() as any;

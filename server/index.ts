@@ -34,6 +34,19 @@ import {
   type ImageProvider,
   type VideoProvider,
 } from './broll.js';
+import {
+  createMotionPlan,
+  deleteMotionScene,
+  generateMotionScene,
+  loadMotionPlan,
+  normalizeMotionSettings,
+  updateMotionScene,
+  updateMotionSettings,
+  type MotionPlan,
+  type MotionScenePatch,
+  type MotionSettings,
+} from './motion.js';
+import { addMotionTemplate, deleteMotionTemplate, listMotionTemplates, motionTemplatePath, MOTION_TEMPLATE_MIME, updateMotionTemplate } from './motion-templates.js';
 import { ensurePresenterMatte, mattingSystemStatus, presenterMatteStatus, type PresenterMatteSpecInput } from './presenter.js';
 import { exportProjectZip, normalizeProjectExportOptions } from './project-export.js';
 import { buildEditorRender } from './editor-render.js';
@@ -83,6 +96,7 @@ const CONFIG_PATH = path.join(CONFIG_DIR, 'config.json');
 const app = express();
 const projects = new Map<string, Project>();
 const brollPlans = new Map<string, BrollPlan>();
+const motionPlans = new Map<string, MotionPlan>();
 const exportJobs = new Map<string, ExportJob>();
 const exportProcesses = new Map<string, ReturnType<typeof spawn>>();
 const capabilityCache = new Map<string, FfmpegCapabilities>();
@@ -145,6 +159,18 @@ function displayTemplateValue(value: unknown): BrollDisplayTemplate {
   return BROLL_DISPLAY_TEMPLATES.some((template) => template.id === candidate) ? candidate : 'full-frame';
 }
 
+// Remotion renders motion graphics in headless Chromium. Prefer a browser that is already installed
+// so nothing has to be downloaded; returning '' lets Remotion fetch its own headless shell instead.
+async function detectChromeBin() {
+  const configured = process.env.CHROME_BIN || '';
+  const candidates = process.platform === 'darwin'
+    ? ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/Applications/Chromium.app/Contents/MacOS/Chromium', '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser', '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge']
+    : process.platform === 'win32'
+      ? ['C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', 'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe']
+      : ['/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser'];
+  for (const candidate of [configured, ...candidates].filter(Boolean)) if (await fs.stat(candidate).then((stat) => stat.isFile()).catch(() => false)) return candidate;
+  return '';
+}
 async function resolvedSettings() {
   const codexOverride = localSettings.codexBin || process.env.CODEX_BIN || '';
   const claudeOverride = localSettings.claudeBin || process.env.CLAUDE_BIN || '';
@@ -183,7 +209,7 @@ async function resolvedSettings() {
 async function hydrateProjects(clear = false) {
   const settings = await resolvedSettings();
   const loaded = await scanProjects(settings.projectsDir);
-  if (clear) { projects.clear(); brollPlans.clear(); }
+  if (clear) { projects.clear(); brollPlans.clear(); motionPlans.clear(); }
   for (const project of loaded) projects.set(project.id, project);
   return loaded;
 }
@@ -243,6 +269,7 @@ async function systemStatus() {
     },
     brollVideo: { configured: grokInstalled || (gflowInstalled && gflowAuthenticated) || Boolean(settings.magnificApiKey), provider: 'Grok CLI / Google Flow / Magnific', model: `${settings.grokVideoModel} / ${settings.gflowVideoModel} / ${settings.magnificVideoModel}`, experimental: true },
     matting,
+    motionGraphics: { browserPath: await detectChromeBin() || null, renderer: 'Remotion' },
     projectsDir: settings.projectsDir,
   };
 }
@@ -344,9 +371,10 @@ function getProject(id: string) { const project = projects.get(id); if (!project
 async function sourceAvailable(project: Project) { const results = await Promise.all(projectClips(project).map((clip) => fs.stat(clip.sourcePath).then((stat) => stat.isFile()).catch(() => false))); return results.every(Boolean); }
 async function requireSource(project: Project) { if (await sourceAvailable(project)) return; const missing: string[] = []; for (const clip of projectClips(project)) if (!await fs.stat(clip.sourcePath).then((stat) => stat.isFile()).catch(() => false)) missing.push(clip.sourceName); throw new Error(`Original source clip${missing.length === 1 ? '' : 's'} missing: ${missing.join(', ')}. Relink before this operation.`); }
 async function touchProject(project: Project) { await saveProject(project); }
-async function invalidateBroll(project: Project) { brollPlans.delete(project.id); await fs.rm(path.join(project.workDir, 'broll-plan.json'), { force: true }); await touchProject(project); }
+async function invalidateMotion(project: Project) { motionPlans.delete(project.id); await Promise.all([fs.rm(path.join(project.workDir, 'motion-plan.json'), { force: true }), fs.rm(path.join(project.workDir, 'motion'), { recursive: true, force: true })]); }
+async function invalidateBroll(project: Project) { brollPlans.delete(project.id); await Promise.all([fs.rm(path.join(project.workDir, 'broll-plan.json'), { force: true }), invalidateMotion(project)]); await touchProject(project); }
 async function invalidateSourceDerivedState(project: Project) {
-  brollPlans.delete(project.id); project.proxyPath = undefined; project.audioPath = undefined; project.transcript = undefined; project.edl = undefined;
+  brollPlans.delete(project.id); await invalidateMotion(project); project.proxyPath = undefined; project.audioPath = undefined; project.transcript = undefined; project.edl = undefined;
   await Promise.all([
     fs.rm(path.join(project.workDir, 'proxy.mp4'), { force: true }),
     fs.rm(path.join(project.workDir, 'analysis.m4a'), { force: true }),
@@ -718,7 +746,7 @@ app.put('/api/projects/:id/meta', route(async (req, res) => {
 }));
 
 app.delete('/api/projects/:id', route(async (req, res) => {
-  const id = routeParam(req.params.id); const project = getProject(id); projects.delete(id); brollPlans.delete(id); exportJobs.delete(id); await fs.rm(project.workDir, { recursive: true, force: true }); res.json({ deleted: true, id });
+  const id = routeParam(req.params.id); const project = getProject(id); projects.delete(id); brollPlans.delete(id); motionPlans.delete(id); exportJobs.delete(id); await fs.rm(project.workDir, { recursive: true, force: true }); res.json({ deleted: true, id });
 }));
 
 app.post('/api/projects/:id/relink', route(async (req, res) => {
@@ -836,6 +864,80 @@ app.put('/api/projects/:id/broll/scenes/:sceneId', route(async (req, res) => {
   const scene = await updateBrollScene(project.workDir, plan, sceneId, { title: typeof req.body?.title === 'string' ? req.body.title : undefined, imagePrompt: typeof req.body?.imagePrompt === 'string' ? req.body.imagePrompt : undefined, videoPrompt: typeof req.body?.videoPrompt === 'string' ? req.body.videoPrompt : undefined, sourceStart: Number.isFinite(Number(req.body?.sourceStart)) ? Number(req.body.sourceStart) : undefined, sourceEnd: Number.isFinite(Number(req.body?.sourceEnd)) ? Number(req.body.sourceEnd) : undefined, enabled: typeof req.body?.enabled === 'boolean' ? req.body.enabled : undefined, displayTemplate, assetAspectRatio }); brollPlans.set(project.id, plan); await touchProject(project); res.json(scene);
 }));
 app.delete('/api/projects/:id/broll/scenes/:sceneId', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet'); const updated = await deleteBrollScene(project.workDir, plan, routeParam(req.params.sceneId)); brollPlans.set(project.id, updated); await touchProject(project); res.json(updated); }));
+
+
+async function loadProjectMotion(project: Project) {
+  const cached = motionPlans.get(project.id); if (cached) return cached;
+  const plan = await loadMotionPlan(project.workDir); if (plan) motionPlans.set(project.id, plan);
+  return plan;
+}
+async function requireMotionPlan(project: Project) { const plan = await loadProjectMotion(project); if (!plan) throw new Error('Motion-graphics plan has not been created yet'); return plan; }
+
+app.post('/api/projects/:id/motion/plan', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id)); const settings = await resolvedSettings(); const transcript = await transcribeProject(project);
+  const requested = (req.body?.settings ?? {}) as Partial<MotionSettings>;
+  const keepRanges = req.body?.workflowMode === 'raw-video' ? undefined : project.edl?.keepRanges;
+  const orientation = (project.media.height || 0) > (project.media.width || 0) ? 'portrait' : 'landscape';
+  const broll = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir);
+  const plan = await createMotionPlan({
+    textConfig: settings, workDir: project.workDir, words: transcript.words, keepRanges, orientation, broll,
+    settings: { ...requested, planningProvider: requested.planningProvider || settings.planningProvider, planningModel: requested.planningModel ?? settings.planningModel },
+  });
+  motionPlans.set(project.id, plan); await touchProject(project); res.json(plan);
+}));
+app.get('/api/motion-templates', route(async (_req, res) => { res.json({ templates: await listMotionTemplates() }); }));
+app.post('/api/motion-templates', route(async (req, res) => {
+  if (req.headers['content-type'] !== 'application/octet-stream') return void res.status(415).json({ error: 'Expected raw image upload' });
+  const fileName = String(req.query.fileName || ''); if (!fileName) return void res.status(400).json({ error: 'Choose a template image' });
+  res.status(201).json(await addMotionTemplate({ fileName, name: String(req.query.name || ''), notes: String(req.query.notes || ''), stream: req }));
+}));
+app.put('/api/motion-templates/:templateId', route(async (req, res) => { res.json(await updateMotionTemplate(routeParam(req.params.templateId), { name: req.body?.name, notes: req.body?.notes })); }));
+app.delete('/api/motion-templates/:templateId', route(async (req, res) => { await deleteMotionTemplate(routeParam(req.params.templateId)); res.json({ deleted: true }); }));
+app.get('/api/motion-templates/:templateId/image', route(async (req, res) => {
+  const found = await motionTemplatePath(routeParam(req.params.templateId)); if (!found) return void res.status(404).json({ error: 'Template not found' });
+  res.type(MOTION_TEMPLATE_MIME[found.entry.file.split('.').pop()!] || 'image/png'); res.setHeader('Cache-Control', 'private, max-age=31536000, immutable'); res.sendFile(found.file);
+}));
+app.get('/api/projects/:id/motion', route(async (req, res) => { const plan = await loadProjectMotion(getProject(routeParam(req.params.id))); if (!plan) return void res.status(404).json({ error: 'Motion-graphics plan has not been created yet' }); res.json(plan); }));
+app.put('/api/projects/:id/motion/settings', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id)); const plan = await requireMotionPlan(project);
+  const patch = normalizeMotionSettings({ ...plan.settings, ...(req.body ?? {}) });
+  const updated = await updateMotionSettings(project.workDir, plan, patch); motionPlans.set(project.id, updated); await touchProject(project); res.json(updated);
+}));
+app.put('/api/projects/:id/motion/scenes/:sceneId', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id)); const plan = await requireMotionPlan(project); const body = req.body ?? {};
+  if (plan.scenes.find((scene) => scene.id === routeParam(req.params.sceneId))?.status === 'generating') throw new Error('Wait for this graphic to finish rendering before editing it.');
+  const patch: MotionScenePatch = {
+    title: typeof body.title === 'string' ? body.title : undefined, enabled: typeof body.enabled === 'boolean' ? body.enabled : undefined,
+    sourceStart: Number.isFinite(Number(body.sourceStart)) && body.sourceStart !== undefined ? Number(body.sourceStart) : undefined,
+    sourceEnd: Number.isFinite(Number(body.sourceEnd)) && body.sourceEnd !== undefined ? Number(body.sourceEnd) : undefined,
+    templateId: typeof body.templateId === 'string' ? body.templateId : body.templateId === null ? null : undefined,
+    graphicType: typeof body.graphicType === 'string' ? body.graphicType : undefined, placement: typeof body.placement === 'string' ? body.placement : undefined,
+    headline: typeof body.headline === 'string' ? body.headline : undefined, subhead: typeof body.subhead === 'string' ? body.subhead : undefined,
+    items: Array.isArray(body.items) ? body.items.map((item: any) => ({ label: String(item?.label ?? ''), value: String(item?.value ?? '') })) : undefined,
+    designBrief: typeof body.designBrief === 'string' ? body.designBrief : undefined,
+  };
+  const broll = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir);
+  const scene = await updateMotionScene(project.workDir, plan, routeParam(req.params.sceneId), patch, broll); await touchProject(project); res.json(scene);
+}));
+app.delete('/api/projects/:id/motion/scenes/:sceneId', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id)); const plan = await requireMotionPlan(project);
+  if (plan.scenes.find((scene) => scene.id === routeParam(req.params.sceneId))?.status === 'generating') throw new Error('Wait for this graphic to finish rendering before deleting it.');
+  res.json(await deleteMotionScene(project.workDir, plan, routeParam(req.params.sceneId)));
+}));
+app.post('/api/projects/:id/motion/scenes/:sceneId/generate', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id)); const plan = await requireMotionPlan(project); const sceneId = routeParam(req.params.sceneId); const settings = await resolvedSettings();
+  const scene = plan.scenes.find((candidate) => candidate.id === sceneId); if (!scene) throw new Error('Motion graphic not found');
+  if (scene.status === 'generating') return void res.status(409).json({ error: 'This graphic is already rendering' });
+  const comment = typeof req.body?.comment === 'string' ? req.body.comment.slice(0, 1200) : undefined;
+  const generated = await generateMotionScene({ textConfig: settings, workDir: project.workDir, plan, sceneId, chromeBin: await detectChromeBin(), ffmpegBin: settings.ffmpegBin, regenerateCode: req.body?.regenerateCode === true, comment });
+  await touchProject(project); res.json(generated);
+}));
+app.get('/api/projects/:id/motion/scenes/:sceneId/video', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id)); const plan = await requireMotionPlan(project);
+  const scene = plan.scenes.find((candidate) => candidate.id === routeParam(req.params.sceneId));
+  if (!scene?.videoFile) return void res.status(404).json({ error: 'Motion graphic has not been rendered yet' });
+  res.setHeader('Cache-Control', 'private, max-age=31536000, immutable'); res.type('video/webm'); res.sendFile(scene.videoFile);
+}));
 
 app.get('/api/projects/:id/thumbnail', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id));
@@ -990,9 +1092,10 @@ app.post('/api/projects/:id/editor/export-video', route(async (req, res) => {
   void (async () => {
     try {
       const broll = brollPlans.get(projectId) ?? await loadBrollPlan(project.workDir);
+      const motion = motionPlans.get(projectId) ?? await loadMotionPlan(project.workDir);
       const renderWorkDir = path.join(project.workDir, 'editor-render');
       const render = await buildEditorRender({
-        project, timeline, broll, ffmpegBin: settings.ffmpegBin!, outputPath, workDir: renderWorkDir, mode,
+        project, timeline, broll, motion, ffmpegBin: settings.ffmpegBin!, outputPath, workDir: renderWorkDir, mode,
         inputVideoArgs, outputVideoArgs: encoding.args, outputColorArgs: bt709ColorArgs(),
         probe: async file => probe(file),
       });
