@@ -156,18 +156,24 @@ export default function MotionGraphics(props: Props) {
       setDrafts((current) => ({ ...current, [generated.id]: draftOf(generated) })); setComments((current) => ({ ...current, [scene.id]: '' }));
       onStatus(`“${generated.title}” is ready ✓`); return true;
     } catch (error) {
+      if (/Render stopped/i.test(message(error))) { onStatus(`Stopped “${scene.title}”`); try { const latest = await api.getMotion(projectId); if (latest) setPlan(latest); } catch { /* ignore */ } return true; }
       onError(message(error)); try { const latest = await api.getMotion(projectId); if (latest) setPlan(latest); } catch { /* keep the render error visible */ }
       return false;
     }
+  }
+  const stopBatch = useRef(false);
+  async function stopRendering(sceneId?: string) {
+    if (!sceneId) stopBatch.current = true;
+    try { await api.stopMotionRender(projectId, sceneId); onStatus('Stopping render…'); } catch (error) { onError(message(error)); }
   }
   async function renderAll(onlyMissing: boolean) {
     if (!plan || busy) return;
     const targets = plan.scenes.filter((scene) => scene.enabled && (!onlyMissing || scene.status !== 'ready'));
     if (!targets.length) { onStatus('Every enabled motion graphic is already rendered.'); return; }
-    setBatchRunning(true); let failures = 0;
+    stopBatch.current = false; setBatchRunning(true); let failures = 0;
     // The AI design step is network bound, so several graphics go at once; the server limits concurrent frame capture to what the CPU can handle.
     const queue = [...targets];
-    const worker = async () => { for (let scene = queue.shift(); scene; scene = queue.shift()) if (!await render(scene)) failures += 1; };
+    const worker = async () => { for (let scene = queue.shift(); scene && !stopBatch.current; scene = queue.shift()) if (!await render(scene)) failures += 1; };
     try { await Promise.all(Array.from({ length: Math.min(3, targets.length) }, worker)); onStatus(failures ? `Rendered ${targets.length - failures}/${targets.length} graphics — ${failures} failed` : `Rendered ${targets.length} motion graphic${targets.length === 1 ? '' : 's'} ✓`); }
     finally { setBatchRunning(false); }
   }
@@ -223,6 +229,7 @@ export default function MotionGraphics(props: Props) {
         <span>{ready}/{enabledScenes} rendered</span>
         <button onClick={() => void renderAll(true)} disabled={busy || anyRendering || !enabledScenes}>Render missing</button>
         <button onClick={() => void renderAll(false)} disabled={busy || anyRendering || !enabledScenes}>Re-render all</button>
+        {(anyRendering || batchRunning) && <button className="danger" onClick={() => void stopRendering()}>Stop rendering</button>}
       </div>
       <div className="motionGrid">
         {plan.scenes.map((scene, index) => {
@@ -252,6 +259,7 @@ export default function MotionGraphics(props: Props) {
             <label className="motionWide">Ask for a change (optional)<input value={comments[scene.id] ?? ''} disabled={rendering} placeholder="e.g. slower count-up, larger number, add a subtle underline sweep" onChange={(event) => setComments((current) => ({ ...current, [scene.id]: event.target.value }))} /></label>
             {scene.error && <p className="motionError">{scene.error}</p>}
             <div className="motionActions">
+              {rendering && <button className="danger" onClick={() => void stopRendering(scene.id)}>Stop</button>}
               <button className="primary" disabled={busy || rendering || !scene.enabled || (!designReady && !scene.codeGeneratedAt)} onClick={() => void render(scene)}>{scene.codeGeneratedAt ? (scene.status === 'ready' ? 'Re-render' : 'Render') : 'Design & render'}</button>
               <button disabled={busy || rendering || !scene.enabled || !designReady} onClick={() => void render(scene, { regenerateCode: true })}>Redesign with AI</button>
               <button className="ghost" disabled={busy || rendering} onClick={() => void remove(scene)}>Delete</button>

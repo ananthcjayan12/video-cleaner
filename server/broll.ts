@@ -10,6 +10,7 @@ export type BrollWord = { id: string; text: string; start: number; end: number }
 export type BrollKeepRange = { startWordId: string; endWordId: string };
 export type ImageProvider = 'openai' | 'gemini' | 'grok-cli' | 'codex-cli';
 export type VideoProvider = 'grok-cli' | 'google-flow' | 'magnific';
+export type StillEffect = 'hold' | 'zoom-in' | 'zoom-out' | 'pan-left' | 'pan-right';
 export type BrollWorkflowMode = 'cleaned-video' | 'raw-video' | 'assets-only';
 export type BrollCountMode = 'auto' | 'exact' | 'per-minute' | 'interval';
 export type BrollAssetAspectRatio = 'auto' | '9:16' | '16:9';
@@ -82,7 +83,7 @@ export async function writePlanningFailureLog(workDir: string, stage: string, ch
 
 export type BrollVideoAttempt = {
   id: string;
-  source: 'google-flow' | 'grok-cli' | 'magnific' | 'manual' | 'flow-catalog';
+  source: 'google-flow' | 'grok-cli' | 'magnific' | 'manual' | 'flow-catalog' | 'still-effect';
   status: 'submitted' | 'completed' | 'failed';
   startedAt: string;
   completedAt?: string;
@@ -122,7 +123,10 @@ export type BrollScene = {
   narration: string; visualIntent: string; shotType: string; imagePrompt: string; videoPrompt?: string; enabled: boolean;
   beatType?: BrollBeatType; keyPoint?: string; whyThisVisualMatters?: string; viewerTakeaway?: string; visualMode?: BrollVisualMode; animationPlan?: BrollAnimationPlan;
   imageFile?: string; generatedAt?: string; provider?: ImageProvider | 'manual'; model?: string; imageRevision?: number; imageStatus?: 'none' | 'generating' | 'ready' | 'failed';
-  videoFile?: string; videoGeneratedAt?: string; videoModel?: string; videoProvider?: VideoProvider;
+  videoFile?: string; videoGeneratedAt?: string; videoModel?: string; videoProvider?: VideoProvider | 'still-effect';
+  videoTreatment?: 'ai' | 'still'; stillEffect?: StillEffect;
+  /** Real length of the generated clip in seconds; lets the editor stretch the B-roll up to the full clip. */
+  videoDuration?: number; videoDurationFor?: string;
   videoAttempts?: BrollVideoAttempt[]; activeVideoAttemptId?: string; videoSourceImageRevision?: number; videoStatus?: 'none' | 'stale' | 'generating' | 'ready';
   displayTemplate?: BrollDisplayTemplate;
   assetAspectRatio?: BrollAssetAspectRatio;
@@ -247,7 +251,7 @@ function normalizeSettings(raw: Partial<BrollPlanSettings> | undefined): BrollPl
 }
 function validateStoryPlan(words: BrollWord[], keepRanges: BrollKeepRange[] | undefined, raw: any, settings: BrollPlanSettings) {
   const { index, kept } = keptWordIndexes(words, keepRanges); const { times } = keptTimeline(words, keepRanges);
-  const beats: PlannedStoryBeat[] = []; const issues: string[] = []; let previousStart = -1; let previousTimelineEnd = -1; let previousLabel = '';
+  const beats: PlannedStoryBeat[] = []; const issues: string[] = []; let previousStart = -1;
   if (!Array.isArray(raw?.scenes)) issues.push('The response does not contain a scenes array.');
   for (const [candidateIndex, candidate] of (Array.isArray(raw?.scenes) ? raw.scenes : []).entries()) {
     const label = String(candidate?.id || `scene at array position ${candidateIndex + 1}`); const start = index.get(candidate?.startWordId); const end = index.get(candidate?.endWordId);
@@ -259,10 +263,6 @@ function validateStoryPlan(words: BrollWord[], keepRanges: BrollKeepRange[] | un
     const timelineStart = times.get(start)?.start; const timelineEnd = times.get(end)?.end;
     if (!narrationWords.length) { issues.push(`${label} has no kept narration words.`); continue; }
     if (timelineStart === undefined || timelineEnd === undefined) { issues.push(`${label} cannot be mapped to the final narration timeline.`); continue; }
-    if (beats.length) {
-      const gap = timelineStart - previousTimelineEnd;
-      if (gap < MIN_BROLL_GAP_SECONDS) issues.push(`${label} starts only ${gap.toFixed(2)} seconds after ${previousLabel} ends on the final narration timeline; at least ${MIN_BROLL_GAP_SECONDS.toFixed(2)} seconds is required.`);
-    }
     const keyPoint = String(candidate?.keyPoint ?? '').trim(); const whyThisVisualMatters = String(candidate?.whyThisVisualMatters ?? '').trim(); const viewerTakeaway = String(candidate?.viewerTakeaway ?? '').trim();
     if (keyPoint.length < 8) issues.push(`${label} is missing a useful keyPoint.`);
     if (whyThisVisualMatters.length < 12) issues.push(`${label} does not explain why the visual earns its place.`);
@@ -274,7 +274,7 @@ function validateStoryPlan(words: BrollWord[], keepRanges: BrollKeepRange[] | un
       beatType: normalizeBeatType(candidate?.beatType), keyPoint, whyThisVisualMatters, viewerTakeaway, visualMode: normalizeVisualMode(candidate?.visualMode),
       visualIntent: String(candidate?.visualIntent ?? '').trim(), shotType: String(candidate?.shotType ?? '').trim(),
     });
-    previousStart = start; previousTimelineEnd = timelineEnd; previousLabel = label;
+    previousStart = start;
   }
   const expected = targetSceneCount(words, keepRanges, settings);
   if (!beats.length) issues.push('The response contains no valid B-roll story beats.');
@@ -330,7 +330,7 @@ export async function createBrollPlan(options: { textConfig: TextModelConfig; wo
   const cadenceInstruction = settings.countMode === 'interval'
     ? `Aim for approximately one beat in every ${settings.intervalSeconds}-second section, but choose the most meaningful spoken idea in that section rather than generic filler.`
     : 'Distribute beats across the narration according to narrative value. Do not bunch them together and do not illustrate every sentence.';
-  const prompt = `You are the story editor for a polished talking-head video. Decide WHERE B-roll genuinely improves understanding or storytelling before anyone writes image prompts.\n\n${countInstruction}\n${cadenceInstruction}\n\nHARD SCHEDULING RULE: after one B-roll ends, leave at least ${MIN_BROLL_GAP_SECONDS} full seconds of uninterrupted talking-head footage before the next B-roll starts. This is an end-to-next-start gap, not a start-to-start gap. Never overlap or place B-roll scenes back-to-back. Measure gaps using the final timestamps supplied for each word.\n\nAnalyze ONLY the supplied narration. Identify the key story progression: hook, problem, cause, anatomy/mechanism, progression/consequence, solution, prevention, CTA or a genuinely useful supporting beat. Each chosen beat must add new information or emotional clarity. Reject decorative scenes that merely show a generic clinic, smiling person, doctor, tool or object without helping the viewer understand the current sentence.\n\nFor every beat explain:\n- keyPoint: the single spoken idea this visual must communicate.\n- whyThisVisualMatters: why cutting away from the talking head is worth it here.\n- viewerTakeaway: what the viewer should understand after seeing it.\n- visualMode: select the best storytelling language. Use hyperreal-clinical only when real-world human/environment realism carries the idea. Prefer educational-3d/anatomy-cutaway/procedure-closeup for internal mechanisms and treatment logic; symbolic-medical for abstract ideas; clinic-support only when the clinic itself matters.\n\nTARGET FRAME: ${targetAspect}.\nTARGET B-ROLL DURATION: normally ${plannedMinDuration}-${plannedMaxDuration} seconds.\n\n${metaTextGuidelinesPrompt()}\nSkip or reframe any beat whose spoken claim would force a non-compliant visual (before/after, graphic, guaranteed-result, real-patient claims); use an educational or symbolic visual instead. Add a short note for any narration passage that itself looks risky for Meta ads.\n\nDo NOT write image prompts yet. This pass is only story structure and visual strategy. Every scene must use supplied word IDs and stay chronological.\n\nNARRATION WORDS:\n${transcript}`;
+  const prompt = `You are the story editor for a polished talking-head video. Decide WHERE B-roll genuinely improves understanding or storytelling before anyone writes image prompts.\n\n${countInstruction}\n${cadenceInstruction}\n\nSCHEDULING: never overlap B-roll scenes. Prefer some talking-head footage between scenes, but this is a preference, not a hard limit.\n\nAnalyze ONLY the supplied narration. Identify the key story progression: hook, problem, cause, anatomy/mechanism, progression/consequence, solution, prevention, CTA or a genuinely useful supporting beat. Each chosen beat must add new information or emotional clarity. Reject decorative scenes that merely show a generic clinic, smiling person, doctor, tool or object without helping the viewer understand the current sentence.\n\nFor every beat explain:\n- keyPoint: the single spoken idea this visual must communicate.\n- whyThisVisualMatters: why cutting away from the talking head is worth it here.\n- viewerTakeaway: what the viewer should understand after seeing it.\n- visualMode: select the best storytelling language. Use hyperreal-clinical only when real-world human/environment realism carries the idea. Prefer educational-3d/anatomy-cutaway/procedure-closeup for internal mechanisms and treatment logic; symbolic-medical for abstract ideas; clinic-support only when the clinic itself matters.\n\nTARGET FRAME: ${targetAspect}.\nTARGET B-ROLL DURATION: normally ${plannedMinDuration}-${plannedMaxDuration} seconds.\n\n${metaTextGuidelinesPrompt()}\nSkip or reframe any beat whose spoken claim would force a non-compliant visual (before/after, graphic, guaranteed-result, real-patient claims); use an educational or symbolic visual instead. Add a short note for any narration passage that itself looks risky for Meta ads.\n\nDo NOT write image prompts yet. This pass is only story structure and visual strategy. Every scene must use supplied word IDs and stay chronological.\n\nNARRATION WORDS:\n${transcript}`;
   let attemptPrompt = prompt; let lastIssues: string[] = []; let story: { beats: PlannedStoryBeat[]; notes: string[] } | null = null;
   for (let attempt = 1; attempt <= MAX_BROLL_PLAN_ATTEMPTS; attempt += 1) {
     let raw: any;
@@ -356,7 +356,20 @@ export async function createBrollPlan(options: { textConfig: TextModelConfig; wo
   await saveBrollPlan(workDir, plan); return plan;
 }
 
-export async function saveBrollPlan(workDir: string, plan: BrollPlan) { await fs.mkdir(path.join(workDir, 'broll'), { recursive: true }); await fs.writeFile(path.join(workDir, 'broll-plan.json'), JSON.stringify(plan, null, 2)); }
+const planWrites = new Map<string, Promise<void>>();
+export async function saveBrollPlan(workDir: string, plan: BrollPlan) {
+  const snapshot = JSON.stringify(plan, null, 2);
+  const previous = planWrites.get(workDir) ?? Promise.resolve();
+  const write = previous.catch(() => undefined).then(async () => {
+    await fs.mkdir(path.join(workDir, 'broll'), { recursive: true });
+    const target = path.join(workDir, 'broll-plan.json');
+    const temporary = `${target}.${randomUUID()}.tmp`;
+    try { await fs.writeFile(temporary, snapshot); await fs.rename(temporary, target); }
+    finally { await fs.rm(temporary, { force: true }); }
+  });
+  planWrites.set(workDir, write);
+  try { await write; } finally { if (planWrites.get(workDir) === write) planWrites.delete(workDir); }
+}
 export async function loadBrollPlan(workDir: string): Promise<BrollPlan | null> {
   try {
     const raw = JSON.parse(await fs.readFile(path.join(workDir, 'broll-plan.json'), 'utf8')) as BrollPlan;
@@ -368,6 +381,8 @@ export async function loadBrollPlan(workDir: string): Promise<BrollPlan | null> 
       if (scene.visualMode) scene.visualMode = normalizeVisualMode(scene.visualMode);
       if (scene.displayTemplate && !BROLL_DISPLAY_TEMPLATES.some((template) => template.id === scene.displayTemplate)) delete scene.displayTemplate;
       if (scene.assetAspectRatio && !['auto', '9:16', '16:9'].includes(scene.assetAspectRatio)) delete scene.assetAspectRatio;
+      if (scene.videoTreatment && !['ai', 'still'].includes(scene.videoTreatment)) delete scene.videoTreatment;
+      if (scene.stillEffect && !['hold', 'zoom-in', 'zoom-out', 'pan-left', 'pan-right'].includes(scene.stillEffect)) delete scene.stillEffect;
       if (scene.generatedAspectRatio && !['9:16', '16:9'].includes(scene.generatedAspectRatio)) delete scene.generatedAspectRatio;
       if (scene.imageFile && !scene.generatedAspectRatio) scene.generatedAspectRatio = resolveSceneAssetAspect(raw, scene);
       scene.orientationChanged = Boolean(scene.imageFile && scene.generatedAspectRatio !== resolveSceneAssetAspect(raw, scene));
@@ -400,13 +415,6 @@ export async function updateBrollScene(workDir: string, plan: BrollPlan, sceneId
   const timingChanged = Math.abs(nextStart - scene.sourceStart) > 0.0005 || Math.abs(nextEnd - scene.sourceEnd) > 0.0005;
   const newlyEnabled = patch.enabled === true && !scene.enabled;
   if (nextEnd <= nextStart) throw new Error('B-roll end time must be after start time');
-  if (nextEnabled && (timingChanged || newlyEnabled)) {
-    for (const other of plan.scenes) {
-      if (other.id === scene.id || !other.enabled) continue;
-      const gap = nextStart >= other.sourceEnd ? nextStart - other.sourceEnd : other.sourceStart >= nextEnd ? other.sourceStart - nextEnd : -1;
-      if (gap < MIN_BROLL_GAP_SECONDS) throw new Error(`Keep at least ${MIN_BROLL_GAP_SECONDS} seconds of talking-head footage between B-roll scenes. This timing is too close to ${other.title || other.id}.`);
-    }
-  }
   if (typeof patch.title === 'string' && patch.title.trim()) scene.title = patch.title.trim().slice(0, 100); if (typeof patch.imagePrompt === 'string' && patch.imagePrompt.trim()) scene.imagePrompt = patch.imagePrompt.trim(); if (typeof patch.videoPrompt === 'string') scene.videoPrompt = patch.videoPrompt.trim() || undefined; if (typeof patch.enabled === 'boolean') scene.enabled = patch.enabled;
   if (patch.displayTemplate === 'default') delete scene.displayTemplate; else if (patch.displayTemplate) scene.displayTemplate = normalizeDisplayTemplate(patch.displayTemplate);
   if (patch.assetAspectRatio && ['auto', '9:16', '16:9'].includes(patch.assetAspectRatio)) scene.assetAspectRatio = patch.assetAspectRatio;
@@ -481,6 +489,8 @@ async function generateWithAgentCli(provider: 'grok-cli' | 'codex-cli', prompt: 
 function currentImageRevision(scene: BrollScene) { return Math.max(0, Number(scene.imageRevision) || (scene.imageFile ? 1 : 0)); }
 export function hasCurrentBrollVideo(scene: BrollScene) {
   if (!scene.videoFile || scene.videoStatus === 'stale' || scene.imageStatus === 'generating' || scene.imageStatus === 'failed') return false;
+  if (scene.videoTreatment === 'still' && scene.videoProvider !== 'still-effect') return false;
+  if (scene.videoTreatment === 'ai' && scene.videoProvider === 'still-effect') return false;
   const imageRevision = currentImageRevision(scene);
   const videoRevision = scene.videoSourceImageRevision;
   return videoRevision === undefined || videoRevision === imageRevision;
@@ -805,19 +815,59 @@ export function resolveMagnificVideoConfig(configuredModel?: string, configuredE
 
 function newVideoAttempt(scene: BrollScene, source: BrollVideoAttempt['source'], model: string, prompt: string) {
   assertMetaVisualCompliant('video prompt', prompt);
+  scene.videoTreatment = source === 'still-effect' ? 'still' : 'ai';
   const attempt: BrollVideoAttempt = { id: randomUUID(), source, status: 'submitted', startedAt: new Date().toISOString(), model, prompt, sourceImageRevision: currentImageRevision(scene) };
   scene.videoAttempts ??= []; scene.videoAttempts.push(attempt); scene.videoStatus = 'generating'; return attempt;
 }
 async function videoAttemptPath(workDir: string, sceneId: string, attemptId: string, extension = '.mp4') { const dir = path.join(workDir, 'broll', 'video-attempts'); await fs.mkdir(dir, { recursive: true }); return path.join(dir, `${sceneId}-${attemptId}${extension}`); }
 async function validateVideo(file: string, ffmpegBin: string | undefined, missingMessage: string) { const stat = await fs.stat(file).catch(() => null); if (!stat?.isFile() || stat.size < 50_000) throw new Error(missingMessage); if (ffmpegBin) await run(ffmpegBin, ['-v', 'error', '-i', file, '-f', 'null', '-'], undefined, 120000); }
 async function stripVideoAudio(file: string, ffmpegBin?: string) { if (!ffmpegBin) throw new Error('FFmpeg is required when “Return video with audio” is disabled.'); const extension = path.extname(file) || '.mp4'; const silentPath = `${file}.silent${extension}`; try { await run(ffmpegBin, ['-hide_banner', '-loglevel', 'error', '-y', '-i', file, '-map', '0:v:0', '-c:v', 'copy', '-an', '-movflags', '+faststart', silentPath], undefined, 120000); await fs.rename(silentPath, file); } finally { await fs.rm(silentPath, { force: true }); } }
-function completeVideoAttempt(scene: BrollScene, attempt: BrollVideoAttempt, outputPath: string, model: string, provider: VideoProvider) { const completedAt = new Date().toISOString(); attempt.status = 'completed'; attempt.completedAt = completedAt; attempt.localFile = outputPath; attempt.sourceImageRevision ??= currentImageRevision(scene); scene.activeVideoAttemptId = attempt.id; scene.videoFile = outputPath; scene.videoGeneratedAt = completedAt; scene.videoModel = model; scene.videoProvider = provider; scene.videoSourceImageRevision = attempt.sourceImageRevision; scene.videoStatus = 'ready'; }
+function completeVideoAttempt(scene: BrollScene, attempt: BrollVideoAttempt, outputPath: string, model: string, provider: VideoProvider | 'still-effect') { const completedAt = new Date().toISOString(); attempt.status = 'completed'; attempt.completedAt = completedAt; attempt.localFile = outputPath; attempt.sourceImageRevision ??= currentImageRevision(scene); scene.activeVideoAttemptId = attempt.id; scene.videoFile = outputPath; scene.videoGeneratedAt = completedAt; scene.videoModel = model; scene.videoProvider = provider; scene.videoSourceImageRevision = attempt.sourceImageRevision; scene.videoStatus = 'ready'; }
+export async function setStillEffect(options: { workDir: string; plan: BrollPlan; sceneId: string; effect: StillEffect | 'ai'; ffmpegBin?: string }) {
+  const { workDir, plan, effect, ffmpegBin } = options;
+  const scene = plan.scenes.find(candidate => candidate.id === options.sceneId);
+  if (!scene) throw new Error('B-roll scene not found');
+  if (effect === 'ai') {
+    scene.videoTreatment = 'ai';
+    if (scene.videoProvider === 'still-effect') {
+      scene.videoFile = undefined; scene.videoGeneratedAt = undefined; scene.videoModel = undefined;
+      scene.videoProvider = undefined; scene.videoSourceImageRevision = undefined; scene.activeVideoAttemptId = undefined;
+      scene.videoStatus = 'stale'; scene.videoDuration = undefined; scene.videoDurationFor = undefined;
+    }
+    await saveBrollPlan(workDir, plan); return scene;
+  }
+  if (!scene.imageFile || scene.imageStatus !== 'ready') throw new Error('Generate or add the still image before applying a motion effect.');
+  if (!ffmpegBin) throw new Error('FFmpeg is required for still image motion effects.');
+  scene.videoTreatment = 'still'; scene.stillEffect = effect;
+  scene.videoFile = undefined; scene.videoGeneratedAt = undefined; scene.videoModel = undefined;
+  scene.videoProvider = undefined; scene.videoSourceImageRevision = undefined; scene.activeVideoAttemptId = undefined;
+  scene.videoStatus = 'stale'; scene.videoDuration = undefined; scene.videoDurationFor = undefined;
+  const duration = Math.max(0.5, Math.min(120, scene.sourceEnd - scene.sourceStart));
+  const fps = 24; const frames = Math.max(12, Math.ceil(duration * fps));
+  const aspect = resolveSceneAssetAspect(plan, scene); const width = aspect === '9:16' ? 720 : 1280; const height = aspect === '9:16' ? 1280 : 720;
+  const progress = `on/${Math.max(1, frames - 1)}`;
+  const zoom = effect === 'zoom-in' ? `1+0.06*${progress}` : effect === 'zoom-out' ? `1.06-0.06*${progress}` : effect === 'hold' ? '1' : '1.08';
+  const x = effect === 'pan-left' ? `(iw-iw/zoom)*${progress}` : effect === 'pan-right' ? `(iw-iw/zoom)*(1-${progress})` : '(iw-iw/zoom)/2';
+  const y = '(ih-ih/zoom)/2';
+  const filter = `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},zoompan=z='${zoom}':x='${x}':y='${y}':d=1:s=${width}x${height}:fps=${fps},format=yuv420p`;
+  const label = { hold: 'Still hold', 'zoom-in': 'Soft zoom in', 'zoom-out': 'Soft zoom out', 'pan-left': 'Slow pan left', 'pan-right': 'Slow pan right' }[effect];
+  const attempt = newVideoAttempt(scene, 'still-effect', label, `Local ${label.toLowerCase()} from the selected image`);
+  const outputPath = await videoAttemptPath(workDir, scene.id, attempt.id);
+  await saveBrollPlan(workDir, plan);
+  try {
+    await run(ffmpegBin, ['-hide_banner', '-loglevel', 'error', '-y', '-loop', '1', '-framerate', String(fps), '-i', scene.imageFile, '-vf', filter, '-frames:v', String(frames), '-an', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '19', '-movflags', '+faststart', outputPath], undefined, 300000);
+    await validateVideo(outputPath, ffmpegBin, 'FFmpeg did not create a usable still motion clip.');
+    completeVideoAttempt(scene, attempt, outputPath, label, 'still-effect');
+    scene.videoDuration = frames / fps; scene.videoDurationFor = scene.videoGeneratedAt;
+    await saveBrollPlan(workDir, plan); return scene;
+  } catch (error) { await fs.rm(outputPath, { force: true }); await failVideoAttempt(workDir, plan, attempt, error); throw error; }
+}
 function conciseAttemptError(detail: string) { if (/"event": "migrated\.status"[^\n]*"status": 4|"status": 4[^\n]*"event": "migrated\.status"/.test(detail)) return 'Google Flow accepted the submission but the Veo generation failed (Flow status 4). Open the saved Flow project to inspect or create the scene manually.'; const nonLog = detail.split(/\r?\n/).filter((line) => line.trim() && !line.trim().startsWith('{')); return (nonLog.at(-1) || detail.split(/\r?\n/).filter(Boolean).at(-1) || 'Video generation failed').slice(0, 1000); }
 async function failVideoAttempt(workDir: string, plan: BrollPlan, attempt: BrollVideoAttempt, error: unknown) { const detail = error instanceof Error ? error.message : String(error); attempt.status = 'failed'; attempt.completedAt = new Date().toISOString(); attempt.error = conciseAttemptError(detail); const scene = plan.scenes.find((candidate) => candidate.videoAttempts?.some((candidateAttempt) => candidateAttempt.id === attempt.id)); if (scene && !hasCurrentBrollVideo(scene)) scene.videoStatus = scene.imageFile ? 'stale' : 'none'; const logDir = path.join(workDir, 'broll', 'generation-logs'); await fs.mkdir(logDir, { recursive: true }); attempt.errorLogFile = path.join(logDir, `${attempt.id}.log`); await fs.writeFile(attempt.errorLogFile, detail); await saveBrollPlan(workDir, plan); }
 function parseJsonObject(text: string) { const trimmed = text.trim(); if (!trimmed) return null; try { return JSON.parse(trimmed); } catch { const start = trimmed.indexOf('{'); const end = trimmed.lastIndexOf('}'); if (start >= 0 && end > start) { try { return JSON.parse(trimmed.slice(start, end + 1)); } catch { return null; } } return null; } }
 function flowProjectUrl(projectId: string) { return `https://flow.google.com/project/${projectId}`; }
 function captureFlowAttemptIds(attempt: BrollVideoAttempt, detail: string) { for (const line of detail.split(/\r?\n/)) { const start = line.indexOf('{'); if (start < 0) continue; try { const event = JSON.parse(line.slice(start)); if (event.event === 'migrated.submit_observed') { if (event.media_id) attempt.flowMediaId = String(event.media_id); if (event.workflow_id) attempt.flowWorkflowId = String(event.workflow_id); } } catch { /* Keep parsing later structured log lines. */ } } }
-async function ensureGoogleFlowProject(options: { config: ImageProviderConfig; workDir: string; plan: BrollPlan; projectName: string }) {
+async function createGoogleFlowProject(options: { config: ImageProviderConfig; workDir: string; plan: BrollPlan; projectName: string }) {
   const profile = options.config.gflowProfile?.trim() || 'default';
   if (options.plan.googleFlow?.projectId && options.plan.googleFlow.profile === profile) return options.plan.googleFlow;
   if (!options.config.gflowBin) throw new Error('Google Flow CLI was not found.');
@@ -825,6 +875,17 @@ async function ensureGoogleFlowProject(options: { config: ImageProviderConfig; w
   const args = ['project', 'create', '--name', title, '--json']; if (profile !== 'default') args.push('--profile', profile);
   const { stdout } = await run(options.config.gflowBin, args, undefined, 180000, { cwd: options.workDir }); const result = parseJsonObject(stdout); const projectId = String(result?.project_id ?? ''); if (!projectId) throw new Error(`Google Flow project creation returned no project id.\n${stdout}`);
   options.plan.googleFlow = { projectId, title: String(result?.title || title), profile, url: flowProjectUrl(projectId), createdAt: new Date().toISOString() }; await saveBrollPlan(options.workDir, options.plan); return options.plan.googleFlow;
+}
+const flowProjectCreates = new Map<string, ReturnType<typeof createGoogleFlowProject>>();
+async function ensureGoogleFlowProject(options: { config: ImageProviderConfig; workDir: string; plan: BrollPlan; projectName: string }) {
+  const profile = options.config.gflowProfile?.trim() || 'default';
+  if (options.plan.googleFlow?.projectId && options.plan.googleFlow.profile === profile) return options.plan.googleFlow;
+  const pending = flowProjectCreates.get(options.workDir);
+  if (pending) return pending;
+  const creation = createGoogleFlowProject(options);
+  flowProjectCreates.set(options.workDir, creation);
+  try { return await creation; }
+  finally { if (flowProjectCreates.get(options.workDir) === creation) flowProjectCreates.delete(options.workDir); }
 }
 function openFlowProject(url: string) { if (process.platform !== 'darwin') return; const child = spawn('open', [url], { detached: true, stdio: 'ignore' }); child.unref(); }
 
@@ -986,5 +1047,6 @@ ${metaVisualGuidelinesPrompt()}`,
   scene.imagePrompt = rewritten;
   await saveBrollPlan(workDir, plan);
   await generateBrollImage({ config: options.config, workDir, plan, sceneId: scene.id });
+  if (scene.videoTreatment === 'still') return await setStillEffect({ workDir, plan, sceneId: scene.id, effect: scene.stillEffect || 'hold', ffmpegBin: options.config.ffmpegBin });
   return await createVideoPrompt({ textConfig: options.textConfig, workDir, plan, sceneId: scene.id });
 }

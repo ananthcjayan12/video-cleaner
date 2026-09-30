@@ -5,6 +5,8 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 export type MotionRenderInput = {
+  /** Aborting stops the frame capture and encode. */
+  signal?: AbortSignal;
   /** Directory that receives the generated Remotion project (Scene.tsx, index.tsx, meta.json). */
   sceneDir: string;
   code: string;
@@ -58,12 +60,12 @@ async function withRenderSlot<T>(task: () => Promise<T>): Promise<T> {
   try { return await task(); } finally { activeRenders -= 1; waiting.shift()?.(); }
 }
 
-function encodeAlphaWebm(ffmpegBin: string, framesDir: string, fps: number, outputPath: string) {
+function encodeAlphaWebm(ffmpegBin: string, framesDir: string, fps: number, outputPath: string, signal?: AbortSignal) {
   // Remotion's own VP9 stitch uses libvpx's slowest preset (~30 s for 4 s of video); this is visually equivalent for flat graphics.
   const args = ['-hide_banner', '-loglevel', 'error', '-y', '-framerate', String(fps), '-pattern_type', 'glob', '-i', path.join(framesDir, 'element-*.png'),
     '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p', '-b:v', '0', '-crf', '22', '-deadline', 'good', '-cpu-used', '4', '-row-mt', '1', '-auto-alt-ref', '0', outputPath];
   return new Promise<void>((resolve, reject) => {
-    const child = spawn(ffmpegBin, args, { stdio: ['ignore', 'ignore', 'pipe'] }); let stderr = '';
+    const child = spawn(ffmpegBin, args, { stdio: ['ignore', 'ignore', 'pipe'], signal }); let stderr = '';
     child.stderr.on('data', (chunk) => { stderr += String(chunk); });
     child.on('error', reject);
     child.on('close', (code) => code === 0 ? resolve() : reject(new Error(`ffmpeg could not encode the motion graphic (${code}): ${stderr.slice(-800)}`)));
@@ -92,7 +94,10 @@ export async function renderMotionScene(input: MotionRenderInput): Promise<{ out
   ].join('\n'));
 
   return withRenderSlot(async () => {
-    const [{ bundle }, { renderFrames, selectComposition }] = await Promise.all([import('@remotion/bundler'), import('@remotion/renderer')]);
+    const [{ bundle }, { renderFrames, selectComposition, makeCancelSignal }] = await Promise.all([import('@remotion/bundler'), import('@remotion/renderer')]);
+    const stopped = () => new Error('Render stopped');
+    if (input.signal?.aborted) throw stopped();
+    const { cancelSignal, cancel } = makeCancelSignal(); input.signal?.addEventListener('abort', cancel, { once: true });
     // Bundle inside the scene folder (not the OS temp dir, where every render would leave ~25 MB behind) and delete it afterwards.
     const bundleDir = path.join(input.sceneDir, 'bundle'); const framesDir = path.join(input.sceneDir, 'frames');
     await Promise.all([fs.rm(bundleDir, { recursive: true, force: true }), fs.rm(framesDir, { recursive: true, force: true })]);
@@ -101,19 +106,21 @@ export async function renderMotionScene(input: MotionRenderInput): Promise<{ out
         entryPoint: entry, outDir: bundleDir,
         webpackOverride: (config) => ({ ...config, resolve: { ...config.resolve, modules: [path.join(repoRoot, 'node_modules'), ...(config.resolve?.modules ?? [])] }, resolveLoader: { ...config.resolveLoader, modules: [path.join(repoRoot, 'node_modules'), ...(config.resolveLoader?.modules ?? [])] } }),
       });
+      if (input.signal?.aborted) throw stopped();
       const browserExecutable = input.chromeBin || null;
       const composition = await selectComposition({ serveUrl, id: 'Scene', inputProps: input.props, browserExecutable });
       await renderFrames({
-        composition, serveUrl, inputProps: input.props, browserExecutable, outputDir: framesDir, imageFormat: 'png',
+        composition, serveUrl, inputProps: input.props, browserExecutable, outputDir: framesDir, imageFormat: 'png', cancelSignal,
         concurrency: Math.max(2, Math.floor(os.cpus().length / MAX_PARALLEL_RENDERS)),
         onStart: () => undefined, onFrameUpdate: (rendered) => input.onProgress?.(0.9 * rendered / frames),
       });
       await fs.mkdir(path.dirname(input.outputPath), { recursive: true });
       const partial = `${input.outputPath}.partial.webm`;
       await fs.rm(partial, { force: true });
-      await encodeAlphaWebm(input.ffmpegBin, framesDir, input.fps, partial);
+      if (input.signal?.aborted) throw stopped();
+      await encodeAlphaWebm(input.ffmpegBin, framesDir, input.fps, partial, input.signal);
       await fs.rename(partial, input.outputPath);
-    } finally { await Promise.all([fs.rm(framesDir, { recursive: true, force: true }), fs.rm(bundleDir, { recursive: true, force: true })]); }
+    } catch (error) { if (input.signal?.aborted) throw stopped(); throw error; } finally { input.signal?.removeEventListener('abort', cancel); await Promise.all([fs.rm(framesDir, { recursive: true, force: true }), fs.rm(bundleDir, { recursive: true, force: true })]); }
     input.onProgress?.(1);
     return { outputPath: input.outputPath, frames };
   });

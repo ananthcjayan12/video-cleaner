@@ -133,9 +133,6 @@ export function validatePlan(words: BrollWord[], keepRanges: BrollKeepRange[] | 
     const sourceStart = words[start].start;
     const sourceEnd = Math.min(words[end].end, sourceStart + settings.maxDuration);
     if (sourceEnd - sourceStart < settings.minDuration - 0.001) { issues.push(`"${label}" lasts only ${(sourceEnd - sourceStart).toFixed(2)}s; choose a passage of at least ${settings.minDuration}s.`); continue; }
-    const clash = occupied.find((slot) => sourceStart < slot.end + MOTION_B_ROLL_CLEARANCE_SECONDS && sourceEnd > slot.start - MOTION_B_ROLL_CLEARANCE_SECONDS);
-    if (clash) { issues.push(`"${label}" (${sourceStart.toFixed(2)}–${sourceEnd.toFixed(2)}s) overlaps ${clash.label} (${clash.start.toFixed(2)}–${clash.end.toFixed(2)}s). Choose a different passage.`); continue; }
-    if (scenes.length && sourceStart - previousEnd < MIN_MOTION_GAP_SECONDS) { issues.push(`"${label}" starts only ${(sourceStart - previousEnd).toFixed(2)}s after "${previousLabel}" ends; at least ${MIN_MOTION_GAP_SECONDS}s is required.`); continue; }
     const content = cleanContent(candidate);
     if (content.headline.length < 2) issues.push(`"${label}" has no headline text.`);
     const keyPoint = String(candidate?.keyPoint ?? '').trim(); const why = String(candidate?.whyThisGraphicMatters ?? '').trim(); const takeaway = String(candidate?.viewerTakeaway ?? '').trim(); const brief = String(candidate?.designBrief ?? '').trim();
@@ -201,7 +198,7 @@ export async function createMotionPlan(options: {
   const frame = options.orientation === 'portrait' ? 'vertical 9:16 (1080×1920)' : 'landscape 16:9 (1920×1080)';
   const countInstruction = expected ? `Create exactly ${expected} motion graphics.` : 'Choose only the moments where an animated graphic genuinely helps. Fewer, sharper graphics beat filler.';
   const typeGuide = MOTION_GRAPHIC_TYPES.map((type) => `- ${type.id}: ${type.description}`).join('\n');
-  const prompt = `You are the motion-design director for a premium talking-head video (${frame}). Decide WHERE professional animated motion graphics make the spoken idea clearer, more memorable or easier to follow — the way top explainer channels use them. The presenter stays visible; graphics are overlays on transparent background.\n\n${countInstruction}\n\nWHAT MAKES A GOOD MOTION-GRAPHIC BEAT\n- A concrete fact, number, list, sequence, comparison, definition or key phrase the viewer should retain. Skip vague or purely emotional sentences.\n- The graphic must add clarity, not repeat the whole sentence. On-screen text is SHORT: headline ≤ 6 words, subhead ≤ 12 words, at most 5 items, each label ≤ 4 words.\n- Only use facts stated in the narration. Never invent statistics, percentages, prices or guarantees.\n- Vary graphicType across the video; do not use the same type back to back.\n- Choose placement so the graphic never covers the presenter's face: 'bottom' or 'top' for compact graphics, 'center' only for brief full-attention moments, 'full' for a large visual that may dominate the frame.\n\nGRAPHIC TYPES\n${typeGuide}\n\nHARD RULES\n- Each graphic covers ONE continuous spoken passage (startWordId..endWordId) of ${settings.minDuration}–${settings.maxDuration} seconds. Use only supplied word IDs, chronological order, no removed words inside.\n- Leave at least ${MIN_MOTION_GAP_SECONDS} seconds between graphics.\n- NEVER overlap these existing B-roll windows (source time, keep ${MOTION_B_ROLL_CLEARANCE_SECONDS}s clear on each side):\n${brollLines}\n- designBrief: 2–4 sentences describing layout, the motion sequence (what enters first, how it emphasises the key number/word, how it exits) and the visual mood. Colour palette: accent ${settings.accentColor}, base ${settings.secondaryColor}.${settings.styleNotes ? `\n- House style: ${settings.styleNotes}` : ''}\n\n${metaTextGuidelinesPrompt()}\nOn-screen text must obey these rules too (no before/after claims, guarantees, or exaggerated medical claims).\n\nNARRATION WORDS:\n${transcript}`;
+  const prompt = `You are the motion-design director for a premium talking-head video (${frame}). Decide WHERE professional animated motion graphics make the spoken idea clearer, more memorable or easier to follow — the way top explainer channels use them. The presenter stays visible; graphics are overlays on transparent background.\n\n${countInstruction}\n\nWHAT MAKES A GOOD MOTION-GRAPHIC BEAT\n- A concrete fact, number, list, sequence, comparison, definition or key phrase the viewer should retain. Skip vague or purely emotional sentences.\n- The graphic must add clarity, not repeat the whole sentence. On-screen text is SHORT: headline ≤ 6 words, subhead ≤ 12 words, at most 5 items, each label ≤ 4 words.\n- Only use facts stated in the narration. Never invent statistics, percentages, prices or guarantees.\n- Vary graphicType across the video; do not use the same type back to back.\n- Choose placement so the graphic never covers the presenter's face: 'bottom' or 'top' for compact graphics, 'center' only for brief full-attention moments, 'full' for a large visual that may dominate the frame.\n\nGRAPHIC TYPES\n${typeGuide}\n\nHARD RULES\n- Each graphic covers ONE continuous spoken passage (startWordId..endWordId) of ${settings.minDuration}–${settings.maxDuration} seconds. Use only supplied word IDs, chronological order, no removed words inside.\n- Base placement purely on the narration. Ignore any B-roll; overlaps are fixed later in the timeline.\n- designBrief: 2–4 sentences describing layout, the motion sequence (what enters first, how it emphasises the key number/word, how it exits) and the visual mood. Colour palette: accent ${settings.accentColor}, base ${settings.secondaryColor}.${settings.styleNotes ? `\n- House style: ${settings.styleNotes}` : ''}\n\n${metaTextGuidelinesPrompt()}\nOn-screen text must obey these rules too (no before/after claims, guarantees, or exaggerated medical claims).\n\nNARRATION WORDS:\n${transcript}`;
   let attemptPrompt = prompt; let lastIssues: string[] = []; let planned: ReturnType<typeof validatePlan> | null = null;
   for (let attempt = 1; attempt <= MAX_PLAN_ATTEMPTS; attempt += 1) {
     let raw: any;
@@ -225,19 +222,10 @@ export async function createMotionPlan(options: {
   await saveMotionPlan(workDir, plan); return plan;
 }
 
-/** Overlap check shared by manual edits: a motion graphic may not sit on B-roll or another graphic. */
+/** Basic sanity check shared by manual edits. Overlaps with B-roll or other graphics are allowed; the timeline handles those. */
 function assertMotionTiming(plan: MotionPlan, scene: MotionScene, start: number, end: number, broll: BrollPlan | null) {
   if (end <= start) throw new Error('Motion graphic end time must be after its start time');
   if (end - start > 15) throw new Error('Motion graphics can be at most 15 seconds long');
-  for (const other of broll?.scenes ?? []) {
-    if (!other.enabled) continue;
-    if (start < other.sourceEnd + MOTION_B_ROLL_CLEARANCE_SECONDS && end > other.sourceStart - MOTION_B_ROLL_CLEARANCE_SECONDS) throw new Error(`This timing overlaps B-roll “${other.title}”. Move the graphic to a different passage.`);
-  }
-  for (const other of plan.scenes) {
-    if (other.id === scene.id || !other.enabled) continue;
-    const gap = start >= other.sourceEnd ? start - other.sourceEnd : other.sourceStart >= end ? other.sourceStart - end : -1;
-    if (gap < MIN_MOTION_GAP_SECONDS) throw new Error(`Keep at least ${MIN_MOTION_GAP_SECONDS} seconds between motion graphics. This timing is too close to “${other.title}”.`);
-  }
 }
 
 export type MotionScenePatch = {
@@ -272,7 +260,13 @@ export async function updateMotionScene(workDir: string, plan: MotionPlan, scene
   if (renderAffected && scene.videoFile && scene.status === 'ready') scene.status = 'none';
   await saveMotionPlan(workDir, plan); return scene;
 }
-export async function updateMotionSettings(workDir: string, plan: MotionPlan, patch: Partial<MotionSettings>) { plan.settings = normalizeMotionSettings({ ...plan.settings, ...patch }); await saveMotionPlan(workDir, plan); return plan; }
+export async function updateMotionSettings(workDir: string, plan: MotionPlan, patch: Partial<MotionSettings>) {
+  const previousDefault = plan.settings.defaultTemplateId || '';
+  plan.settings = normalizeMotionSettings({ ...plan.settings, ...patch });
+  // Scenes without their own template inherit the default, so their stored code no longer matches the reference: redesign on next render.
+  if ((plan.settings.defaultTemplateId || '') !== previousDefault) for (const scene of plan.scenes) if (!scene.templateId && scene.status !== 'generating') { scene.code = undefined; scene.codeGeneratedAt = undefined; }
+  await saveMotionPlan(workDir, plan); return plan;
+}
 export async function deleteMotionScene(workDir: string, plan: MotionPlan, sceneId: string) {
   const index = plan.scenes.findIndex((scene) => scene.id === sceneId); if (index < 0) throw new Error('Motion graphic not found');
   const [scene] = plan.scenes.splice(index, 1);
@@ -304,7 +298,7 @@ function designSystemPrompt(plan: MotionPlan, scene: MotionScene, template: { na
   return `You are a senior motion designer writing ONE Remotion (React) component that renders a broadcast-quality animated overlay. It is composited over a live presenter, so the background must stay TRANSPARENT.\n\nCANVAS: ${width}×${height}px, ${fps} fps, ${frames} frames (${seconds}s). ${safe} ${placementRule}\n\nFILE CONTRACT (strict)\n- A single TSX file. \`export default function Scene(props)\` — a React function component. Props (already provided, never hard-code the text): ${JSON.stringify(sceneProps(plan, scene))}\n  - headline: string, subhead: string, items: {label:string; value:string}[], accentColor: hex, baseColor: hex, placement: string.\n  - Render whatever fields are non-empty; tolerate empty subhead/items. Do NOT hard-code copy so text edits re-render without regenerating.\n- Allowed imports ONLY: react, remotion, @remotion/shapes, @remotion/paths, @remotion/noise. Nothing else. No images, no network, no fonts to download, no CSS @import, no external URLs.\n- Use remotion APIs: useCurrentFrame, useVideoConfig, interpolate, spring, Easing, AbsoluteFill, Sequence. Derive ALL motion from the frame number (deterministic). Never use Math.random, Date, setTimeout, CSS transitions or CSS keyframe animations. For randomness use \`random(seed)\` from remotion.\n- Root element: <AbsoluteFill> with NO background colour (transparent). Draw only the graphic itself.\n- Fonts: system stack only — fontFamily: "Poppins, Montserrat, Inter, 'SF Pro Display', -apple-system, 'Noto Sans Malayalam', 'Malayalam Sangam MN', 'Helvetica Neue', Arial, sans-serif". Use font weights 600–900 for headlines, tabular-nums for counters.\n\nPROFESSIONAL DESIGN BAR\n- Timeline: entrance 0–0.7s, hold, exit in the final 0.5s so the last frame is fully transparent. Everything that enters must also leave.\n- Motion: springs with damping ≈ 12–20 for entrances, Easing.bezier(0.16,1,0.3,1) or Easing.out(Easing.cubic) for wipes; stagger related elements 3–6 frames apart; animate opacity, translate, scale and clip/mask reveals together. Numbers count up with an ease-out. Lines and rings draw with stroke-dashoffset. Never let elements pop in without easing.\n- Hierarchy: one dominant element (large, high contrast), one supporting line, everything else subordinate. Headline size ≈ ${portrait ? '84–120px' : '72–104px'}, subhead ≈ ${portrait ? '40–52px' : '34–44px'}. Minimum text size ${portrait ? 40 : 32}px so it is legible on a phone.\n- Look: modern, premium, restrained. Solid or softly gradient cards (baseColor with 88–95% opacity), generous padding, 24–36px radius, subtle 1px inner highlight, layered soft shadows (0 20px 60px rgba(0,0,0,.35)), accentColor used sparingly for emphasis bars, underlines, numbers and icons. Ensure text contrast ≥ 4.5:1 on its own card. No neon clutter, no clip-art, no emoji, no drop-shadow text glow.\n- Build icons/illustrations from simple SVG shapes (paths, circles, rounded rects). Keep them geometric and clean.\n- Layout must never overflow the safe area; measure long text conservatively (wrap with maxWidth, clamp line count), and scale down gracefully if items are many.\n- Performance: no heavy filters (avoid blur > 20px, avoid huge box-shadows on many elements), keep DOM small.\n\n${templateSection(template, scene.graphicType)}\nGRAPHIC TYPE: ${scene.graphicType}\nDESIGN BRIEF: ${scene.designBrief}\nNARRATION IT ACCOMPANIES: "${scene.narration}"\n${plan.settings.styleNotes ? `HOUSE STYLE: ${plan.settings.styleNotes}\n` : ''}\nReturn ONLY JSON {"code": "<the full TSX source>"}.`;
 }
 
-export async function generateMotionCode(options: { textConfig: TextModelConfig; workDir: string; plan: MotionPlan; scene: MotionScene; previousCode?: string; feedback?: string; comment?: string }) {
+export async function generateMotionCode(options: { textConfig: TextModelConfig; workDir: string; plan: MotionPlan; scene: MotionScene; previousCode?: string; feedback?: string; comment?: string; signal?: AbortSignal }) {
   const { plan, scene } = options;
   const choice: TextModelChoice = plan.settings.codeProvider ? { provider: plan.settings.codeProvider, model: plan.settings.codeModel || '' } : { provider: plan.settings.planningProvider, model: plan.settings.planningModel };
   // Copy the reference into the project so tool-restricted CLIs (which only see workDir) can open it.
@@ -316,7 +310,7 @@ export async function generateMotionCode(options: { textConfig: TextModelConfig;
   if (options.comment?.trim()) prompt += `\n\nUSER REQUEST FOR THIS REVISION:\n${options.comment.trim()}`;
   if (options.feedback) prompt += `\n\nYOUR PREVIOUS ATTEMPT FAILED. Fix these problems and return the complete corrected file:\n${options.feedback}${options.previousCode ? `\n\nPREVIOUS CODE:\n${options.previousCode}` : ''}`;
   else if (options.previousCode && options.comment?.trim()) prompt += `\n\nCURRENT CODE TO REVISE:\n${options.previousCode}`;
-  const raw = await generateStructuredText({ config: options.textConfig, choice, workDir: options.workDir, prompt, schema: CODE_SCHEMA, outputName: `motion-code-${scene.id}`, images: reference ? [reference] : undefined }) as { code?: unknown };
+  const raw = await generateStructuredText({ config: options.textConfig, choice, workDir: options.workDir, prompt, schema: CODE_SCHEMA, outputName: `motion-code-${scene.id}`, images: reference ? [reference] : undefined, signal: options.signal }) as { code?: unknown };
   const code = String(raw?.code ?? '').replace(/^```(?:tsx|typescript|jsx|ts)?\s*\n?/i, '').replace(/\n?```\s*$/, '').trim();
   return { code, choice };
 }
@@ -327,7 +321,7 @@ export async function generateMotionCode(options: { textConfig: TextModelConfig;
  */
 export async function generateMotionScene(options: {
   textConfig: TextModelConfig; workDir: string; plan: MotionPlan; sceneId: string; chromeBin?: string; ffmpegBin: string;
-  regenerateCode?: boolean; comment?: string; onProgress?: (fraction: number) => void;
+  regenerateCode?: boolean; comment?: string; onProgress?: (fraction: number) => void; signal?: AbortSignal;
 }) {
   const { plan, workDir } = options; const scene = plan.scenes.find((candidate) => candidate.id === options.sceneId);
   if (!scene) throw new Error('Motion graphic not found');
@@ -337,8 +331,9 @@ export async function generateMotionScene(options: {
   let feedback: string | undefined; let lastError = ''; let candidate = scene.code; let mustGenerate = revising || !scene.code;
   try {
     for (let attempt = 1; attempt <= MAX_CODE_ATTEMPTS; attempt += 1) {
+      if (options.signal?.aborted) throw new Error('Render stopped');
       if (mustGenerate) {
-        const generated = await generateMotionCode({ textConfig: options.textConfig, workDir, plan, scene, previousCode: candidate, feedback, comment: attempt === 1 ? options.comment : undefined });
+        const generated = await generateMotionCode({ textConfig: options.textConfig, workDir, plan, scene, previousCode: candidate, feedback, comment: attempt === 1 ? options.comment : undefined, signal: options.signal });
         candidate = generated.code || candidate;
         const problems = validateMotionCode(generated.code);
         if (problems.length) { feedback = problems.map((problem, i) => `${i + 1}. ${problem}`).join('\n'); lastError = feedback; continue; }
@@ -348,19 +343,21 @@ export async function generateMotionScene(options: {
       try {
         await renderMotionScene({
           sceneDir: path.join(workDir, 'motion', scene.id), code: scene.code!, props: sceneProps(plan, scene), width, height, fps: 30,
-          durationSeconds: sceneDuration(scene), outputPath, chromeBin: options.chromeBin, ffmpegBin: options.ffmpegBin,
+          durationSeconds: sceneDuration(scene), outputPath, chromeBin: options.chromeBin, ffmpegBin: options.ffmpegBin, signal: options.signal,
           onProgress: (fraction) => { scene.renderProgress = fraction; options.onProgress?.(fraction); },
         });
         scene.videoFile = outputPath; scene.renderedAt = new Date().toISOString();
         scene.status = 'ready'; scene.error = undefined; scene.renderProgress = 1; await saveMotionPlan(workDir, plan);
         return scene;
       } catch (error) {
+        if (options.signal?.aborted) throw new Error('Render stopped');
         lastError = error instanceof Error ? error.message : String(error);
         feedback = `The component failed to bundle or render with Remotion:\n${lastError.slice(-2500)}`; candidate = scene.code; mustGenerate = true;
       }
     }
     throw new Error(`Could not produce a working motion graphic after ${MAX_CODE_ATTEMPTS} attempts.\n${lastError.slice(-1500)}`);
   } catch (error) {
+    if (options.signal?.aborted) { scene.status = scene.videoFile && previousStatus === 'ready' ? 'ready' : 'none'; scene.error = undefined; scene.renderProgress = undefined; await saveMotionPlan(workDir, plan).catch(() => undefined); throw new Error('Render stopped'); }
     scene.status = scene.videoFile ? (previousStatus === 'ready' ? 'ready' : 'none') : 'failed'; scene.error = error instanceof Error ? error.message : String(error);
     await saveMotionPlan(workDir, plan).catch(() => undefined);
     throw error;

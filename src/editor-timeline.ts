@@ -5,8 +5,20 @@ type TimelineSegment = { sourceStart: number; sourceEnd: number; timelineStart: 
 
 export function clone<T>(value: T): T { return JSON.parse(JSON.stringify(value)); }
 
+/**
+ * How far a B-roll clip may be stretched. CJCut caps a clip at sourceDuration - sourceStart, so this must be the real
+ * media length (not the short planned window) or the editor can only ever shorten a generated clip.
+ */
+export function brollSourceDuration(scene: BrollScene, type: 'video' | 'image', fallback: number) {
+  if (type === 'image') return Math.max(fallback, STILL_MAX_SECONDS);
+  return Math.max(fallback, scene.videoDuration ?? 0);
+}
+const STILL_MAX_SECONDS = 120;
+
 export function hasCurrentVideo(scene: BrollScene) {
   if (!scene.videoFile || scene.videoStatus === 'stale' || scene.imageStatus === 'generating' || scene.imageStatus === 'failed') return false;
+  if (scene.videoTreatment === 'still' && scene.videoProvider !== 'still-effect') return false;
+  if (scene.videoTreatment === 'ai' && scene.videoProvider === 'still-effect') return false;
   const imageRevision = Math.max(0, Number(scene.imageRevision) || (scene.imageFile ? 1 : 0));
   return scene.videoSourceImageRevision === undefined || scene.videoSourceImageRevision === imageRevision;
 }
@@ -146,7 +158,7 @@ export function freshProject(project: Project, words: Word[], edl: Edl | null, b
         start,
         duration: clipDuration,
         sourceStart: 0,
-        sourceDuration: clipDuration,
+        sourceDuration: brollSourceDuration(scene, type, clipDuration),
         x: transform.x, y: transform.y, scale: transform.scale, rotation: 0, opacity: 1, volume: 0, speed: 1,
         metadata: {
           managed: true,
@@ -227,19 +239,20 @@ export function reconcileSaved(saved: CJCutProject | null, fresh: CJCutProject, 
     if (clip.role === 'broll') {
       const scene = scenesById.get(String(clip.metadata?.sceneId || clip.externalId));
       if (!scene?.enabled || scene.imageStatus === 'generating' || scene.imageStatus === 'failed') return null;
-      const wantsImage = clip.type === 'image' || clip.metadata?.assetKind === 'image';
+      const managedSceneTrack = trackId === `vc-broll-track-${scene.id}`;
+      const wantsImage = !managedSceneTrack && (clip.type === 'image' || clip.metadata?.assetKind === 'image');
       if (wantsImage && scene.imageFile) return {
-        ...clone(clip), trackId, type: 'image',
+        ...clone(clip), trackId, type: 'image', sourceDuration: brollSourceDuration(scene, 'image', clip.duration),
         url: api.brollImageUrl(projectId, scene.id, scene.generatedAt),
         metadata: { ...clip.metadata, assetKind: 'image', assetVersion: scene.generatedAt || '' },
       };
       if (hasCurrentVideo(scene)) return {
-        ...clone(clip), trackId, type: 'video',
+        ...clone(clip), trackId, type: 'video', sourceDuration: brollSourceDuration(scene, 'video', clip.duration),
         url: api.brollVideoUrl(projectId, scene.id, scene.videoGeneratedAt),
         metadata: { ...clip.metadata, assetKind: 'video', assetVersion: scene.videoGeneratedAt || '' },
       };
       if (scene.imageFile) return {
-        ...clone(clip), trackId, type: 'image',
+        ...clone(clip), trackId, type: 'image', sourceDuration: brollSourceDuration(scene, 'image', clip.duration),
         url: api.brollImageUrl(projectId, scene.id, scene.generatedAt),
         metadata: { ...clip.metadata, assetKind: 'image', assetVersion: scene.generatedAt || '' },
       };
@@ -273,4 +286,3 @@ export function reconcileSaved(saved: CJCutProject | null, fresh: CJCutProject, 
   const duration = Math.max(fresh.duration, ...tracks.flatMap(track => track.clips.map(clip => clip.start + clip.duration)), 1);
   return { ...clone(saved), name: fresh.name, width: fresh.width, height: fresh.height, fps: fresh.fps, duration, tracks };
 }
-

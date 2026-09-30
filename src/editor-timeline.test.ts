@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { CJCutProject } from '@cjcut/editor';
-import type { MotionPlan, MotionScene, Project } from './api';
+import type { BrollPlan, MotionPlan, MotionScene, Project } from './api';
 import { freshProject, reconcileSaved } from './editor-timeline';
 
 const project = { id: 'p', name: 'P', sourceName: 's.mp4', updatedAt: '1', sourceAvailable: true, media: { width: 1080, height: 1920, frameRate: 30, duration: 60 }, clips: [{ id: 'c1', sourceName: 's.mp4', duration: 60, timelineStart: 0, timelineEnd: 60 }] } as unknown as Project;
@@ -43,4 +43,43 @@ test('a graphic that is disabled or no longer rendered disappears from the timel
   const saved = freshProject(project, [], null, null, both);
   const now = plan(graphic('motion-001', 5, { enabled: false }), graphic('motion-002', 20, { status: 'none' }));
   assert.deepEqual(ids(reconcileSaved(saved, freshProject(project, [], null, null, now), null, now, 'p')), ['vc-base:1']);
+});
+
+const brollPlan = (over: Record<string, unknown> = {}) => ({ settings: {}, scenes: [{ id: 'scene-001', title: 'B', enabled: true, imageStatus: 'ready', imageFile: '/i.png', videoFile: '/v.mp4', videoStatus: 'ready', imageRevision: 1, videoSourceImageRevision: 1, videoDuration: 5.8, sourceStart: 4, sourceEnd: 5.2, ...over }] }) as unknown as BrollPlan;
+
+test('a generated B-roll clip can be stretched up to the full video, not just shortened', () => {
+  const timeline = freshProject(project, [], null, brollPlan(), null);
+  const clip = timeline.tracks[0].clips[0];
+  assert.ok(Math.abs(clip.duration - 1.2) < 1e-6, 'starts at the planned window');
+  assert.equal(clip.sourceDuration, 5.8, 'CJCut caps trimming at sourceDuration - sourceStart, so this must be the real length');
+});
+
+test('saved B-roll clips pick up the real video length on the next sync', () => {
+  const stale = freshProject(project, [], null, brollPlan({ videoDuration: undefined }), null);
+  assert.equal(stale.tracks[0].clips[0].sourceDuration, stale.tracks[0].clips[0].duration, 'legacy plans only know the window');
+  const merged = reconcileSaved(stale, freshProject(project, [], null, brollPlan(), null), brollPlan(), null, 'p');
+  assert.equal(merged.tracks[0].clips[0].sourceDuration, 5.8);
+});
+
+test('a saved image clip switches to its generated video without losing timeline edits', () => {
+  const imageOnly = brollPlan({ videoFile: undefined, videoStatus: 'none', videoDuration: undefined });
+  const saved = freshProject(project, [], null, imageOnly, null);
+  saved.tracks[0].clips[0].start = 8;
+  saved.tracks[0].clips[0].duration = 2;
+  saved.tracks[0].clips[0].x = 42;
+  const ready = brollPlan();
+  const merged = reconcileSaved(saved, freshProject(project, [], null, ready, null), ready, null, 'p');
+  const clip = merged.tracks[0].clips[0];
+  assert.equal(clip.type, 'video');
+  assert.match(clip.url!, /\/video(?:\?|$)/);
+  assert.equal(clip.sourceDuration, 5.8);
+  assert.equal(clip.start, 8);
+  assert.equal(clip.duration, 2);
+  assert.equal(clip.x, 42);
+});
+
+test('still-image B-roll can be held far longer than its planned window', () => {
+  const timeline = freshProject(project, [], null, brollPlan({ videoFile: undefined, videoStatus: 'none', videoDuration: undefined }), null);
+  assert.equal(timeline.tracks[0].clips[0].type, 'image');
+  assert.ok(timeline.tracks[0].clips[0].sourceDuration >= 60);
 });

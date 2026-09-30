@@ -51,7 +51,7 @@ const candidate = (start: number, end: number, extra: Record<string, unknown> = 
 });
 const settings = normalizeMotionSettings({ minDuration: 2, maxDuration: 4 });
 
-test('motion plan validation enforces B-roll clearance, gaps, removed words and text policy', () => {
+test('motion plan validation ignores B-roll and spacing but enforces removed words and text policy', () => {
   const occupied = [{ start: 10, end: 14, label: 'B-roll "Anatomy"' }];
   const ok = validatePlan(words, undefined, { scenes: [candidate(0, 6), candidate(30, 36)], notes: [] }, settings, occupied, 0);
   assert.equal(ok.scenes.length, 2);
@@ -62,9 +62,8 @@ test('motion plan validation enforces B-roll clearance, gaps, removed words and 
   const issues = (raw: unknown, keep?: Array<{ startWordId: string; endWordId: string }>, expected = 0) => {
     try { validatePlan(words, keep, raw, settings, occupied, expected); return ''; } catch (error) { return (error as Error).message; }
   };
-  assert.match(issues({ scenes: [candidate(19, 26)] }), /overlaps B-roll "Anatomy"/);
-  assert.match(issues({ scenes: [candidate(0, 6), candidate(9, 10)] }), /overlaps|at least 2s|after/);
-  assert.match(issues({ scenes: [candidate(0, 6), candidate(15, 18)] }), /lasts only|B-roll/);
+  assert.equal(issues({ scenes: [candidate(19, 26)] }), '', 'B-roll overlap is allowed');
+  assert.equal(issues({ scenes: [candidate(0, 6), candidate(7, 13)] }), '', 'back-to-back graphics are allowed');
   assert.match(issues({ scenes: [candidate(30, 32)] }), /lasts only/);
   assert.match(issues({ scenes: [candidate(30, 36, { headline: 'Guaranteed cure in one visit' })] }), /Meta ad policy/);
   assert.match(issues({ scenes: [candidate(30, 36)] }, [{ startWordId: 'w0', endWordId: 'w32' }, { startWordId: 'w34', endWordId: 'w59' }]), /removed from the final narration/);
@@ -86,8 +85,8 @@ test('editing a motion graphic invalidates only what changed and guards timing',
     assert.equal(edited.status, 'none'); assert.equal(edited.code, GOOD_CODE, 'text edits must keep the generated code');
     const restyled = await updateMotionScene(dir, plan, 'motion-001', { placement: 'top' }, broll);
     assert.equal(restyled.code, undefined, 'layout changes must trigger a redesign');
-    await assert.rejects(updateMotionScene(dir, plan, 'motion-001', { sourceStart: 29, sourceEnd: 33 }, broll), /overlaps B-roll/);
-    await assert.rejects(updateMotionScene(dir, plan, 'motion-001', { sourceStart: 38, sourceEnd: 41 }, broll), /between motion graphics/);
+    await updateMotionScene(dir, plan, 'motion-001', { sourceStart: 29, sourceEnd: 33 }, broll);
+    await updateMotionScene(dir, plan, 'motion-001', { sourceStart: 38, sourceEnd: 41 }, broll);
     await assert.rejects(updateMotionScene(dir, plan, 'motion-001', { headline: 'Before and after' }, broll), /Meta ad policy/);
     const moved = await updateMotionScene(dir, plan, 'motion-001', { sourceStart: 20.5, sourceEnd: 24.5 }, broll);
     assert.equal(moved.sourceStart, 20.5);
@@ -128,6 +127,33 @@ test('rendered motion overlay composites over the talking head with its transpar
     assert.ok(tb > 150 && tr < 90, `transparent area must show the blue talking head, got ${tr},${tg},${tb}`);
     const [br, , bb] = pixel(output, 0.2, 48, 120);
     assert.ok(bb > 150 && br < 90, 'graphic must not appear before its start time');
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('a moved, scaled motion graphic lands where the editor put it in the final MP4', { skip: !hasVp9 }, async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'motion-transform-'));
+  try {
+    const source = path.join(dir, 'source.mp4'); const overlay = path.join(dir, 'motion-001.webm'); const output = path.join(dir, 'final.mp4');
+    exec(['-f', 'lavfi', '-i', 'color=c=0x2255cc:s=96x160:r=15', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000', '-t', '2', '-c:v', 'mpeg4', '-pix_fmt', 'yuv420p', '-c:a', 'aac', source]);
+    exec(['-f', 'lavfi', '-i', "color=c=red:s=96x160:r=15:d=1,format=yuva420p,geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='if(between(Y,60,99),255,0)'", '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p', overlay]);
+    const media = { duration: 2, size: 50000, width: 96, height: 160, frameRate: 15, audioCodec: 'aac', hdr: false };
+    const project = { id: 't', name: 't', workDir: dir, sourcePath: source, sourceName: 'source.mp4', createdAt: '', updatedAt: '', media, clips: [{ id: 'clip-1', sourcePath: source, sourceName: 'source.mp4', media, timelineStart: 0, timelineEnd: 2 }] } as Project;
+    const motion: MotionPlan = { version: 1, orientation: 'portrait', settings, notes: [], scenes: [scene({ videoFile: overlay, status: 'ready' })] };
+    // Half size, moved to the right-hand quarter: the 96x160 frame becomes 48x80 centred at (72, 80) => x 48..96, y 40..120.
+    const clip = { id: 'c', trackId: 'm', type: 'video' as const, name: 'Stat', role: 'overlay', externalId: 'motion-001', metadata: { motionId: 'motion-001' }, start: 0, duration: 1.5, sourceStart: 0, sourceDuration: 1, x: 75, y: 50, scale: 0.5, rotation: 0, opacity: 1, volume: 0, speed: 1 };
+    const timeline: EditorTimeline = { name: 't', width: 96, height: 160, fps: 15, duration: 2, tracks: [
+      { id: 'm', name: 'Motion', visible: true, locked: false, type: 'video', role: 'overlay', clips: [clip] },
+      { id: 'b', name: 'Base', visible: true, locked: false, type: 'video', role: 'base', clips: [{ id: 'base', trackId: 'b', type: 'video', name: 'base', role: 'base', metadata: { sourceClipId: 'clip-1' }, start: 0, duration: 2, sourceStart: 0, sourceDuration: 2, x: 50, y: 50, scale: 1, rotation: 0, opacity: 1, volume: 1, speed: 1 }] },
+    ] };
+    const render = await buildEditorRender({ project, timeline, broll: null, motion, ffmpegBin: 'ffmpeg', outputPath: output, workDir: path.join(dir, 'render'), mode: 'fast', probe: async () => ({ duration: 2, audioCodec: 'aac' }) });
+    exec(render.args);
+    // The overlay's opaque band (source rows 60-99) becomes output rows 40+30..40+49 = 70..89, columns 48..95.
+    const inside = pixel(output, 0.5, 72, 80);
+    assert.ok(inside[0] > 180 && inside[1] < 90 && inside[2] < 90, `moved+scaled band should be red at (72,80), got ${inside}`);
+    const wherePlacedByDefault = pixel(output, 0.5, 20, 80);
+    assert.ok(wherePlacedByDefault[2] > 150 && wherePlacedByDefault[0] < 90, 'the graphic must have left its original position');
+    const above = pixel(output, 0.5, 72, 50);
+    assert.ok(above[2] > 150 && above[0] < 90, 'transparent part of the scaled graphic shows the talking head');
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 

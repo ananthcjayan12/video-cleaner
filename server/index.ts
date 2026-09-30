@@ -24,8 +24,10 @@ import {
   importBrollVideo,
   listGoogleFlowProjectVideos,
   loadBrollPlan,
+  saveBrollPlan,
   planNeedsPresenterMatte,
   resolveMagnificVideoConfig,
+  setStillEffect,
   updateBrollScene,
   updateBrollSettings,
   type BrollDisplayTemplate,
@@ -59,6 +61,7 @@ import {
   loadProjectDirectory,
   loadProjectSnapshot,
   projectClips,
+  configureVideoDurationProbe,
   reconcileBrollFiles,
   resolveBrollAssetPath,
   saveProject,
@@ -343,6 +346,7 @@ async function probe(sourcePath: string): Promise<MediaProfile> {
   const width = Number(video.width) || undefined; const height = Number(video.height) || undefined; const transfer = String(video.color_transfer ?? '').toLowerCase(); const primaries = String(video.color_primaries ?? '').toLowerCase();
   return { duration: Number(data.format?.duration ?? video.duration ?? 0), size: Number(data.format?.size ?? 0), width: swap ? height : width, height: swap ? width : height, frameRate: parseRate(video.avg_frame_rate || video.r_frame_rate), bitRate: Number(video.bit_rate ?? 0) || undefined, videoCodec: video.codec_name, audioCodec: audio.codec_name, pixelFormat: video.pix_fmt, colorTransfer: video.color_transfer, colorPrimaries: video.color_primaries, colorSpace: video.color_space, colorRange: video.color_range, rotation, hdr: ['smpte2084', 'arib-std-b67'].includes(transfer) || primaries === 'bt2020' };
 }
+configureVideoDurationProbe(async (file) => (await probe(file)).duration);
 
 function rotationFilter(rotation?: number) {
   const degrees = ((Math.round(rotation || 0) % 360) + 360) % 360;
@@ -924,13 +928,22 @@ app.delete('/api/projects/:id/motion/scenes/:sceneId', route(async (req, res) =>
   if (plan.scenes.find((scene) => scene.id === routeParam(req.params.sceneId))?.status === 'generating') throw new Error('Wait for this graphic to finish rendering before deleting it.');
   res.json(await deleteMotionScene(project.workDir, plan, routeParam(req.params.sceneId)));
 }));
+const motionRenderControllers = new Map<string, AbortController>();
+app.post('/api/projects/:id/motion/stop', route(async (req, res) => {
+  const projectId = routeParam(req.params.id); const only = typeof req.body?.sceneId === 'string' ? req.body.sceneId : '';
+  let stopped = 0; for (const [key, controller] of motionRenderControllers) if (key.startsWith(`${projectId}:`) && (!only || key === `${projectId}:${only}`)) { controller.abort(); stopped += 1; }
+  res.json({ stopped });
+}));
 app.post('/api/projects/:id/motion/scenes/:sceneId/generate', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id)); const plan = await requireMotionPlan(project); const sceneId = routeParam(req.params.sceneId); const settings = await resolvedSettings();
   const scene = plan.scenes.find((candidate) => candidate.id === sceneId); if (!scene) throw new Error('Motion graphic not found');
   if (scene.status === 'generating') return void res.status(409).json({ error: 'This graphic is already rendering' });
   const comment = typeof req.body?.comment === 'string' ? req.body.comment.slice(0, 1200) : undefined;
-  const generated = await generateMotionScene({ textConfig: settings, workDir: project.workDir, plan, sceneId, chromeBin: await detectChromeBin(), ffmpegBin: settings.ffmpegBin, regenerateCode: req.body?.regenerateCode === true, comment });
-  await touchProject(project); res.json(generated);
+  const controller = new AbortController(); const key = `${project.id}:${sceneId}`; motionRenderControllers.set(key, controller);
+  try {
+    const generated = await generateMotionScene({ textConfig: settings, workDir: project.workDir, plan, sceneId, chromeBin: await detectChromeBin(), ffmpegBin: settings.ffmpegBin, regenerateCode: req.body?.regenerateCode === true, comment, signal: controller.signal });
+    await touchProject(project); res.json(generated);
+  } finally { motionRenderControllers.delete(key); }
 }));
 app.get('/api/projects/:id/motion/scenes/:sceneId/video', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id)); const plan = await requireMotionPlan(project);
@@ -1015,9 +1028,17 @@ app.post('/api/projects/:id/broll/scenes/:sceneId/fix-meta', route(async (req, r
   const scene = await fixSceneForMetaPolicy({ textConfig: settings, workDir: project.workDir, plan, sceneId: routeParam(req.params.sceneId), config: { openAiApiKey: settings.openAiApiKey, openAiModel: settings.openAiImageModel, geminiApiKey: settings.geminiApiKey, geminiModel: settings.geminiImageModel, grokBin: settings.grokBin, grokModel: settings.grokModel, grokVideoModel: settings.grokVideoModel, codexBin: settings.codexBin, codexModel: settings.codexModel, ffmpegBin: settings.ffmpegBin } });
   brollPlans.set(project.id, plan); await touchProject(project); res.json(scene);
 }));
-app.post('/api/projects/:id/broll/scenes/:sceneId/video-prompt', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const settings = await resolvedSettings(); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet'); const scene = await createVideoPrompt({ textConfig: settings, workDir: project.workDir, plan, sceneId: routeParam(req.params.sceneId) }); brollPlans.set(project.id, plan); await touchProject(project); res.json(scene); }));
+app.post('/api/projects/:id/broll/scenes/:sceneId/video-prompt', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const settings = await resolvedSettings(); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet'); const sceneId = routeParam(req.params.sceneId); if (plan.scenes.find(candidate => candidate.id === sceneId)?.videoTreatment === 'still') throw new Error('This scene uses a still motion effect and does not need a video prompt.'); const scene = await createVideoPrompt({ textConfig: settings, workDir: project.workDir, plan, sceneId }); brollPlans.set(project.id, plan); await touchProject(project); res.json(scene); }));
+app.post('/api/projects/:id/broll/scenes/:sceneId/still-effect', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id)); const settings = await resolvedSettings();
+  const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet');
+  const effect = String(req.body?.effect);
+  if (!['ai', 'hold', 'zoom-in', 'zoom-out', 'pan-left', 'pan-right'].includes(effect)) throw new Error('Choose a supported still motion effect.');
+  const scene = await setStillEffect({ workDir: project.workDir, plan, sceneId: routeParam(req.params.sceneId), effect: effect as import('./broll.js').StillEffect | 'ai', ffmpegBin: settings.ffmpegBin });
+  brollPlans.set(project.id, plan); await touchProject(project); res.json(scene);
+}));
 app.post('/api/projects/:id/broll/scenes/:sceneId/video', route(async (req, res) => {
-  const project = getProject(routeParam(req.params.id)); const settings = await resolvedSettings(); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet'); const sceneId = routeParam(req.params.sceneId); let scene = plan.scenes.find((candidate) => candidate.id === sceneId); if (!scene) throw new Error('B-roll scene not found'); if (!scene.videoPrompt) { scene = await createVideoPrompt({ textConfig: settings, workDir: project.workDir, plan, sceneId }); }
+  const project = getProject(routeParam(req.params.id)); const settings = await resolvedSettings(); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet'); const sceneId = routeParam(req.params.sceneId); let scene = plan.scenes.find((candidate) => candidate.id === sceneId); if (!scene) throw new Error('B-roll scene not found'); if (scene.videoTreatment === 'still') throw new Error('This scene uses a still motion effect. Switch it to AI video before generating.'); if (!scene.videoPrompt) { scene = await createVideoPrompt({ textConfig: settings, workDir: project.workDir, plan, sceneId }); }
   const regenerationComment = typeof req.body?.regenerationComment === 'string' ? req.body.regenerationComment.trim().slice(0, 2000) : undefined;
   const videoProvider = plan.settings.videoProvider || 'grok-cli';
   scene = videoProvider === 'google-flow'
@@ -1167,5 +1188,16 @@ app.get('/api/projects/:id/export-status', route(async (req, res) => { res.json(
 app.post('/api/projects/:id/export-stop', route(async (req, res) => { const projectId = routeParam(req.params.id); const job = exportJobs.get(projectId); if (!job || job.state !== 'running') return void res.status(409).json({ error: 'No export is currently running' }); job.stopRequested = true; job.speed = job.resumable ? 'Stopping after preserving checkpoints…' : 'Stopping…'; const child = exportProcesses.get(projectId); if (child) child.kill('SIGTERM'); res.status(202).json({ stopping: true, resumable: Boolean(job.resumable) }); }));
 
 const PORT = Number(process.env.PORT || 3001); await loadSettings(); await hydrateProjects(true);
+// Generation runs inside this process, so anything still marked "generating" at startup was orphaned by a restart (e.g. the dev server reloading) and would spin forever.
+for (const project of projects.values()) {
+  try {
+    const plan = await loadBrollPlan(project.workDir); if (!plan) continue; let changed = false;
+    for (const scene of plan.scenes) {
+      if (scene.imageStatus === 'generating') { scene.imageStatus = 'failed'; changed = true; }
+      if (scene.videoStatus === 'generating') { scene.videoStatus = scene.videoFile ? 'ready' : 'none'; changed = true; }
+    }
+    if (changed) await saveBrollPlan(project.workDir, plan);
+  } catch { /* leave the project as-is */ }
+}
 if (process.env.NODE_ENV === 'production') { const distDir = path.resolve('dist'); app.use(express.static(distDir)); app.use((_req, res) => res.sendFile(path.join(distDir, 'index.html'))); }
 app.listen(PORT, '127.0.0.1', () => { console.log(`Video Cleaner local server: http://127.0.0.1:${PORT} · ${projects.size} local project${projects.size === 1 ? '' : 's'} restored`); });

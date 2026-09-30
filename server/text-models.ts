@@ -16,9 +16,9 @@ class CommandExecutionError extends Error {
   }
 }
 
-async function command(bin: string, args: string[], input?: string, cwd?: string, timeoutMs = 600000) {
+async function command(bin: string, args: string[], input?: string, cwd?: string, timeoutMs = 600000, signal?: AbortSignal) {
   return await new Promise<string>((resolve, reject) => {
-    const child = spawn(bin, args, { cwd, shell: false, windowsHide: true });
+    const child = spawn(bin, args, { cwd, shell: false, windowsHide: true, signal });
     let stdout = ''; let stderr = ''; let settled = false;
     const timer = setTimeout(() => {
       if (!settled) {
@@ -142,6 +142,7 @@ export async function generateStructuredText(options: {
   prompt: string; schema: Record<string, unknown>; outputName: string;
   /** Reference images. Files must sit inside workDir so tool-restricted CLIs may read them. */
   images?: string[];
+  signal?: AbortSignal;
 }): Promise<unknown> {
   const { choice, config, workDir, schema, prompt } = options;
   const model = choice.model.trim();
@@ -153,18 +154,18 @@ export async function generateStructuredText(options: {
     const schemaFile = path.join(workDir, options.outputName + '.schema.json');
     const outputFile = path.join(workDir, options.outputName + '.json');
     await fs.writeFile(schemaFile, JSON.stringify(schema, null, 2));
-    const args = ['exec', '--ephemeral'];
+    const args = ['exec', '--ephemeral', '--skip-git-repo-check'];
     if (model) args.push('--model', model);
     for (const image of images) args.push('--image', image);
     args.push('--output-schema', schemaFile, '--output-last-message', outputFile, '-');
-    await command(config.codexBin, args, jsonPrompt, workDir);
+    await command(config.codexBin, args, jsonPrompt, workDir, undefined, options.signal);
     return parseModelJson(await fs.readFile(outputFile, 'utf8'));
   }
   if (choice.provider === 'claude-cli') {
     if (!config.claudeBin) throw new Error('Claude CLI was not found.');
     const args = ['--print', '--no-session-persistence', '--disable-slash-commands', '--strict-mcp-config', '--tools', images.length ? 'Read' : '', ...(images.length ? ['--allowedTools', 'Read'] : []), '--output-format', 'json', '--json-schema', JSON.stringify(schema)];
     if (model) args.push('--model', model);
-    const envelope = parseModelJson(await command(config.claudeBin, args, jsonPrompt, workDir)) as {
+    const envelope = parseModelJson(await command(config.claudeBin, args, jsonPrompt, workDir, undefined, options.signal)) as {
       is_error?: boolean; result?: string; structured_output?: unknown;
     };
     if (envelope?.is_error) throw new Error('Claude CLI: ' + (envelope.result || 'Generation failed.'));
@@ -187,7 +188,7 @@ export async function generateStructuredText(options: {
       denied_actions?: Array<{ action?: string; display_name?: string }>;
     } | undefined;
     try {
-      rawOutput = await command(config.agyBin, args, undefined, workDir);
+      rawOutput = await command(config.agyBin, args, undefined, workDir, undefined, options.signal);
       const envelope = parseModelJson(rawOutput);
       if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)) throw new Error('AGY CLI returned an invalid response envelope.');
       result = envelope as typeof result;
@@ -224,7 +225,7 @@ export async function generateStructuredText(options: {
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST', headers: { Authorization: 'Bearer ' + config.openAiApiKey, 'Content-Type': 'application/json' },
       body: JSON.stringify({ model, messages: [{ role: 'user', content: images.length ? [{ type: 'text', text: jsonPrompt }, ...await Promise.all(images.map(async file => ({ type: 'image_url', image_url: { url: await dataUrl(file) } })))] : jsonPrompt }], response_format: { type: 'json_object' } }),
-      signal: AbortSignal.timeout(600000),
+      signal: options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(600000)]) : AbortSignal.timeout(600000),
     });
     const body = await response.json() as any;
     if (!response.ok) throw new Error('OpenAI: ' + (body.error?.message || response.status));
@@ -234,7 +235,7 @@ export async function generateStructuredText(options: {
   const response = await fetch('https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent', {
     method: 'POST', headers: { 'x-goog-api-key': config.geminiApiKey, 'Content-Type': 'application/json' },
     body: JSON.stringify({ contents: [{ parts: [{ text: jsonPrompt }, ...await Promise.all(images.map(async file => ({ inlineData: await inlineImage(file) })))] }], generationConfig: { responseMimeType: 'application/json' } }),
-    signal: AbortSignal.timeout(600000),
+    signal: options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(600000)]) : AbortSignal.timeout(600000),
   });
   const body = await response.json() as any;
   if (!response.ok) throw new Error('Gemini: ' + (body.error?.message || response.status));

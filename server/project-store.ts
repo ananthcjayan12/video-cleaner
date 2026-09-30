@@ -122,18 +122,25 @@ async function resolvedBrollAsset(workDir: string, scene: BrollScene, kind: Brol
 
   if (kind === 'video' && currentVideo) {
     const attempts = (scene.videoAttempts ?? [])
-      .filter((attempt) => attempt.status === 'completed' && (attempt.sourceImageRevision === undefined || attempt.sourceImageRevision === imageRevision))
+      .filter((attempt) => attempt.status === 'completed'
+        && (attempt.sourceImageRevision === undefined || attempt.sourceImageRevision === imageRevision)
+        && (scene.videoTreatment === 'still' ? attempt.source === 'still-effect' : attempt.source !== 'still-effect'))
       .sort((a, b) => (a.id === scene.activeVideoAttemptId ? -1 : 0) - (b.id === scene.activeVideoAttemptId ? -1 : 0) || String(b.completedAt ?? b.startedAt).localeCompare(String(a.completedAt ?? a.startedAt)));
     for (const attempt of attempts) add(attempt.localFile);
   }
 
-  if ((kind === 'image' && currentImage) || (kind === 'video' && currentVideo)) add(path.join(brollDir, `${scene.id}${kind === 'image' ? '.png' : '.mp4'}`));
+  if ((kind === 'image' && currentImage) || (kind === 'video' && currentVideo && scene.videoTreatment !== 'still')) add(path.join(brollDir, `${scene.id}${kind === 'image' ? '.png' : '.mp4'}`));
   const extensions = kind === 'image' ? new Set(['.png', '.jpg', '.jpeg', '.webp', '.heic', '.heif']) : new Set(['.mp4', '.mov', '.m4v', '.webm']);
-  const canonicalMatches = (kind === 'image' && !currentImage) || (kind === 'video' && !currentVideo) ? [] : await matchingFiles(brollDir, `${scene.id}.`, extensions);
+  const canonicalMatches = (kind === 'image' && !currentImage) || (kind === 'video' && (!currentVideo || scene.videoTreatment === 'still')) ? [] : await matchingFiles(brollDir, `${scene.id}.`, extensions);
   for (const match of canonicalMatches) add(match);
   if (kind === 'video' && currentVideo) {
     const attemptMatches = await matchingFiles(path.join(brollDir, 'video-attempts'), `${scene.id}-`, extensions);
-    for (const match of attemptMatches) add(match);
+    const compatibleIds = new Set((scene.videoAttempts ?? [])
+      .filter((attempt) => scene.videoTreatment === 'still' ? attempt.source === 'still-effect' : attempt.source !== 'still-effect')
+      .map((attempt) => attempt.id));
+    for (const match of attemptMatches) {
+      if (compatibleIds.has(path.basename(match).slice(`${scene.id}-`.length, -path.extname(match).length))) add(match);
+    }
   }
 
   for (const candidate of candidates) if (await statFile(candidate)) return candidate;
@@ -284,6 +291,10 @@ export async function scanProjects(projectsDir: string) {
   return loaded.filter((project): project is Project => Boolean(project));
 }
 
+// Probing is injected so this module stays free of the app's ffprobe configuration.
+let probeVideoDuration: (file: string) => Promise<number | undefined> = async () => undefined;
+export function configureVideoDurationProbe(probe: (file: string) => Promise<number | undefined>) { probeVideoDuration = probe; }
+
 export async function reconcileBrollFiles(project: Project, plan: BrollPlan | null) {
   if (!plan) return null;
   let changed = false;
@@ -314,6 +325,12 @@ export async function reconcileBrollFiles(project: Project, plan: BrollPlan | nu
     } else if (!videoPath && scene.videoFile) {
       scene.videoFile = undefined; scene.videoGeneratedAt = undefined; scene.videoModel = undefined; scene.videoProvider = undefined; scene.activeVideoAttemptId = undefined; scene.videoSourceImageRevision = undefined; scene.videoStatus = scene.imageFile ? 'stale' : 'none'; changed = true;
     }
+  }
+  for (const scene of plan.scenes) {
+    if (!scene.videoFile) { if (scene.videoDuration !== undefined) { scene.videoDuration = undefined; scene.videoDurationFor = undefined; changed = true; } continue; }
+    if (scene.videoDuration && scene.videoDurationFor === scene.videoGeneratedAt) continue;
+    const duration = await probeVideoDuration(scene.videoFile).catch(() => undefined);
+    if (duration && Number.isFinite(duration) && duration > 0) { scene.videoDuration = Math.round(duration * 1000) / 1000; scene.videoDurationFor = scene.videoGeneratedAt; changed = true; }
   }
   if (changed) await atomicWriteJson(path.join(project.workDir, 'broll-plan.json'), plan);
   return plan;

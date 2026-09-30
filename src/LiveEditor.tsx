@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { CJCutEditor, type CJCutMediaAsset, type CJCutProject } from '@cjcut/editor';
 import { api, uploadEditorMedia, type EditorMediaEntry, type BrollPlan, type Edl, type ExportStatus, type MotionPlan, type Project, type Word } from './api';
-import { clone, freshProject, hasCurrentVideo, reconcileSaved, usableMotion } from './editor-timeline';
+import { brollSourceDuration, clone, freshProject, hasCurrentVideo, reconcileSaved, usableMotion } from './editor-timeline';
 
 type Props = {
   project: Project;
@@ -100,16 +100,17 @@ export default function LiveEditor({ project, words, edl, broll, exportVideo, ex
       if (!scene.enabled || scene.imageStatus === 'generating' || scene.imageStatus === 'failed') continue;
       const duration = Math.max(0.5, scene.sourceEnd - scene.sourceStart);
       const metadata = { managed: true, sceneId: scene.id };
+      const videoLength = brollSourceDuration(scene, 'video', duration);
       if (scene.imageFile) assets.push({
         id: 'image:' + scene.id, name: scene.title + ' · still', kind: 'image',
         url: api.brollImageUrl(project.id, scene.id, scene.generatedAt),
-        duration, sourceDuration: duration, role: 'broll', externalId: scene.id,
+        duration, sourceDuration: brollSourceDuration(scene, 'image', duration), role: 'broll', externalId: scene.id,
         metadata: { ...metadata, assetKind: 'image', assetVersion: scene.generatedAt || '' },
       });
       if (hasCurrentVideo(scene)) assets.push({
         id: 'video:' + scene.id, name: scene.title + ' · video', kind: 'video',
         url: api.brollVideoUrl(project.id, scene.id, scene.videoGeneratedAt),
-        duration, sourceDuration: duration, role: 'broll', externalId: scene.id,
+        duration, sourceDuration: videoLength, role: 'broll', externalId: scene.id,
         metadata: { ...metadata, assetKind: 'video', assetVersion: scene.videoGeneratedAt || '' },
       });
     }
@@ -148,7 +149,7 @@ export default function LiveEditor({ project, words, edl, broll, exportVideo, ex
     project: project.id,
     clips: (project.clips ?? []).map(clip => [clip.id, clip.sourceName, clip.timelineStart, clip.timelineEnd]),
     edl: edl?.keepRanges ?? null,
-    broll: (broll?.scenes ?? []).map(scene => [scene.id, scene.enabled, scene.generatedAt, scene.videoGeneratedAt, scene.imageStatus, scene.videoStatus, scene.imageRevision]),
+    broll: (broll?.scenes ?? []).map(scene => [scene.id, scene.enabled, scene.generatedAt, scene.videoGeneratedAt, scene.imageStatus, scene.videoStatus, scene.imageRevision, scene.videoDuration, scene.videoTreatment, scene.stillEffect]),
     motion: (motion?.scenes ?? []).filter(usableMotion).map(scene => [scene.id, scene.renderedAt]),
   }), [project.id, project.clips, edl?.keepRanges, broll?.scenes, motion?.scenes]);
 

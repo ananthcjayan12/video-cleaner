@@ -13,7 +13,7 @@
     "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit"
   },
   "dependencies": {
-    "@cjcut/editor": "git+https://github.com/ananthcjayan12/cjcut.git#b8ce0ebdb8730eb857b22596a970387c28eebd48",
+    "@cjcut/editor": "git+https://github.com/ananthcjayan12/cjcut.git#21c61d6d8f7f59e844e8896d8e8c7e1e1e688abf",
     "@remotion/bundler": "^4.0.530",
     "@remotion/renderer": "^4.0.530",
     "dotenv": "^16.4.7",
