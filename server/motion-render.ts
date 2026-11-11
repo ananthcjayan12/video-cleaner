@@ -1,3 +1,4 @@
+import { motionSoundEncoding, type MotionSoundCue } from './motion-sfx.js';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -15,6 +16,7 @@ export type MotionRenderInput = {
   height: number;
   fps: number;
   durationSeconds: number;
+  soundEffects?: MotionSoundCue[];
   outputPath: string;
   chromeBin?: string;
   ffmpegBin: string;
@@ -60,9 +62,10 @@ async function withRenderSlot<T>(task: () => Promise<T>): Promise<T> {
   try { return await task(); } finally { activeRenders -= 1; waiting.shift()?.(); }
 }
 
-function encodeAlphaWebm(ffmpegBin: string, framesDir: string, fps: number, outputPath: string, signal?: AbortSignal) {
+function encodeAlphaWebm(ffmpegBin: string, framesDir: string, fps: number, outputPath: string, signal?: AbortSignal, soundEffects: MotionSoundCue[] = [], duration = 1) {
+  const audio = motionSoundEncoding(soundEffects, duration);
   // Remotion's own VP9 stitch uses libvpx's slowest preset (~30 s for 4 s of video); this is visually equivalent for flat graphics.
-  const args = ['-hide_banner', '-loglevel', 'error', '-y', '-framerate', String(fps), '-pattern_type', 'glob', '-i', path.join(framesDir, 'element-*.png'),
+  const args = ['-hide_banner', '-loglevel', 'error', '-y', '-framerate', String(fps), '-pattern_type', 'glob', '-i', path.join(framesDir, 'element-*.png'), ...audio.inputs, ...audio.output,
     '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p', '-b:v', '0', '-crf', '22', '-deadline', 'good', '-cpu-used', '4', '-row-mt', '1', '-auto-alt-ref', '0', outputPath];
   return new Promise<void>((resolve, reject) => {
     const child = spawn(ffmpegBin, args, { stdio: ['ignore', 'ignore', 'pipe'], signal }); let stderr = '';
@@ -118,7 +121,7 @@ export async function renderMotionScene(input: MotionRenderInput): Promise<{ out
       const partial = `${input.outputPath}.partial.webm`;
       await fs.rm(partial, { force: true });
       if (input.signal?.aborted) throw stopped();
-      await encodeAlphaWebm(input.ffmpegBin, framesDir, input.fps, partial, input.signal);
+      await encodeAlphaWebm(input.ffmpegBin, framesDir, input.fps, partial, input.signal, input.soundEffects, frames / input.fps);
       await fs.rename(partial, input.outputPath);
     } catch (error) { if (input.signal?.aborted) throw stopped(); throw error; } finally { input.signal?.removeEventListener('abort', cancel); await Promise.all([fs.rm(framesDir, { recursive: true, force: true }), fs.rm(bundleDir, { recursive: true, force: true })]); }
     input.onProgress?.(1);

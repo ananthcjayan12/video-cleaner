@@ -137,17 +137,33 @@ export type MotionSettings = {
   planningProvider: TextProvider; planningModel: string; codeProvider?: TextProvider; codeModel?: string;
   countMode: 'auto' | 'exact' | 'per-minute'; targetCount: number; perMinute: number; minDuration: number; maxDuration: number;
   accentColor: string; secondaryColor: string; styleNotes: string; defaultTemplateId?: string;
+  emotionSounds: boolean; emotionDensity: EmotionDensity;
 };
+export type EmotionId = 'shock' | 'suspense' | 'sadness' | 'joy' | 'insight' | 'warning' | 'emphasis' | 'transition' | 'humor' | 'relief';
+export type SoundIntensity = 'soft' | 'medium' | 'strong';
+export type EmotionDensity = 'subtle' | 'balanced' | 'expressive';
+export type Emotion = { id: EmotionId; label: string; color: string; cue: string; mixDb: number; sounds: string[] };
+/** How a cue sits on the timeline: the clip is trimmed so the sound's loudest moment lands on the word. */
+export type EmotionClip = { lead: number; sourceOffset: number; duration: number; volume: number; fadeIn: number; fadeOut: number; soundDuration: number; label: string };
+export type EmotionCue = {
+  id: string; emotion: EmotionId; soundId: string; intensity: SoundIntensity; sourceTime: number; wordId?: string;
+  narration: string; reason: string; enabled: boolean; clip: EmotionClip;
+};
+export type EmotionCuePatch = { emotion?: EmotionId; soundId?: string; intensity?: SoundIntensity; sourceTime?: number; enabled?: boolean; reason?: string };
 export type MotionTemplate = { id: string; name: string; notes: string; file: string; createdAt: string };
+export type MotionSoundCue = { soundId: string; time: number; gainDb: number };
+export type MotionSound = { id: string; label: string; category: string; usage: string; duration: number };
 export type MotionScene = {
+  soundEffects?: MotionSoundCue[];
   id: string; title: string; startWordId: string; endWordId: string; sourceStart: number; sourceEnd: number; narration: string;
   graphicType: MotionGraphicType; placement: MotionPlacement; keyPoint: string; whyThisGraphicMatters: string; viewerTakeaway: string;
   content: { headline: string; subhead: string; items: MotionItem[] }; designBrief: string; enabled: boolean;
   templateId?: string; codeGeneratedAt?: string; codeModel?: string; videoFile?: string; renderedAt?: string; renderProgress?: number;
   status: 'none' | 'generating' | 'ready' | 'failed'; error?: string;
 };
-export type MotionPlan = { version: 1; orientation: 'portrait' | 'landscape'; settings: MotionSettings; scenes: MotionScene[]; notes: string[] };
+export type MotionPlan = { version: 1; orientation: 'portrait' | 'landscape'; settings: MotionSettings; scenes: MotionScene[]; notes: string[]; emotionCues?: EmotionCue[] };
 export type MotionScenePatch = {
+  soundEffects?: MotionSoundCue[];
   title?: string; enabled?: boolean; sourceStart?: number; sourceEnd?: number; graphicType?: MotionGraphicType; placement?: MotionPlacement; templateId?: string | null;
   headline?: string; subhead?: string; items?: MotionItem[]; designBrief?: string;
 };
@@ -182,6 +198,8 @@ export const api = {
   setEdl: (id: string, keepRanges: KeepRange[]) => request<Edl>(`/api/projects/${id}/edl`, { method: 'PUT', body: JSON.stringify({ keepRanges }) }),
   planBroll: (id: string, settings: Partial<BrollPlanSettings>) => request<{ plan: BrollPlan; transcript: { text?: string; words: Word[] }; edl: Edl }>(`/api/projects/${id}/broll/plan`, { method: 'POST', body: JSON.stringify({ settings: { ...settings, displayTemplate: undefined } }) }),
   getBroll: (id: string) => request<BrollPlan>(`/api/projects/${id}/broll`),
+  motionSounds: () => request<{ sounds: MotionSound[]; emotions: Emotion[] }>('/api/motion-sounds'),
+  motionSoundUrl: (id: string) => `/api/motion-sounds/${encodeURIComponent(id)}/audio`,
   motionTemplates: () => request<{ templates: MotionTemplate[] }>('/api/motion-templates'),
   uploadMotionTemplate: async (file: File, name: string, notes: string): Promise<MotionTemplate> => {
     const response = await fetch(`/api/motion-templates?fileName=${encodeURIComponent(file.name)}&name=${encodeURIComponent(name)}&notes=${encodeURIComponent(notes)}`, { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: file });
@@ -200,6 +218,10 @@ export const api = {
     return body as MotionPlan;
   },
   planMotion: (id: string, settings: Partial<MotionSettings>) => request<MotionPlan>(`/api/projects/${id}/motion/plan`, { method: 'POST', body: JSON.stringify({ settings }) }),
+  planEmotionSounds: (id: string, settings: Partial<MotionSettings>) => request<MotionPlan>(`/api/projects/${id}/motion/sfx/plan`, { method: 'POST', body: JSON.stringify({ settings }) }),
+  addEmotionCue: (id: string, cue: { emotion: EmotionId; soundId?: string; intensity?: SoundIntensity; sourceTime: number }) => request<EmotionCue>(`/api/projects/${id}/motion/sfx`, { method: 'POST', body: JSON.stringify(cue) }),
+  updateEmotionCue: (id: string, cueId: string, patch: EmotionCuePatch) => request<EmotionCue>(`/api/projects/${id}/motion/sfx/${cueId}`, { method: 'PUT', body: JSON.stringify(patch) }),
+  deleteEmotionCue: (id: string, cueId: string) => request<MotionPlan>(`/api/projects/${id}/motion/sfx/${cueId}`, { method: 'DELETE' }),
   updateMotionSettings: (id: string, patch: Partial<MotionSettings>) => request<MotionPlan>(`/api/projects/${id}/motion/settings`, { method: 'PUT', body: JSON.stringify(patch) }),
   updateMotionScene: (id: string, sceneId: string, patch: MotionScenePatch) => request<MotionScene>(`/api/projects/${id}/motion/scenes/${sceneId}`, { method: 'PUT', body: JSON.stringify(patch) }),
   deleteMotionScene: (id: string, sceneId: string) => request<MotionPlan>(`/api/projects/${id}/motion/scenes/${sceneId}`, { method: 'DELETE' }),

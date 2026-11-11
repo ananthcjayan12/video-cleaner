@@ -1,3 +1,5 @@
+import { EMOTIONS } from './emotion-sfx.js';
+import { MOTION_SOUNDS, motionSoundPath } from './motion-sfx.js';
 import { colorVideoFilter } from './color.js';
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
@@ -37,11 +39,17 @@ import {
   type VideoProvider,
 } from './broll.js';
 import {
+  addEmotionCue,
   createMotionPlan,
+  deleteEmotionCue,
   deleteMotionScene,
+  emptyMotionPlan,
   generateMotionScene,
   loadMotionPlan,
   normalizeMotionSettings,
+  planEmotionSounds,
+  saveMotionPlan,
+  updateEmotionCue,
   updateMotionScene,
   updateMotionSettings,
   type MotionPlan,
@@ -883,12 +891,52 @@ app.post('/api/projects/:id/motion/plan', route(async (req, res) => {
   const keepRanges = req.body?.workflowMode === 'raw-video' ? undefined : project.edl?.keepRanges;
   const orientation = (project.media.height || 0) > (project.media.width || 0) ? 'portrait' : 'landscape';
   const broll = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir);
+  const previous = await loadProjectMotion(project);
   const plan = await createMotionPlan({
-    textConfig: settings, workDir: project.workDir, words: transcript.words, keepRanges, orientation, broll,
+    textConfig: settings, workDir: project.workDir, words: transcript.words, keepRanges, orientation, broll, emotionCues: previous?.emotionCues,
     settings: { ...requested, planningProvider: requested.planningProvider || settings.planningProvider, planningModel: requested.planningModel ?? settings.planningModel },
   });
-  motionPlans.set(project.id, plan); await touchProject(project); res.json(plan);
+  motionPlans.set(project.id, plan);
+  // Emotion sounds are planned once; re-planning the graphics keeps whatever sound beats already exist. A failure here must not lose the graphics plan.
+  if (plan.settings.emotionSounds && !plan.emotionCues?.length) {
+    try { await planEmotionSounds({ textConfig: settings, workDir: project.workDir, plan, words: transcript.words, keepRanges }); }
+    catch (error) { plan.notes.push(`Sound plan: emotion sounds could not be planned (${error instanceof Error ? error.message.split('\n')[0] : String(error)}). Use “Plan emotion sounds” to retry.`); await saveMotionPlan(project.workDir, plan); }
+  }
+  await touchProject(project); res.json(plan);
 }));
+app.post('/api/projects/:id/motion/sfx/plan', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id)); const settings = await resolvedSettings(); const transcript = await transcribeProject(project);
+  const requested = (req.body?.settings ?? {}) as Partial<MotionSettings>;
+  const keepRanges = req.body?.workflowMode === 'raw-video' ? undefined : project.edl?.keepRanges;
+  const orientation = (project.media.height || 0) > (project.media.width || 0) ? 'portrait' : 'landscape';
+  const chosen = { planningProvider: requested.planningProvider || settings.planningProvider, planningModel: requested.planningModel ?? settings.planningModel };
+  const existing = await loadProjectMotion(project);
+  // Sounds can be planned before any graphic exists, so start from an empty plan when there is none.
+  const plan = existing ?? emptyMotionPlan(orientation, { ...requested, ...chosen });
+  if (existing) plan.settings = normalizeMotionSettings({ ...plan.settings, ...requested, ...chosen });
+  motionPlans.set(project.id, plan);
+  await planEmotionSounds({ textConfig: settings, workDir: project.workDir, plan, words: transcript.words, keepRanges });
+  await touchProject(project); res.json(plan);
+}));
+app.post('/api/projects/:id/motion/sfx', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id)); const plan = await requireMotionPlan(project); const body = req.body ?? {};
+  const cue = await addEmotionCue(project.workDir, plan, { emotion: typeof body.emotion === 'string' ? body.emotion : undefined, soundId: typeof body.soundId === 'string' ? body.soundId : undefined, intensity: typeof body.intensity === 'string' ? body.intensity : undefined, sourceTime: Number(body.sourceTime) }, project.transcript?.words ?? []);
+  await touchProject(project); res.status(201).json(cue);
+}));
+app.put('/api/projects/:id/motion/sfx/:cueId', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id)); const plan = await requireMotionPlan(project); const body = req.body ?? {};
+  const cue = await updateEmotionCue(project.workDir, plan, routeParam(req.params.cueId), {
+    emotion: typeof body.emotion === 'string' ? body.emotion : undefined, soundId: typeof body.soundId === 'string' ? body.soundId : undefined, intensity: typeof body.intensity === 'string' ? body.intensity : undefined,
+    sourceTime: body.sourceTime !== undefined && Number.isFinite(Number(body.sourceTime)) ? Number(body.sourceTime) : undefined, enabled: typeof body.enabled === 'boolean' ? body.enabled : undefined, reason: typeof body.reason === 'string' ? body.reason : undefined,
+  }, project.transcript?.words ?? []);
+  await touchProject(project); res.json(cue);
+}));
+app.delete('/api/projects/:id/motion/sfx/:cueId', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id)); const plan = await requireMotionPlan(project);
+  await deleteEmotionCue(project.workDir, plan, routeParam(req.params.cueId)); await touchProject(project); res.json(plan);
+}));
+app.get('/api/motion-sounds', (_req, res) => { res.json({ sounds: MOTION_SOUNDS, emotions: EMOTIONS }); });
+app.get('/api/motion-sounds/:soundId/audio', route(async (req, res) => { res.sendFile(motionSoundPath(routeParam(req.params.soundId))); }));
 app.get('/api/motion-templates', route(async (_req, res) => { res.json({ templates: await listMotionTemplates() }); }));
 app.post('/api/motion-templates', route(async (req, res) => {
   if (req.headers['content-type'] !== 'application/octet-stream') return void res.status(415).json({ error: 'Expected raw image upload' });
@@ -919,6 +967,7 @@ app.put('/api/projects/:id/motion/scenes/:sceneId', route(async (req, res) => {
     headline: typeof body.headline === 'string' ? body.headline : undefined, subhead: typeof body.subhead === 'string' ? body.subhead : undefined,
     items: Array.isArray(body.items) ? body.items.map((item: any) => ({ label: String(item?.label ?? ''), value: String(item?.value ?? '') })) : undefined,
     designBrief: typeof body.designBrief === 'string' ? body.designBrief : undefined,
+    soundEffects: Array.isArray(body.soundEffects) ? body.soundEffects : undefined,
   };
   const broll = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir);
   const scene = await updateMotionScene(project.workDir, plan, routeParam(req.params.sceneId), patch, broll); await touchProject(project); res.json(scene);

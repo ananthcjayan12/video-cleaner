@@ -5,6 +5,7 @@ import { projectClips } from './project-store.js';
 import type { BrollPlan, BrollScene } from './broll.js';
 import type { MotionPlan } from './motion.js';
 import { resolveEditorMedia } from './editor-media.js';
+import { motionSound, motionSoundPath } from './motion-sfx.js';
 import { colorVideoFilter, type ColorProfile } from './color.js';
 import { ffmpegKeyframeExpression, type AudioKeyframe } from '@cjcut/editor/audio';
 
@@ -118,7 +119,10 @@ async function resolveClips(options: {
       if (clip.duration < MIN_LENGTH || clip.opacity === 0 && clip.type !== 'audio') continue;
       // CJCut's role union has no "motion"; motion clips are "overlay" clips that carry metadata.motionId.
       const isMotion = clip.role === 'motion' || typeof clip.metadata?.motionId === 'string';
-      const role = isMotion ? 'motion' : clip.role || track.role || (clip.type === 'text' ? 'caption' : '');
+      // Emotion sound effects are audio clips that name a library sound; the file always comes from the server-side library.
+      const isEmotionSfx = typeof clip.metadata?.sfxSoundId === 'string';
+      const isImported = typeof clip.metadata?.editorMediaId === 'string';
+      const role = isMotion ? 'motion' : isEmotionSfx ? 'sfx' : isImported ? 'imported' : clip.role || track.role || (clip.type === 'text' ? 'caption' : '');
       if (clip.type === 'text') {
         if (clip.text && clip.text.trim()) resolved.push({ clip: { ...clip, role, hasAudio: false }, trackIndex });
         continue;
@@ -154,6 +158,11 @@ async function resolveClips(options: {
         if (!graphic?.enabled) throw new Error('Motion graphic ' + (id || clip.name) + ' is missing or disabled. Refresh the editor.');
         if (graphic.status !== 'ready' || !graphic.videoFile) throw new Error('Motion graphic ' + graphic.title + ' has not been rendered (or its text changed). Generate it again or remove its clip.');
         filePath = graphic.videoFile;
+        audioAllowed = clip.volume > 0 && Boolean((await probe(filePath)).audioCodec);
+      } else if (role === 'sfx') {
+        if (clip.type !== 'audio') throw new Error('Sound effect ' + clip.name + ' must be an audio clip');
+        const sound = motionSound(String(clip.metadata!.sfxSoundId));
+        filePath = motionSoundPath(sound.id); sourceDuration = sound.duration; audioAllowed = true;
       } else if (role === 'imported') {
         const importedId = clip.metadata?.editorMediaId;
         if (typeof importedId !== 'string') throw new Error('Imported media reference missing for ' + clip.name);
@@ -164,7 +173,7 @@ async function resolveClips(options: {
         sourceDuration = found.entry.duration;
         audioAllowed = clip.type === 'audio' || (clip.type === 'video' && Boolean(found.entry.hasAudio));
       } else {
-        throw new Error('Unsupported editor media: ' + clip.name + '. Only project base, imported media, generated B-roll and motion graphics can be exported.');
+        throw new Error('Unsupported editor media: ' + clip.name + '. Only project base, imported media, generated B-roll, motion graphics and library sound effects can be exported.');
       }
       if (!await exists(filePath)) throw new Error('Missing media file for ' + clip.name + ': ' + path.basename(filePath));
       if (clip.type === 'video' && !media && role !== 'motion') media = await probe(filePath);
@@ -202,6 +211,8 @@ export async function buildEditorRender(options: {
   ];
   const filters: string[] = ['[0:v]setpts=PTS-STARTPTS,format=yuva420p[basecanvas]'];
   const tracksById = new Map(editor.tracks.map(track => [track.id, track]));
+  // Every delayed clip ends in asetpts=N/SR/TB. Without it, adelay after atempo hands the AAC encoder timestamps it cannot follow, and everything after
+  // the padded silence is silently dropped (a lone cue at 1s came out as one second of silence).
   const audioProcessing = (clip: ResolvedClip) => {
     const track = tracksById.get(clip.trackId);
     const gain = (track?.volume ?? 1) * clip.volume;
@@ -244,7 +255,7 @@ export async function buildEditorRender(options: {
       filters.push('[' + id + ':a]atrim=start=' + seconds(clip.sourceStart) + ':end=' + seconds(sourceSeconds) +
         ',asetpts=PTS-STARTPTS,atempo=' + seconds(clip.speed) +
         ',aresample=48000' + audioProcessing(clip) +
-        ',adelay=' + delayMs + ':all=1[' + audioLabel + ']');
+        ',adelay=' + delayMs + ':all=1,asetpts=N/SR/TB[' + audioLabel + ']');
       audioLabels.push(audioLabel); audioClips++;
       continue;
     }
@@ -280,7 +291,7 @@ export async function buildEditorRender(options: {
       filters.push('[' + id + ':a]atrim=start=' + seconds(clip.sourceStart) + ':end=' + seconds(sourceSeconds) +
         ',asetpts=PTS-STARTPTS,atempo=' + seconds(clip.speed) +
         ',aresample=48000' + audioProcessing(clip) +
-        ',adelay=' + delayMs + ':all=1[' + audioLabel + ']');
+        ',adelay=' + delayMs + ':all=1,asetpts=N/SR/TB[' + audioLabel + ']');
       audioLabels.push(audioLabel); audioClips++;
     }
   }

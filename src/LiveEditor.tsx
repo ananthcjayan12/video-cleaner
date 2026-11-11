@@ -135,7 +135,7 @@ export default function LiveEditor({ project, words, edl, broll, exportVideo, ex
         sourceDuration: item.duration,
         width: item.width,
         height: item.height,
-        role: 'imported',
+        role: item.kind === 'audio' ? 'audio' : 'overlay',
         externalId: item.id,
         metadata: { editorMediaId: item.id },
       });

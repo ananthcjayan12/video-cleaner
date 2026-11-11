@@ -1,3 +1,5 @@
+import { createEmotionCues, editEmotionCue, newEmotionCue, normalizeEmotionCues, type EmotionCue, type EmotionDensity, type EmotionEdit } from './emotion-sfx.js';
+import { motionSoundPrompt, motionSoundSchema, normalizeMotionSounds, type MotionSoundCue } from './motion-sfx.js';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { keptTimeline, keptWordIndexes, planningModelLabel, writePlanningFailureLog, type BrollKeepRange, type BrollPlan, type BrollWord } from './broll.js';
@@ -19,16 +21,19 @@ export type MotionSettings = {
   accentColor: string; secondaryColor: string; styleNotes: string;
   /** Template used by every graphic that has no template of its own. */
   defaultTemplateId?: string;
+  /** Add sound effects on emotional beats of the narration (shock, sadness, joy…), independent of any graphic. */
+  emotionSounds: boolean; emotionDensity: EmotionDensity;
 };
 export type MotionScene = {
   id: string; title: string; startWordId: string; endWordId: string; sourceStart: number; sourceEnd: number; narration: string;
   graphicType: MotionGraphicType; placement: MotionPlacement; keyPoint: string; whyThisGraphicMatters: string; viewerTakeaway: string;
   content: MotionContent; designBrief: string; enabled: boolean; templateId?: string;
+  soundEffects?: MotionSoundCue[];
   code?: string; codeGeneratedAt?: string; codeModel?: string;
   videoFile?: string; renderedAt?: string; renderProgress?: number;
   status: 'none' | 'generating' | 'ready' | 'failed'; error?: string;
 };
-export type MotionPlan = { version: 1; orientation: 'portrait' | 'landscape'; settings: MotionSettings; scenes: MotionScene[]; notes: string[] };
+export type MotionPlan = { version: 1; orientation: 'portrait' | 'landscape'; settings: MotionSettings; scenes: MotionScene[]; notes: string[]; emotionCues?: EmotionCue[] };
 
 export const MOTION_GRAPHIC_TYPES: Array<{ id: MotionGraphicType; label: string; description: string }> = [
   { id: 'lower-third', label: 'Lower third', description: 'Name/topic tag that slides in with an accent bar' },
@@ -69,11 +74,32 @@ export function normalizeMotionSettings(raw: Partial<MotionSettings> | undefined
     minDuration: Math.max(1.5, Math.min(maxDuration, Number(raw?.minDuration) || 2.5)), maxDuration,
     accentColor: hexColor(raw?.accentColor, '#22D3EE'), secondaryColor: hexColor(raw?.secondaryColor, '#0F172A'), styleNotes: String(raw?.styleNotes ?? '').trim().slice(0, 600),
     defaultTemplateId: /^[\w-]{1,40}$/.test(String(raw?.defaultTemplateId ?? '')) ? String(raw!.defaultTemplateId) : undefined,
+    emotionSounds: raw?.emotionSounds !== false,
+    emotionDensity: ['subtle', 'balanced', 'expressive'].includes(String(raw?.emotionDensity)) ? raw!.emotionDensity as EmotionDensity : 'balanced',
   };
 }
 
 function typeOf(value: unknown): MotionGraphicType { return TYPE_IDS.includes(value as MotionGraphicType) ? value as MotionGraphicType : 'kinetic-title'; }
 function placementOf(value: unknown): MotionPlacement { return PLACEMENTS.includes(value as MotionPlacement) ? value as MotionPlacement : 'center'; }
+
+/** Give imported/older plans useful motion-synchronised SFX even though they predate AI sound selection. */
+export function defaultMotionSounds(type: MotionGraphicType, duration: number): MotionSoundCue[] {
+  const later = Math.min(Math.max(0.55, duration * 0.38), Math.max(0.1, duration - 0.15));
+  const cue = (soundId: string, time: number, gainDb = -18): MotionSoundCue => ({ soundId, time, gainDb });
+  const byType: Record<MotionGraphicType, MotionSoundCue[]> = {
+    'lower-third': [cue('whoosh-transitions-simple-whoosh-1', 0.1)],
+    'stat-callout': [cue('whoosh-transitions-fast-whoosh', 0.08, -20), cue('ui-chime', later, -18)],
+    'kinetic-title': [cue('whoosh-transitions-fast-whoosh', 0.08), cue('ui-click-button', later, -16)],
+    'animated-chart': [cue('whoosh-transitions-simple-whoosh-1', 0.08, -20), cue('ui-chime', later)],
+    'process-steps': [cue('ui-button-pressed', 0.12, -17), cue('ui-click-button', later, -17)],
+    'comparison': [cue('whoosh-transitions-fast-whoosh', 0.1), cue('ui-pop-sound', later, -18)],
+    'checklist': [cue('ui-button-pressed', 0.12, -17), cue('ui-chime', later, -19)],
+    'quote-card': [cue('whoosh-transitions-simple-whoosh-1', 0.1, -19)],
+    'timeline': [cue('ui-click-button', 0.12, -17), cue('ui-chime', later, -19)],
+    'icon-diagram': [cue('ui-pop-sound', 0.1, -18), cue('whoosh-transitions-simple-whoosh-1', later, -20)],
+  };
+  return normalizeMotionSounds(byType[type], duration);
+}
 function cleanContent(raw: any): MotionContent {
   const items = (Array.isArray(raw?.items) ? raw.items : []).slice(0, 6).map((item: any) => ({ label: String(item?.label ?? '').trim().slice(0, 80), value: String(item?.value ?? '').trim().slice(0, 40) })).filter((item: MotionItem) => item.label || item.value);
   return { headline: String(raw?.headline ?? '').trim().slice(0, 90), subhead: String(raw?.subhead ?? '').trim().slice(0, 140), items };
@@ -92,14 +118,14 @@ function planSchema(exact = 0) {
         type: 'array', ...(exact ? { minItems: exact, maxItems: exact } : {}),
         items: {
           type: 'object', additionalProperties: false,
-          required: ['title', 'startWordId', 'endWordId', 'graphicType', 'placement', 'keyPoint', 'whyThisGraphicMatters', 'viewerTakeaway', 'headline', 'subhead', 'items', 'designBrief'],
+          required: ['title', 'startWordId', 'endWordId', 'graphicType', 'placement', 'keyPoint', 'whyThisGraphicMatters', 'viewerTakeaway', 'headline', 'subhead', 'items', 'designBrief', 'soundEffects'],
           properties: {
             title: { type: 'string' }, startWordId: { type: 'string' }, endWordId: { type: 'string' },
             graphicType: { type: 'string', enum: TYPE_IDS }, placement: { type: 'string', enum: PLACEMENTS },
             keyPoint: { type: 'string' }, whyThisGraphicMatters: { type: 'string' }, viewerTakeaway: { type: 'string' },
             headline: { type: 'string' }, subhead: { type: 'string' },
             items: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['label', 'value'], properties: { label: { type: 'string' }, value: { type: 'string' } } } },
-            designBrief: { type: 'string' },
+            designBrief: { type: 'string' }, soundEffects: motionSoundSchema,
           },
         },
       },
@@ -141,11 +167,15 @@ export function validatePlan(words: BrollWord[], keepRanges: BrollKeepRange[] | 
     if (brief.length < 40) issues.push(`"${label}" needs a fuller designBrief (layout, motion sequence, emphasis).`);
     const policy = contentPolicyIssue(content, true);
     if (policy) issues.push(`"${label}" on-screen text violates Meta ad policy: ${policy}`);
+    const soundEffects = normalizeMotionSounds(candidate?.soundEffects ?? defaultMotionSounds(typeOf(candidate?.graphicType), sourceEnd - sourceStart), sourceEnd - sourceStart);
+    if (candidate?.soundEffects !== undefined && (!Array.isArray(candidate.soundEffects) || !soundEffects.length || soundEffects.length !== candidate.soundEffects.length)) {
+      issues.push(`"${label}" needs 1–3 valid library sound cues, inside its duration and at least 0.12s apart.`);
+    }
     const number = scenes.length + 1;
     scenes.push({
       id: `motion-${String(number).padStart(3, '0')}`, title: label.slice(0, 100), startWordId: words[start].id, endWordId: words[end].id, sourceStart, sourceEnd,
       narration: words.slice(start, end + 1).map((word) => word.text).join(' '), graphicType: typeOf(candidate?.graphicType), placement: placementOf(candidate?.placement),
-      keyPoint, whyThisGraphicMatters: why, viewerTakeaway: takeaway, content, designBrief: brief, enabled: true, status: 'none',
+      keyPoint, whyThisGraphicMatters: why, viewerTakeaway: takeaway, content, designBrief: brief, soundEffects, enabled: true, status: 'none',
     });
     previousStart = start; previousEnd = sourceEnd; previousLabel = label;
   }
@@ -171,11 +201,17 @@ export async function loadMotionPlan(workDir: string): Promise<MotionPlan | null
     const raw = JSON.parse(await fs.readFile(path.join(workDir, 'motion-plan.json'), 'utf8')) as MotionPlan;
     if (raw.version !== 1) return null;
     raw.settings = normalizeMotionSettings(raw.settings);
+    raw.emotionCues = normalizeEmotionCues(raw.emotionCues);
     for (const scene of raw.scenes ?? []) {
       // A crash mid-render must not leave a scene stuck in "generating" forever.
       if (scene.status === 'generating') scene.status = scene.videoFile ? 'ready' : 'none';
       scene.content = cleanContent(scene.content);
       scene.graphicType = typeOf(scene.graphicType); scene.placement = placementOf(scene.placement);
+      // An existing encoded WebM cannot gain audio retroactively, so legacy graphics need one re-render.
+      if (!Array.isArray(scene.soundEffects)) {
+        scene.soundEffects = defaultMotionSounds(scene.graphicType, scene.sourceEnd - scene.sourceStart);
+        if (scene.videoFile && scene.status === 'ready') scene.status = 'none';
+      } else scene.soundEffects = normalizeMotionSounds(scene.soundEffects, scene.sourceEnd - scene.sourceStart);
       if (scene.videoFile && !await fs.stat(scene.videoFile).then((stat) => stat.isFile()).catch(() => false)) { scene.videoFile = undefined; scene.renderedAt = undefined; if (scene.status === 'ready') scene.status = 'none'; }
     }
     return raw;
@@ -185,6 +221,8 @@ export async function loadMotionPlan(workDir: string): Promise<MotionPlan | null
 export async function createMotionPlan(options: {
   textConfig: TextModelConfig; workDir: string; words: BrollWord[]; keepRanges?: BrollKeepRange[];
   orientation: 'portrait' | 'landscape'; broll: BrollPlan | null; settings?: Partial<MotionSettings>;
+  /** Sound beats of the plan being replaced: re-planning graphics must not discard them. */
+  emotionCues?: EmotionCue[];
 }) {
   const settings = normalizeMotionSettings(options.settings); const { workDir, words, keepRanges } = options;
   const choice: TextModelChoice = { provider: settings.planningProvider, model: settings.planningModel };
@@ -198,7 +236,7 @@ export async function createMotionPlan(options: {
   const frame = options.orientation === 'portrait' ? 'vertical 9:16 (1080×1920)' : 'landscape 16:9 (1920×1080)';
   const countInstruction = expected ? `Create exactly ${expected} motion graphics.` : 'Choose only the moments where an animated graphic genuinely helps. Fewer, sharper graphics beat filler.';
   const typeGuide = MOTION_GRAPHIC_TYPES.map((type) => `- ${type.id}: ${type.description}`).join('\n');
-  const prompt = `You are the motion-design director for a premium talking-head video (${frame}). Decide WHERE professional animated motion graphics make the spoken idea clearer, more memorable or easier to follow — the way top explainer channels use them. The presenter stays visible; graphics are overlays on transparent background.\n\n${countInstruction}\n\nWHAT MAKES A GOOD MOTION-GRAPHIC BEAT\n- A concrete fact, number, list, sequence, comparison, definition or key phrase the viewer should retain. Skip vague or purely emotional sentences.\n- The graphic must add clarity, not repeat the whole sentence. On-screen text is SHORT: headline ≤ 6 words, subhead ≤ 12 words, at most 5 items, each label ≤ 4 words.\n- Only use facts stated in the narration. Never invent statistics, percentages, prices or guarantees.\n- Vary graphicType across the video; do not use the same type back to back.\n- Choose placement so the graphic never covers the presenter's face: 'bottom' or 'top' for compact graphics, 'center' only for brief full-attention moments, 'full' for a large visual that may dominate the frame.\n\nGRAPHIC TYPES\n${typeGuide}\n\nHARD RULES\n- Each graphic covers ONE continuous spoken passage (startWordId..endWordId) of ${settings.minDuration}–${settings.maxDuration} seconds. Use only supplied word IDs, chronological order, no removed words inside.\n- Base placement purely on the narration. Ignore any B-roll; overlaps are fixed later in the timeline.\n- designBrief: 2–4 sentences describing layout, the motion sequence (what enters first, how it emphasises the key number/word, how it exits) and the visual mood. Colour palette: accent ${settings.accentColor}, base ${settings.secondaryColor}.${settings.styleNotes ? `\n- House style: ${settings.styleNotes}` : ''}\n\n${metaTextGuidelinesPrompt()}\nOn-screen text must obey these rules too (no before/after claims, guarantees, or exaggerated medical claims).\n\nNARRATION WORDS:\n${transcript}`;
+  const prompt = `${motionSoundPrompt}\n\nYou are the motion-design director for a premium talking-head video (${frame}). Decide WHERE professional animated motion graphics make the spoken idea clearer, more memorable or easier to follow — the way top explainer channels use them. The presenter stays visible; graphics are overlays on transparent background.\n\n${countInstruction}\n\nWHAT MAKES A GOOD MOTION-GRAPHIC BEAT\n- A concrete fact, number, list, sequence, comparison, definition or key phrase the viewer should retain. Skip vague or purely emotional sentences.\n- The graphic must add clarity, not repeat the whole sentence. On-screen text is SHORT: headline ≤ 6 words, subhead ≤ 12 words, at most 5 items, each label ≤ 4 words.\n- Only use facts stated in the narration. Never invent statistics, percentages, prices or guarantees.\n- Vary graphicType across the video; do not use the same type back to back.\n- Choose placement so the graphic never covers the presenter's face: 'bottom' or 'top' for compact graphics, 'center' only for brief full-attention moments, 'full' for a large visual that may dominate the frame.\n\nGRAPHIC TYPES\n${typeGuide}\n\nHARD RULES\n- Each graphic covers ONE continuous spoken passage (startWordId..endWordId) of ${settings.minDuration}–${settings.maxDuration} seconds. Use only supplied word IDs, chronological order, no removed words inside.\n- Base placement purely on the narration. Ignore any B-roll; overlaps are fixed later in the timeline.\n- designBrief: 2–4 sentences describing layout, the motion sequence (what enters first, how it emphasises the key number/word, how it exits) and the visual mood. Colour palette: accent ${settings.accentColor}, base ${settings.secondaryColor}.${settings.styleNotes ? `\n- House style: ${settings.styleNotes}` : ''}\n\n${metaTextGuidelinesPrompt()}\nOn-screen text must obey these rules too (no before/after claims, guarantees, or exaggerated medical claims).\n\nNARRATION WORDS:\n${transcript}`;
   let attemptPrompt = prompt; let lastIssues: string[] = []; let planned: ReturnType<typeof validatePlan> | null = null;
   for (let attempt = 1; attempt <= MAX_PLAN_ATTEMPTS; attempt += 1) {
     let raw: any;
@@ -216,7 +254,10 @@ export async function createMotionPlan(options: {
   }
   const narration = words.filter((_, index) => kept.has(index)).map((word) => word.text).join(' ');
   const complianceNotes = scanMetaText(narration).map((finding) => formatMetaFinding(finding, 'the narration'));
-  const plan: MotionPlan = { version: 1, orientation: options.orientation, settings, scenes: planned.scenes, notes: [...planned.notes, ...complianceNotes] };
+  const inGraphic = (cue: EmotionCue) => planned!.scenes.some((scene) => cue.sourceTime >= scene.sourceStart - 0.15 && cue.sourceTime <= scene.sourceEnd);
+  const carried = (options.emotionCues ?? []).filter((cue) => !inGraphic(cue)); const clashing = (options.emotionCues?.length ?? 0) - carried.length;
+  const soundNotes = clashing ? [`${SOUND_NOTE}Removed ${clashing} sound cue${clashing === 1 ? '' : 's'} that fell inside the new graphics, which carry their own sound.`] : [];
+  const plan: MotionPlan = { version: 1, orientation: options.orientation, settings, scenes: planned.scenes, notes: [...planned.notes, ...complianceNotes, ...soundNotes], emotionCues: carried };
   // Ids restart at motion-001, so clips rendered for the previous plan must not be mistaken for the new ones.
   await fs.rm(path.join(workDir, 'motion'), { recursive: true, force: true });
   await saveMotionPlan(workDir, plan); return plan;
@@ -230,7 +271,7 @@ function assertMotionTiming(plan: MotionPlan, scene: MotionScene, start: number,
 
 export type MotionScenePatch = {
   title?: string; enabled?: boolean; sourceStart?: number; sourceEnd?: number; graphicType?: string; placement?: string; templateId?: string | null;
-  headline?: string; subhead?: string; items?: MotionItem[]; designBrief?: string;
+  headline?: string; subhead?: string; items?: MotionItem[]; designBrief?: string; soundEffects?: MotionSoundCue[];
 };
 export async function updateMotionScene(workDir: string, plan: MotionPlan, sceneId: string, patch: MotionScenePatch, broll: BrollPlan | null) {
   const scene = plan.scenes.find((candidate) => candidate.id === sceneId); if (!scene) throw new Error('Motion graphic not found');
@@ -241,6 +282,12 @@ export async function updateMotionScene(workDir: string, plan: MotionPlan, scene
   if (enabled && (timingChanged || (patch.enabled === true && !scene.enabled))) assertMotionTiming(plan, scene, start, end, broll);
   else if (end <= start) throw new Error('Motion graphic end time must be after its start time');
   let renderAffected = timingChanged;
+  if (patch.soundEffects !== undefined) {
+    const next = normalizeMotionSounds(patch.soundEffects, end - start);
+    if (JSON.stringify(next) !== JSON.stringify(scene.soundEffects ?? [])) {
+      scene.soundEffects = next; scene.code = undefined; scene.codeGeneratedAt = undefined; renderAffected = true;
+    }
+  }
   if (typeof patch.title === 'string' && patch.title.trim()) scene.title = patch.title.trim().slice(0, 100);
   if (typeof patch.enabled === 'boolean') scene.enabled = patch.enabled;
   if (patch.graphicType && typeOf(patch.graphicType) !== scene.graphicType) { scene.graphicType = typeOf(patch.graphicType); scene.code = undefined; scene.codeGeneratedAt = undefined; renderAffected = true; }
@@ -275,6 +322,43 @@ export async function deleteMotionScene(workDir: string, plan: MotionPlan, scene
   await saveMotionPlan(workDir, plan); return plan;
 }
 
+const SOUND_NOTE = 'Sound plan: ';
+
+/** Create an empty plan so emotion sounds can be planned before (or without) any motion graphics. */
+export function emptyMotionPlan(orientation: 'portrait' | 'landscape', settings?: Partial<MotionSettings>): MotionPlan {
+  return { version: 1, orientation, settings: normalizeMotionSettings(settings), scenes: [], notes: [], emotionCues: [] };
+}
+
+/**
+ * Read the narration for emotional beats and place sound effects on them. Uses the planning model chosen for the plan, keeps the
+ * cues clear of graphics (which carry their own sound), and replaces only the sound plan: graphics and their renders are untouched.
+ */
+export async function planEmotionSounds(options: { textConfig: TextModelConfig; workDir: string; plan: MotionPlan; words: BrollWord[]; keepRanges?: BrollKeepRange[] }) {
+  const { plan, workDir } = options;
+  const { cues, notes } = await createEmotionCues({
+    textConfig: options.textConfig, workDir, words: options.words, keepRanges: options.keepRanges, orientation: plan.orientation, density: plan.settings.emotionDensity,
+    choice: { provider: plan.settings.planningProvider, model: plan.settings.planningModel },
+    graphics: plan.scenes.filter((scene) => scene.enabled).map((scene) => ({ start: scene.sourceStart, end: scene.sourceEnd, label: `graphic “${scene.title}”` })),
+  });
+  plan.emotionCues = cues;
+  plan.notes = [...plan.notes.filter((note) => !note.startsWith(SOUND_NOTE)), ...notes.map((note) => `${SOUND_NOTE}${note}`)];
+  await saveMotionPlan(workDir, plan); return plan;
+}
+export async function updateEmotionCue(workDir: string, plan: MotionPlan, cueId: string, patch: EmotionEdit, words: BrollWord[]) {
+  const cues = plan.emotionCues ?? []; const index = cues.findIndex((cue) => cue.id === cueId); if (index < 0) throw new Error('Sound cue not found');
+  cues[index] = editEmotionCue(cues[index], patch, words); plan.emotionCues = cues.sort((a, b) => a.sourceTime - b.sourceTime);
+  await saveMotionPlan(workDir, plan); return cues.find((cue) => cue.id === cueId)!;
+}
+export async function addEmotionCue(workDir: string, plan: MotionPlan, input: { emotion?: string; soundId?: string; intensity?: string; sourceTime: number }, words: BrollWord[]) {
+  const cues = plan.emotionCues ?? []; if (cues.length >= 60) throw new Error('A project can have at most 60 emotion sound cues');
+  const cue = newEmotionCue(input, words); plan.emotionCues = [...cues, cue].sort((a, b) => a.sourceTime - b.sourceTime);
+  await saveMotionPlan(workDir, plan); return cue;
+}
+export async function deleteEmotionCue(workDir: string, plan: MotionPlan, cueId: string) {
+  const cues = plan.emotionCues ?? []; if (!cues.some((cue) => cue.id === cueId)) throw new Error('Sound cue not found');
+  plan.emotionCues = cues.filter((cue) => cue.id !== cueId); await saveMotionPlan(workDir, plan); return plan;
+}
+
 const CODE_SCHEMA = { type: 'object', additionalProperties: false, required: ['code'], properties: { code: { type: 'string' } } };
 
 function sceneDimensions(plan: MotionPlan) { return plan.orientation === 'portrait' ? { width: 1080, height: 1920 } : { width: 1920, height: 1080 }; }
@@ -295,7 +379,7 @@ function designSystemPrompt(plan: MotionPlan, scene: MotionScene, template: { na
     ? `VERTICAL 9:16 safe area: keep all essential content between x=${Math.round(width * 0.07)}..${Math.round(width * 0.93)} and y=${Math.round(height * 0.1)}..${Math.round(height * 0.78)}. The bottom ~22% is reserved for platform UI and burned-in captions. The presenter's face is usually in the upper-middle third.`
     : `LANDSCAPE 16:9 safe area: keep essential content inside a ${Math.round(width * 0.06)}px margin on all sides; lower-third graphics sit in y=${Math.round(height * 0.62)}..${Math.round(height * 0.9)}.`;
   const placementRule = { top: 'Anchor the composition to the TOP third.', center: 'Centre the composition in the frame.', bottom: 'Anchor the composition to the lower part of the safe area (above the caption zone).', full: 'Use the whole safe area with a large, confident composition.' }[scene.placement];
-  return `You are a senior motion designer writing ONE Remotion (React) component that renders a broadcast-quality animated overlay. It is composited over a live presenter, so the background must stay TRANSPARENT.\n\nCANVAS: ${width}×${height}px, ${fps} fps, ${frames} frames (${seconds}s). ${safe} ${placementRule}\n\nFILE CONTRACT (strict)\n- A single TSX file. \`export default function Scene(props)\` — a React function component. Props (already provided, never hard-code the text): ${JSON.stringify(sceneProps(plan, scene))}\n  - headline: string, subhead: string, items: {label:string; value:string}[], accentColor: hex, baseColor: hex, placement: string.\n  - Render whatever fields are non-empty; tolerate empty subhead/items. Do NOT hard-code copy so text edits re-render without regenerating.\n- Allowed imports ONLY: react, remotion, @remotion/shapes, @remotion/paths, @remotion/noise. Nothing else. No images, no network, no fonts to download, no CSS @import, no external URLs.\n- Use remotion APIs: useCurrentFrame, useVideoConfig, interpolate, spring, Easing, AbsoluteFill, Sequence. Derive ALL motion from the frame number (deterministic). Never use Math.random, Date, setTimeout, CSS transitions or CSS keyframe animations. For randomness use \`random(seed)\` from remotion.\n- Root element: <AbsoluteFill> with NO background colour (transparent). Draw only the graphic itself.\n- Fonts: system stack only — fontFamily: "Poppins, Montserrat, Inter, 'SF Pro Display', -apple-system, 'Noto Sans Malayalam', 'Malayalam Sangam MN', 'Helvetica Neue', Arial, sans-serif". Use font weights 600–900 for headlines, tabular-nums for counters.\n\nPROFESSIONAL DESIGN BAR\n- Timeline: entrance 0–0.7s, hold, exit in the final 0.5s so the last frame is fully transparent. Everything that enters must also leave.\n- Motion: springs with damping ≈ 12–20 for entrances, Easing.bezier(0.16,1,0.3,1) or Easing.out(Easing.cubic) for wipes; stagger related elements 3–6 frames apart; animate opacity, translate, scale and clip/mask reveals together. Numbers count up with an ease-out. Lines and rings draw with stroke-dashoffset. Never let elements pop in without easing.\n- Hierarchy: one dominant element (large, high contrast), one supporting line, everything else subordinate. Headline size ≈ ${portrait ? '84–120px' : '72–104px'}, subhead ≈ ${portrait ? '40–52px' : '34–44px'}. Minimum text size ${portrait ? 40 : 32}px so it is legible on a phone.\n- Look: modern, premium, restrained. Solid or softly gradient cards (baseColor with 88–95% opacity), generous padding, 24–36px radius, subtle 1px inner highlight, layered soft shadows (0 20px 60px rgba(0,0,0,.35)), accentColor used sparingly for emphasis bars, underlines, numbers and icons. Ensure text contrast ≥ 4.5:1 on its own card. No neon clutter, no clip-art, no emoji, no drop-shadow text glow.\n- Build icons/illustrations from simple SVG shapes (paths, circles, rounded rects). Keep them geometric and clean.\n- Layout must never overflow the safe area; measure long text conservatively (wrap with maxWidth, clamp line count), and scale down gracefully if items are many.\n- Performance: no heavy filters (avoid blur > 20px, avoid huge box-shadows on many elements), keep DOM small.\n\n${templateSection(template, scene.graphicType)}\nGRAPHIC TYPE: ${scene.graphicType}\nDESIGN BRIEF: ${scene.designBrief}\nNARRATION IT ACCOMPANIES: "${scene.narration}"\n${plan.settings.styleNotes ? `HOUSE STYLE: ${plan.settings.styleNotes}\n` : ''}\nReturn ONLY JSON {"code": "<the full TSX source>"}.`;
+  return `SOUND CUES (mixed by the renderer; do not add Audio components): ${JSON.stringify(scene.soundEffects ?? [])}. Align visual entrances, reveals and impacts to these scene-relative seconds.\n\nYou are a senior motion designer writing ONE Remotion (React) component that renders a broadcast-quality animated overlay. It is composited over a live presenter, so the background must stay TRANSPARENT.\n\nCANVAS: ${width}×${height}px, ${fps} fps, ${frames} frames (${seconds}s). ${safe} ${placementRule}\n\nFILE CONTRACT (strict)\n- A single TSX file. \`export default function Scene(props)\` — a React function component. Props (already provided, never hard-code the text): ${JSON.stringify(sceneProps(plan, scene))}\n  - headline: string, subhead: string, items: {label:string; value:string}[], accentColor: hex, baseColor: hex, placement: string.\n  - Render whatever fields are non-empty; tolerate empty subhead/items. Do NOT hard-code copy so text edits re-render without regenerating.\n- Allowed imports ONLY: react, remotion, @remotion/shapes, @remotion/paths, @remotion/noise. Nothing else. No images, no network, no fonts to download, no CSS @import, no external URLs.\n- Use remotion APIs: useCurrentFrame, useVideoConfig, interpolate, spring, Easing, AbsoluteFill, Sequence. Derive ALL motion from the frame number (deterministic). Never use Math.random, Date, setTimeout, CSS transitions or CSS keyframe animations. For randomness use \`random(seed)\` from remotion.\n- Root element: <AbsoluteFill> with NO background colour (transparent). Draw only the graphic itself.\n- Fonts: system stack only — fontFamily: "Poppins, Montserrat, Inter, 'SF Pro Display', -apple-system, 'Noto Sans Malayalam', 'Malayalam Sangam MN', 'Helvetica Neue', Arial, sans-serif". Use font weights 600–900 for headlines, tabular-nums for counters.\n\nPROFESSIONAL DESIGN BAR\n- Timeline: entrance 0–0.7s, hold, exit in the final 0.5s so the last frame is fully transparent. Everything that enters must also leave.\n- Motion: springs with damping ≈ 12–20 for entrances, Easing.bezier(0.16,1,0.3,1) or Easing.out(Easing.cubic) for wipes; stagger related elements 3–6 frames apart; animate opacity, translate, scale and clip/mask reveals together. Numbers count up with an ease-out. Lines and rings draw with stroke-dashoffset. Never let elements pop in without easing.\n- Hierarchy: one dominant element (large, high contrast), one supporting line, everything else subordinate. Headline size ≈ ${portrait ? '84–120px' : '72–104px'}, subhead ≈ ${portrait ? '40–52px' : '34–44px'}. Minimum text size ${portrait ? 40 : 32}px so it is legible on a phone.\n- Look: modern, premium, restrained. Solid or softly gradient cards (baseColor with 88–95% opacity), generous padding, 24–36px radius, subtle 1px inner highlight, layered soft shadows (0 20px 60px rgba(0,0,0,.35)), accentColor used sparingly for emphasis bars, underlines, numbers and icons. Ensure text contrast ≥ 4.5:1 on its own card. No neon clutter, no clip-art, no emoji, no drop-shadow text glow.\n- Build icons/illustrations from simple SVG shapes (paths, circles, rounded rects). Keep them geometric and clean.\n- Layout must never overflow the safe area; measure long text conservatively (wrap with maxWidth, clamp line count), and scale down gracefully if items are many.\n- Performance: no heavy filters (avoid blur > 20px, avoid huge box-shadows on many elements), keep DOM small.\n\n${templateSection(template, scene.graphicType)}\nGRAPHIC TYPE: ${scene.graphicType}\nDESIGN BRIEF: ${scene.designBrief}\nNARRATION IT ACCOMPANIES: "${scene.narration}"\n${plan.settings.styleNotes ? `HOUSE STYLE: ${plan.settings.styleNotes}\n` : ''}\nReturn ONLY JSON {"code": "<the full TSX source>"}.`;
 }
 
 export async function generateMotionCode(options: { textConfig: TextModelConfig; workDir: string; plan: MotionPlan; scene: MotionScene; previousCode?: string; feedback?: string; comment?: string; signal?: AbortSignal }) {
@@ -343,7 +427,7 @@ export async function generateMotionScene(options: {
       try {
         await renderMotionScene({
           sceneDir: path.join(workDir, 'motion', scene.id), code: scene.code!, props: sceneProps(plan, scene), width, height, fps: 30,
-          durationSeconds: sceneDuration(scene), outputPath, chromeBin: options.chromeBin, ffmpegBin: options.ffmpegBin, signal: options.signal,
+          durationSeconds: sceneDuration(scene), soundEffects: scene.soundEffects, outputPath, chromeBin: options.chromeBin, ffmpegBin: options.ffmpegBin, signal: options.signal,
           onProgress: (fraction) => { scene.renderProgress = fraction; options.onProgress?.(fraction); },
         });
         scene.videoFile = outputPath; scene.renderedAt = new Date().toISOString();

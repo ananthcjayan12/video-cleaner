@@ -11,6 +11,7 @@ const CLAUDE_MODELS: ModelOption[] = [
   { id: 'opus[1m]', label: 'Opus · 1M context' },
   { id: 'claude-fable-5-1', label: 'Claude Fable 5.1 · pinned' },
   { id: 'claude-opus-5-5', label: 'Claude Opus 5.5 · pinned' },
+  { id: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5 · pinned' },
   { id: 'claude-sonnet-5', label: 'Claude Sonnet 5 · pinned' },
   { id: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5 · pinned' },
 ];

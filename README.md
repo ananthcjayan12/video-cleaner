@@ -286,3 +286,86 @@ They are applied at every stage:
 - **Thumbnails** — the same visual policy is added to the thumbnail prompt.
 
 The scan is a keyword safety net, not a guarantee of approval. Enable Meta's AI-generated label for posts that use generated B-roll.
+
+### Motion graphic sound effects
+
+New motion plans select 1–3 effects from the supplied VideoEditingSFX Free Pack
+for each graphic. The planner uses UI sounds for text and cards, whooshes for
+movement, impacts for emphasis, camera FX for photo moments, and risers,
+buildups, reverse and cinematic sounds where the edit calls for them. It chooses
+scene-relative cue times and restrained volume; the animation generator receives
+those times to align the visual reveals.
+Open **Sound effects** on a graphic to preview, replace, add or remove cues and
+adjust timing/volume. Save and render again to apply changes. Remove every cue
+for a silent graphic. Existing plans remain unchanged; add cues manually or
+re-plan to get automatic selections.
+
+Audio is embedded in the transparent WebM and included in editor playback and
+MP4 export. Moving, trimming, changing speed or muting the graphic affects its
+sound too. The default gain is -16 dB, bounded to -30…-6 dB, with at most three
+cues per graphic. No runtime download or sound-service account is required.
+
+Assets come from the supplied `VideoEditingSFX - Free Pack.zip`. The original
+MP3/WAV files are preserved under `assets/motion-sfx/` and grouped as Whoosh &
+Transitions, Camera FX, Impacts, Risers, Reverse FX, UI, Buildups and Cinematic.
+The manifest records duration, sample rate and SHA-256 for each file, plus
+peak time, peak level, loudness and brightness measured by
+`node scripts/analyze-motion-sfx.mjs` (needs `ffmpeg`; re-run it if you add
+files). Keep `assets/` beside `dist-server/` when packaging the server; the
+runtime reads the local manifest.
+
+### Emotion sound design
+
+Sound effects are not limited to graphics. The **Emotion sound design** section
+of the Motion graphics panel asks the planning model to read the narration like
+an editor and put an effect on the exact word that carries each feeling:
+
+| Feeling | What the AI listens for | Typical sounds |
+| --- | --- | --- |
+| Shock | jaw-drop fact, twist, myth-buster | sharp impacts, glass hit, boom |
+| Suspense | "but here is the catch", a reveal being set up | build-ups, risers, reverse swells |
+| Sadness | pain, loss, regret | low deep hits, falling tones, dark swells |
+| Joy | good news, a win, transformation | success chimes, achievement whoosh |
+| Insight | the "aha", the key tip | chime, notification, camera flash |
+| Warning | danger, a costly mistake | heavy hits, ominous thump |
+| Emphasis | a number or punchline | short hits, pops, sharp swooshes |
+| Transition | "now", "next", a new step | whooshes, swipes |
+| Humor | a light or awkward beat | pops and boops |
+| Relief | "the good news is", reassurance | soft, settling tones |
+
+How it stays professional rather than noisy:
+
+- **Restraint.** The *How many* setting caps the beats (Subtle ≈ 2–3 a minute,
+  Balanced ≈ 5, Expressive ≈ 9). Cues need 2 s of room, never repeat the same
+  sound back to back, and only the strongest survive if the model over-marks.
+- **On the word.** Each cue is anchored to one spoken word. Every sound is
+  trimmed around its measured loudest moment so that peak lands on the word:
+  impacts start on it, whooshes just before it, build-ups run up to it (a
+  sound that builds needs room before the word; if the word is at the very
+  start, the head of the sound is trimmed instead).
+- **Stingers.** For the biggest twist the model may pair one build-up with one
+  hit on the same word.
+- **Leveled.** The pack varies by about 35 dB in loudness, so each sound is
+  scaled to a target level for its feeling, then nudged by *Strength*
+  (soft −5 dB, medium, strong +4 dB). Fine-tune volume per clip in the editor.
+- **No clashes.** Cues are kept out of motion graphics, which carry their own
+  sound. Re-planning graphics keeps your sound cues (any that now fall inside a
+  new graphic are removed, with a note).
+- **Palettes.** A cue can only use sounds from its feeling's palette when the AI
+  plans it (defined in `server/emotion-sfx.ts`). The pack has no dedicated
+  crying, laughter or applause sounds, so the palettes were curated from file
+  names plus measured brightness and pitch movement rather than by ear — audition
+  them with the preview player and swap any sound. When you pick a sound by hand
+  the whole library is available.
+
+**Plan emotion sounds** works before any graphic exists and never touches
+graphics or their renders. Planning graphics also plans sounds the first time
+(untick *Also plan emotion sounds when planning graphics* to skip that). Each cue can be changed (feeling, sound,
+strength, time), switched off, deleted, or added by hand at any time in the
+video.
+
+Each cue becomes its own audio track (`SFX · Shock · Impact Hit`) below the
+talking head in the Live editor, so it can be moved, trimmed, muted or deleted
+there, and it is mixed into the MP4 export. Changing a cue in the panel
+replaces that clip's position and volume; otherwise your timeline edits are
+kept. No rendering is needed.

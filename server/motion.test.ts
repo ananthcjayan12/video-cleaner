@@ -6,7 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 import type { BrollWord } from './broll.js';
 import { buildEditorRender, type EditorTimeline } from './editor-render.js';
-import { normalizeMotionSettings, updateMotionScene, validatePlan, type MotionPlan, type MotionScene } from './motion.js';
+import { defaultMotionSounds, normalizeMotionSettings, updateMotionScene, validatePlan, type MotionPlan, type MotionScene } from './motion.js';
 import { validateMotionCode } from './motion-render.js';
 import type { Project } from './project-store.js';
 
@@ -195,4 +195,40 @@ test('changing a graphic template clears its generated code so the next render r
     const edited = await updateMotionScene(dir, plan, 'motion-001', { templateId: 'abc123' }, null);
     assert.equal(edited.templateId, 'abc123'); assert.equal(edited.code, undefined);
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('planner retains library choices and rejects invented or out-of-window sound cues', () => {
+  const soundEffects = [{ soundId: 'ui-chime', time: 0.5, gainDb: -16 }];
+  const result = validatePlan(words, undefined, {scenes: [candidate(0, 7, {soundEffects})]}, settings, [], 1);
+  assert.deepEqual(result.scenes[0].soundEffects, soundEffects);
+  for (const cues of [[{soundId:'unknown',time:0,gainDb:-16}], [{soundId:'ui-chime',time:99,gainDb:-16}], []]) {
+    assert.throws(() => validatePlan(words, undefined, {scenes:[candidate(0,7,{soundEffects:cues})]}, settings, [], 1), /sound cues/);
+  }
+});
+
+test('every motion graphic type receives a useful click, whoosh or chime fallback', () => {
+  const types = ['lower-third', 'stat-callout', 'kinetic-title', 'animated-chart', 'process-steps', 'comparison', 'checklist', 'quote-card', 'timeline', 'icon-diagram'] as const;
+  for (const type of types) {
+    const cues = defaultMotionSounds(type, 3);
+    assert.ok(cues.length >= 1, `${type} should have a sound cue`);
+    assert.ok(cues.every((cue) => cue.time >= 0 && cue.time < 3));
+  }
+  const ids = new Set(types.flatMap((type) => defaultMotionSounds(type, 3).map((cue) => cue.soundId)));
+  assert.ok(ids.has('ui-click-button'));
+  assert.ok(ids.has('ui-chime'));
+  assert.ok([...ids].some((id) => id.includes('whoosh')));
+});
+
+test('sound edits persist and invalidate rendered graphics; empty cues explicitly mute', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'motion-cues-'));
+  try {
+    const scene = validatePlan(words, undefined, {scenes:[candidate(0,7)]}, settings, [], 1).scenes[0];
+    scene.status = 'ready'; scene.videoFile = '/graphic.webm'; scene.code = GOOD_CODE;
+    const plan: MotionPlan = {version:1,orientation:'portrait',settings,scenes:[scene],notes:[]};
+    await updateMotionScene(dir,plan,scene.id,{soundEffects:[]},null);
+    assert.deepEqual(scene.soundEffects,[]);
+    assert.equal(scene.status,'none');
+    assert.equal(scene.code,undefined);
+    assert.deepEqual(JSON.parse(await fs.readFile(path.join(dir,'motion-plan.json'),'utf8')).scenes[0].soundEffects,[]);
+  } finally { await fs.rm(dir,{recursive:true,force:true}); }
 });

@@ -14,7 +14,7 @@ function run(bin: string, args: string[]) {
   assert.equal(result.status, 0, result.stderr || result.stdout);
   return result.stdout;
 }
-function probe(file: string) {
+async function probe(file: string) {
   const raw = JSON.parse(run('ffprobe', ['-v', 'error', '-show_streams', '-show_format', '-of', 'json', file]));
   const video = raw.streams.find((stream: any) => stream.codec_type === 'video');
   const audio = raw.streams.find((stream: any) => stream.codec_type === 'audio');

@@ -1,5 +1,5 @@
 import type { CJCutClip, CJCutProject, CJCutTrack } from '@cjcut/editor';
-import { api, type BrollDisplayTemplate, type BrollPlan, type BrollScene, type Edl, type MotionPlan, type MotionScene, type Project, type Word } from './api';
+import { api, type BrollDisplayTemplate, type BrollPlan, type BrollScene, type Edl, type EmotionCue, type MotionPlan, type MotionScene, type Project, type Word } from './api';
 
 type TimelineSegment = { sourceStart: number; sourceEnd: number; timelineStart: number; timelineEnd: number };
 
@@ -66,6 +66,24 @@ function layoutTransform(layout: BrollDisplayTemplate | undefined) {
 }
 
 export const usableMotion = (scene: MotionScene) => scene.enabled && scene.status === 'ready' && Boolean(scene.videoFile);
+
+const EMOTION_TRACK_PREFIX = 'vc-emotion-track-';
+/** Changes to any of these in the planner panel replace the clip's timeline position and volume; the rest of the timeline edits are kept. */
+const cueSignature = (cue: EmotionCue) => `${cue.emotion}|${cue.soundId}|${cue.intensity}|${cue.sourceTime}`;
+
+/**
+ * Where a cue's clip sits so the sound's loudest moment lands on `hit`. Sounds that build up need room before the word; when the word is
+ * too early for that, the start of the sound is trimmed rather than pushed later. Returns null when nothing audible would remain.
+ */
+export function emotionClipGeometry(cue: EmotionCue, hit: number, limit: number) {
+  const { clip } = cue;
+  let start = hit - clip.lead; let sourceStart = clip.sourceOffset; let duration = clip.duration;
+  if (start < 0) { sourceStart -= start; duration += start; start = 0; }
+  const room = limit - start; const cutAtEnd = duration > room + 0.001;
+  duration = Math.min(duration, room);
+  if (duration < 0.1) return null;
+  return { start, sourceStart, duration, fadeIn: sourceStart > clip.sourceOffset + 0.001 ? Math.max(clip.fadeIn, 0.05) : clip.fadeIn, fadeOut: cutAtEnd ? Math.max(clip.fadeOut, 0.15) : clip.fadeOut };
+}
 
 export function freshProject(project: Project, words: Word[], edl: Edl | null, broll: BrollPlan | null, motion: MotionPlan | null): CJCutProject {
   const width = project.media.width || 1080;
@@ -198,8 +216,40 @@ export function freshProject(project: Project, words: Word[], edl: Edl | null, b
         duration: clipDuration,
         sourceStart: 0,
         sourceDuration: Math.max(clipDuration, scene.sourceEnd - scene.sourceStart),
-        x: 50, y: 50, scale: 1, rotation: 0, opacity: 1, volume: 0, speed: 1,
-        metadata: { managed: true, motionId: scene.id, assetVersion: scene.renderedAt || '' },
+        x: 50, y: 50, scale: 1, rotation: 0, opacity: 1, volume: 1, speed: 1,
+        metadata: { managed: true, motionId: scene.id, assetVersion: scene.renderedAt || '', motionAudio: true },
+      }],
+    });
+  }
+
+  // Emotion sound effects: one audio track per cue, below the picture, so each can be moved, muted or deleted on its own.
+  const emotionTracks: CJCutTrack[] = [];
+  for (const cue of motion?.emotionCues ?? []) {
+    if (!cue.enabled || (useCleaned && !segments.some((segment) => cue.sourceTime >= segment.sourceStart - 0.001 && cue.sourceTime <= segment.sourceEnd + 0.001))) continue;
+    const placement = emotionClipGeometry(cue, useCleaned ? sourceToTimeline(cue.sourceTime, segments) : cue.sourceTime, duration);
+    if (!placement) continue;
+    emotionTracks.push({
+      id: `${EMOTION_TRACK_PREFIX}${cue.id}`,
+      externalId: cue.id,
+      role: 'audio',
+      name: `SFX · ${cue.clip.label}`,
+      type: 'audio',
+      visible: true,
+      locked: false,
+      volume: 1,
+      muted: false,
+      clips: [{
+        id: `vc-emotion-${cue.id}`,
+        externalId: cue.id,
+        role: 'audio',
+        trackId: `${EMOTION_TRACK_PREFIX}${cue.id}`,
+        type: 'audio',
+        name: cue.clip.label,
+        url: api.motionSoundUrl(cue.soundId),
+        ...placement,
+        sourceDuration: cue.clip.soundDuration,
+        x: 50, y: 50, scale: 1, rotation: 0, opacity: 1, volume: cue.clip.volume, speed: 1,
+        metadata: { managed: true, emotionCueId: cue.id, sfxSoundId: cue.soundId, emotion: cue.emotion, cueSignature: cueSignature(cue) },
       }],
     });
   }
@@ -210,7 +260,7 @@ export function freshProject(project: Project, words: Word[], edl: Edl | null, b
     height,
     fps,
     duration: Math.max(duration, ...[...motionTracks, ...brollTracks].flatMap((track) => track.clips.map((clip) => clip.start + clip.duration)), 1),
-    tracks: [...motionTracks, ...brollTracks, baseTrack],
+    tracks: [...motionTracks, ...brollTracks, baseTrack, ...emotionTracks],
   };
 }
 
@@ -227,13 +277,20 @@ export function reconcileSaved(saved: CJCutProject | null, fresh: CJCutProject, 
   const suppressed = new Set(saved.suppressedManagedTrackIds ?? []);
 
   const refreshClip = (clip: CJCutClip, trackId: string): CJCutClip | null => {
-    if (!clip.externalId || clip.role === 'imported') return { ...clone(clip), trackId };
+    if (!clip.externalId || typeof clip.metadata?.editorMediaId === 'string') return { ...clone(clip), trackId };
+    if (typeof clip.metadata?.emotionCueId === 'string') {
+      const current = freshClipsByExternal.get(clip.externalId);
+      if (!current) return null;
+      // A change made in the planner panel wins over an older position; otherwise the editor's own trims, moves and volume are kept.
+      const edited = clip.metadata.cueSignature !== current.metadata?.cueSignature;
+      return { ...clone(edited ? current : clip), trackId, type: 'audio', name: current.name, url: current.url, sourceDuration: current.sourceDuration, metadata: current.metadata };
+    }
     if (typeof clip.metadata?.motionId === 'string') {
       const graphic = motionById.get(clip.metadata.motionId);
       if (!graphic || !usableMotion(graphic)) return null;
       return {
-        ...clone(clip), trackId, type: 'video', url: api.motionVideoUrl(projectId, graphic.id, graphic.renderedAt),
-        metadata: { ...clip.metadata, assetVersion: graphic.renderedAt || '' },
+        ...clone(clip), trackId, type: 'video', volume: clip.metadata?.motionAudio ? clip.volume : 1, url: api.motionVideoUrl(projectId, graphic.id, graphic.renderedAt),
+        metadata: { ...clip.metadata, assetVersion: graphic.renderedAt || '', motionAudio: true },
       };
     }
     if (clip.role === 'broll') {

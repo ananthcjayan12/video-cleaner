@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { api, type ModelOption, type MotionGraphicType, type MotionPlacement, type MotionPlan, type MotionScene, type MotionSettings, type MotionTemplate, type SystemStatus, type TextProvider } from './api';
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
+import { api, type Emotion, type EmotionCue, type EmotionCuePatch, type EmotionDensity, type EmotionId, type ModelOption, type MotionGraphicType, type MotionPlacement, type MotionPlan, type MotionScene, type MotionSettings, type MotionTemplate, type MotionSound, type MotionSoundCue, type SoundIntensity, type SystemStatus, type TextProvider } from './api';
 import ModelPicker, { textProviderConfigured } from './ModelPicker';
 import './motion.css';
 
@@ -12,17 +12,19 @@ const PLACEMENTS: Array<{ id: MotionPlacement; label: string }> = [{ id: 'top', 
 
 const DEFAULT_SETTINGS: MotionSettings = {
   planningProvider: 'claude-cli', planningModel: '', countMode: 'auto', targetCount: 4, perMinute: 2, minDuration: 2.5, maxDuration: 5,
-  accentColor: '#22D3EE', secondaryColor: '#0F172A', styleNotes: '',
+  accentColor: '#22D3EE', secondaryColor: '#0F172A', styleNotes: '', emotionSounds: true, emotionDensity: 'balanced',
 };
+const DENSITIES: Array<{ id: EmotionDensity; label: string }> = [{ id: 'subtle', label: 'Subtle · about 2–3 a minute' }, { id: 'balanced', label: 'Balanced · about 5 a minute' }, { id: 'expressive', label: 'Expressive · about 9 a minute' }];
+const INTENSITIES: Array<{ id: SoundIntensity; label: string }> = [{ id: 'soft', label: 'Soft' }, { id: 'medium', label: 'Medium' }, { id: 'strong', label: 'Strong' }];
 
-type Draft = { templateId: string; title: string; graphicType: MotionGraphicType; placement: MotionPlacement; headline: string; subhead: string; items: string; designBrief: string; sourceStart: string; sourceEnd: string };
+type Draft = { soundEffects: MotionSoundCue[]; templateId: string; title: string; graphicType: MotionGraphicType; placement: MotionPlacement; headline: string; subhead: string; items: string; designBrief: string; sourceStart: string; sourceEnd: string };
 
 const itemsToText = (scene: MotionScene) => scene.content.items.map((item) => item.value ? `${item.label} | ${item.value}` : item.label).join('\n');
 const textToItems = (text: string) => text.split('\n').map((line) => line.trim()).filter(Boolean).slice(0, 6).map((line) => {
   const [label, ...rest] = line.split('|'); return { label: label.trim(), value: rest.join('|').trim() };
 });
 const draftOf = (scene: MotionScene): Draft => ({
-  templateId: scene.templateId ?? '', title: scene.title, graphicType: scene.graphicType, placement: scene.placement, headline: scene.content.headline, subhead: scene.content.subhead,
+  soundEffects: scene.soundEffects ?? [], templateId: scene.templateId ?? '', title: scene.title, graphicType: scene.graphicType, placement: scene.placement, headline: scene.content.headline, subhead: scene.content.subhead,
   items: itemsToText(scene), designBrief: scene.designBrief, sourceStart: scene.sourceStart.toFixed(2), sourceEnd: scene.sourceEnd.toFixed(2),
 });
 const clock = (seconds: number) => `${Math.floor(seconds / 60)}:${(seconds % 60).toFixed(1).padStart(4, '0')}`;
@@ -54,6 +56,10 @@ export default function MotionGraphics(props: Props) {
   const [planning, setPlanning] = useState(false);
   const [batchRunning, setBatchRunning] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const [sounds, setSounds] = useState<MotionSound[]>([]);
+  const [emotions, setEmotions] = useState<Emotion[]>([]);
+  const [planningSounds, setPlanningSounds] = useState(false);
+  const [newCue, setNewCue] = useState<{ emotion: EmotionId; time: string }>({ emotion: 'shock', time: '' });
   const [templates, setTemplates] = useState<MotionTemplate[]>([]);
   const [uploading, setUploading] = useState(false);
   const [templateName, setTemplateName] = useState('');
@@ -72,6 +78,7 @@ export default function MotionGraphics(props: Props) {
     return () => { active = false; };
   }, [projectId, adopt]);
 
+  useEffect(() => { void api.motionSounds().then(result => { setSounds(result.sounds); setEmotions(result.emotions); }).catch(error => onError(message(error))); }, []);
   useEffect(() => { void api.motionTemplates().then((result) => setTemplates(result.templates)).catch((error) => onError(message(error))); }, []);
 
   async function uploadTemplate(file: File | undefined) {
@@ -98,7 +105,7 @@ export default function MotionGraphics(props: Props) {
     return () => window.clearInterval(timer);
   }, [anyRendering, projectId]);
 
-  const busy = planning || batchRunning || locked;
+  const busy = planning || planningSounds || batchRunning || locked;
   const designReady = textProviderConfigured(system, settings.planningProvider);
   const planningReady = designReady && Boolean(system?.elevenLabs.configured);
   const browser = system?.motionGraphics?.browserPath;
@@ -110,17 +117,42 @@ export default function MotionGraphics(props: Props) {
 
   async function planMotion() {
     if (busy) return;
-    if (plan && !window.confirm('Re-planning replaces the current motion-graphics plan and deletes its rendered clips. Continue?')) return;
+    if (plan?.scenes.length && !window.confirm('Re-planning replaces the current motion-graphics plan and deletes its rendered clips. Your emotion sound cues are kept. Continue?')) return;
     try {
-      setPlanning(true); onError(''); onStatus(`${settings.planningProvider} is planning motion graphics around your B-roll and will repair timing or validation issues…`);
+      setPlanning(true); onError(''); onStatus(`${settings.planningProvider} is planning motion graphics around your B-roll${settings.emotionSounds && !plan?.emotionCues?.length ? ', then reading the narration for emotional beats' : ''}…`);
       const next = await api.planMotion(projectId, { ...settings }); adopt(next); onStatus(`Planned ${next.scenes.length} motion graphic${next.scenes.length === 1 ? '' : 's'} ✓`);
     } catch (error) { onError(message(error)); } finally { setPlanning(false); }
+  }
+
+  const cues = plan?.emotionCues ?? [];
+  const byTime = (a: EmotionCue, b: EmotionCue) => a.sourceTime - b.sourceTime;
+  async function planEmotionSounds() {
+    if (busy) return;
+    if (cues.length && !window.confirm('Re-planning replaces every emotion sound cue, including ones you edited. Motion graphics are not affected. Continue?')) return;
+    try {
+      setPlanningSounds(true); onError(''); onStatus(`${settings.planningProvider} is reading the narration for shocking, sad and happy beats…`);
+      const next = await api.planEmotionSounds(projectId, { ...settings }); adopt(next);
+      const count = next.emotionCues?.length ?? 0; onStatus(count ? `Placed ${count} emotion sound${count === 1 ? '' : 's'} ✓ — they are on their own tracks in the Live editor` : 'No strong emotional beats found — see the notes');
+    } catch (error) { onError(message(error)); } finally { setPlanningSounds(false); }
+  }
+  async function patchCue(cue: EmotionCue, patch: EmotionCuePatch) {
+    try { onError(''); const updated = await api.updateEmotionCue(projectId, cue.id, patch); setPlan((current) => current ? { ...current, emotionCues: (current.emotionCues ?? []).map((item) => item.id === updated.id ? updated : item).sort(byTime) } : current); }
+    catch (error) { onError(message(error)); }
+  }
+  async function removeCue(cue: EmotionCue) {
+    try { onError(''); const next = await api.deleteEmotionCue(projectId, cue.id); setPlan((current) => current ? { ...current, emotionCues: next.emotionCues ?? [] } : next); } catch (error) { onError(message(error)); }
+  }
+  async function addCue() {
+    const time = Number(newCue.time);
+    if (!newCue.time.trim() || !Number.isFinite(time) || time < 0) { onError('Enter the time in the video (seconds) where the sound should land.'); return; }
+    try { onError(''); const created = await api.addEmotionCue(projectId, { emotion: newCue.emotion, sourceTime: time }); setPlan((current) => current ? { ...current, emotionCues: [...(current.emotionCues ?? []), created].sort(byTime) } : current); setNewCue({ ...newCue, time: '' }); }
+    catch (error) { onError(message(error)); }
   }
 
   async function saveScene(scene: MotionScene) {
     const draft = draftsRef.current[scene.id]; if (!draft) return scene;
     const patch = {
-      templateId: draft.templateId || null, title: draft.title, graphicType: draft.graphicType, placement: draft.placement, headline: draft.headline, subhead: draft.subhead,
+      soundEffects: draft.soundEffects, templateId: draft.templateId || null, title: draft.title, graphicType: draft.graphicType, placement: draft.placement, headline: draft.headline, subhead: draft.subhead,
       items: textToItems(draft.items), designBrief: draft.designBrief, sourceStart: Number(draft.sourceStart), sourceEnd: Number(draft.sourceEnd),
     };
     const unchanged = JSON.stringify(draftOf(scene)) === JSON.stringify(draft); if (unchanged) return scene;
@@ -181,6 +213,51 @@ export default function MotionGraphics(props: Props) {
   const ready = plan?.scenes.filter((scene) => scene.status === 'ready').length ?? 0;
   const enabledScenes = plan?.scenes.filter((scene) => scene.enabled).length ?? 0;
 
+  const emotionById = new Map(emotions.map((emotion) => [emotion.id, emotion]));
+  const soundOptions = (emotion: Emotion | undefined) => {
+    const suggested = new Set(emotion?.sounds ?? []);
+    return <>
+      {emotion && <optgroup label={`Suggested for ${emotion.label}`}>{emotion.sounds.map((id) => sounds.find((sound) => sound.id === id)).filter((sound): sound is MotionSound => Boolean(sound)).map((sound) => <option key={sound.id} value={sound.id}>{sound.label} · {sound.duration.toFixed(1)}s</option>)}</optgroup>}
+      {Array.from(new Set(sounds.map((sound) => sound.category))).map((category) => <optgroup key={category} label={category}>{sounds.filter((sound) => sound.category === category && !suggested.has(sound.id)).map((sound) => <option key={sound.id} value={sound.id}>{sound.label} · {sound.duration.toFixed(1)}s</option>)}</optgroup>)}
+    </>;
+  };
+  const emotionSection = <div className="emotionPanel">
+    <div className="emotionHead">
+      <div><span className="label">EMOTION SOUND DESIGN</span><h4>Sound effects that follow the feeling of each sentence</h4></div>
+      <button className="primary" onClick={() => void planEmotionSounds()} disabled={busy || !planningReady}>{planningSounds ? 'Reading the narration…' : cues.length ? 'Re-plan emotion sounds' : 'Plan emotion sounds'}</button>
+    </div>
+    <p className="muted motionIntro">The AI reads the narration like an editor and puts a matching effect on the exact word that carries each feeling — a hit on a shock, a build-up before a reveal, a low fall on something sad, a bright chime on good news. Every cue sits on its own audio track in the Live editor (move, mute or delete it there) and is included in the export. No rendering needed.</p>
+    <div className="emotionControls">
+      <label>How many<select value={settings.emotionDensity} disabled={busy} onChange={(event) => patchSettings({ emotionDensity: event.target.value as EmotionDensity })}>{DENSITIES.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
+      <label className="motionToggle"><input type="checkbox" checked={settings.emotionSounds} disabled={busy} onChange={(event) => patchSettings({ emotionSounds: event.target.checked })} />Also plan emotion sounds when planning graphics</label>
+    </div>
+    <div className="emotionLegend">{emotions.map((emotion) => <span key={emotion.id} className="emotionChip" title={emotion.cue} style={{ '--emotion': emotion.color } as CSSProperties}>{emotion.label}{cues.some((cue) => cue.emotion === emotion.id) ? ` · ${cues.filter((cue) => cue.emotion === emotion.id).length}` : ''}</span>)}</div>
+    {cues.length === 0 ? <p className="muted motionEmpty">{plan ? 'No emotion sounds yet.' : 'No emotion sounds yet — you can plan them before any graphic.'} Click “Plan emotion sounds”, or add one by hand below once a plan exists.</p> : <div className="emotionGrid">{cues.map((cue) => {
+      const emotion = emotionById.get(cue.emotion);
+      return <article key={cue.id} className={`emotionCue ${cue.enabled ? '' : 'disabled'}`} style={{ '--emotion': emotion?.color ?? '#94a3b8' } as CSSProperties}>
+        <header><span className="emotionChip">{emotion?.label ?? cue.emotion}</span><span className="emotionTime">lands at {clock(cue.sourceTime)}</span>
+          <label className="motionToggle"><input type="checkbox" checked={cue.enabled} disabled={busy} onChange={(event) => void patchCue(cue, { enabled: event.target.checked })} />On</label></header>
+        {cue.narration && <blockquote className="motionNarration">“{cue.narration}”</blockquote>}
+        {cue.reason && <p className="emotionReason">{cue.reason}</p>}
+        <div className="motionForm">
+          <label>Feeling<select value={cue.emotion} disabled={busy} onChange={(event) => { const next = emotionById.get(event.target.value as EmotionId); void patchCue(cue, { emotion: event.target.value as EmotionId, ...(next && !next.sounds.includes(cue.soundId) ? { soundId: next.sounds[0] } : {}) }); }}>{emotions.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
+          <label>Strength<select value={cue.intensity} disabled={busy} onChange={(event) => void patchCue(cue, { intensity: event.target.value as SoundIntensity })}>{INTENSITIES.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
+          <label className="motionWide">Sound<select value={cue.soundId} disabled={busy} onChange={(event) => void patchCue(cue, { soundId: event.target.value })}>{soundOptions(emotion)}</select></label>
+          <label>Time (s)<input key={`${cue.id}-${cue.sourceTime}`} inputMode="decimal" defaultValue={cue.sourceTime.toFixed(2)} disabled={busy} onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); }} onBlur={(event) => { const time = Number(event.target.value); if (Number.isFinite(time) && time >= 0 && Math.abs(time - cue.sourceTime) > 0.004) void patchCue(cue, { sourceTime: time }); else event.target.value = cue.sourceTime.toFixed(2); }} /></label>
+        </div>
+        {cue.clip.lead >= 0.3 && <small className="muted">This sound builds for {cue.clip.lead.toFixed(1)}s, so it starts before the word and reaches its peak on it.</small>}
+        <audio controls preload="none" ref={(element) => { if (element) element.volume = cue.clip.volume; }} src={api.motionSoundUrl(cue.soundId)} aria-label={`Preview ${cue.clip.label}`} />
+        <div className="motionActions"><button className="ghost" disabled={busy} onClick={() => void removeCue(cue)}>Delete</button></div>
+      </article>;
+    })}</div>}
+    <div className="emotionAdd">
+      <strong>Add a sound by hand</strong>
+      <select value={newCue.emotion} disabled={busy || !plan} onChange={(event) => setNewCue({ ...newCue, emotion: event.target.value as EmotionId })} aria-label="Feeling">{emotions.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select>
+      <input inputMode="decimal" placeholder="Time in video (s)" value={newCue.time} disabled={busy || !plan} onChange={(event) => setNewCue({ ...newCue, time: event.target.value })} onKeyDown={(event) => { if (event.key === 'Enter') void addCue(); }} aria-label="Time in the video, in seconds" />
+      <button disabled={busy || !plan} onClick={() => void addCue()}>Add sound</button>
+    </div>
+  </div>;
+
   return <section className="panel motionPanel">
     <div className="sectionTitle">
       <div><span className="label">MOTION GRAPHICS · REMOTION</span><h3>Animated overlays planned with your B-roll</h3></div>
@@ -189,7 +266,7 @@ export default function MotionGraphics(props: Props) {
       </div>
     </div>
     <p className="muted motionIntro">
-      The AI picks the moments where a number, list, sequence or key phrase deserves a professional animated graphic, keeps them clear of your {brollPlanned ? 'planned B-roll' : 'B-roll (plan B-roll first for best spacing)'}, then writes a Remotion component per graphic and renders it on a transparent background. {browser ? `Rendering with ${browser.split('/').pop()}.` : 'No Chrome found — Remotion will download a headless browser on the first render.'}
+      The AI picks the moments where a number, list, sequence or key phrase deserves a professional animated graphic, keeps them clear of your {brollPlanned ? 'planned B-roll' : 'B-roll (plan B-roll first for best spacing)'}, selects matching clicks, bells or whooshes from the sound library, then writes a Remotion component per graphic and renders it on a transparent background. {browser ? `Rendering with ${browser.split('/').pop()}.` : 'No Chrome found — Remotion will download a headless browser on the first render.'}
     </p>
     {!brollPlanned && <p className="motionHint">Tip: plan B-roll first. Motion graphics are placed around existing B-roll windows; they will not overlap it, but B-roll planned later cannot see them.</p>}
 
@@ -223,8 +300,10 @@ export default function MotionGraphics(props: Props) {
       </div>
     </div>
 
-    {!loaded ? <p className="muted">Loading motion plan…</p> : !plan ? <p className="muted motionEmpty">No motion graphics yet. Click “Plan motion graphics” — a transcript is required (it is created automatically if missing).</p> : <>
-      {plan.notes.length > 0 && <ul className="motionNotes">{plan.notes.map((note, index) => <li key={index}>{note}</li>)}</ul>}
+    {!loaded ? <p className="muted">Loading motion plan…</p> : <>
+      {emotionSection}
+      {plan && plan.notes.length > 0 && <ul className="motionNotes">{plan.notes.map((note, index) => <li key={index}>{note}</li>)}</ul>}
+      {!plan?.scenes.length ? <p className="muted motionEmpty">{plan ? 'This plan has no motion graphics.' : 'No motion graphics yet.'} Click “Plan motion graphics” — a transcript is required (it is created automatically if missing).</p> : <>
       <div className="motionBatch">
         <span>{ready}/{enabledScenes} rendered</span>
         <button onClick={() => void renderAll(true)} disabled={busy || anyRendering || !enabledScenes}>Render missing</button>
@@ -243,8 +322,19 @@ export default function MotionGraphics(props: Props) {
             <div className="motionMeta"><span>{clock(scene.sourceStart)} → {clock(scene.sourceEnd)} · {(scene.sourceEnd - scene.sourceStart).toFixed(1)}s</span><span className={`motionStatus ${scene.status}`}>{scene.status === 'ready' ? 'Rendered' : scene.status === 'generating' ? `Rendering ${Math.round((scene.renderProgress ?? 0) * 100)}%` : scene.status === 'failed' ? 'Failed' : scene.videoFile ? 'Needs re-render' : 'Not rendered'}</span></div>
             <p className="motionWhy"><strong>{scene.keyPoint}</strong><br />{scene.whyThisGraphicMatters}</p>
             <blockquote className="motionNarration">“{scene.narration}”</blockquote>
-            {scene.videoFile && <div className="motionPreview"><video key={scene.renderedAt} src={api.motionVideoUrl(projectId, scene.id, scene.renderedAt)} controls loop muted playsInline preload="metadata" /></div>}
+            {scene.videoFile && <div className="motionPreview"><video key={scene.renderedAt} src={api.motionVideoUrl(projectId, scene.id, scene.renderedAt)} controls loop playsInline preload="metadata" /></div>}
             {rendering && <div className="progressTrack"><span style={{ width: `${Math.round((scene.renderProgress ?? 0) * 100)}%` }} /></div>}
+            <details className="motionBrief"><summary>Sound effects · {draft.soundEffects.length} cues</summary>
+              <small className="muted">Cues play with the graphic. Time is seconds after it starts. Save changes, then render to hear them.</small>
+              {draft.soundEffects.map((cue, cueIndex) => <div className="motionForm" key={cueIndex}>
+                <label>Sound<select value={cue.soundId} disabled={rendering} onChange={event => edit(scene.id, { soundEffects: draft.soundEffects.map((item, i) => i === cueIndex ? { ...item, soundId: event.target.value } : item) })} onBlur={() => void autosave(scene)}>{Array.from(new Set(sounds.map(sound => sound.category))).map(category => <optgroup key={category} label={category}>{sounds.filter(sound => sound.category === category).map(sound => <option key={sound.id} value={sound.id}>{sound.label} · {sound.duration.toFixed(1)}s</option>)}</optgroup>)}</select></label>
+                <label>Time (s)<input type="number" min="0" max={Math.max(0, scene.sourceEnd - scene.sourceStart - 0.04)} step="0.033333" value={cue.time} disabled={rendering} onChange={event => edit(scene.id, { soundEffects: draft.soundEffects.map((item, i) => i === cueIndex ? { ...item, time: Number(event.target.value) } : item) })} onBlur={() => void autosave(scene)} /></label>
+                <label>Volume (dB)<input type="number" min="-30" max="-6" value={cue.gainDb} disabled={rendering} onChange={event => edit(scene.id, { soundEffects: draft.soundEffects.map((item, i) => i === cueIndex ? { ...item, gainDb: Number(event.target.value) } : item) })} onBlur={() => void autosave(scene)} /></label>
+                <audio controls preload="none" ref={element => { if (element) element.volume = Math.pow(10, cue.gainDb / 20); }} src={api.motionSoundUrl(cue.soundId)} aria-label={`Preview ${cue.soundId}`} style={{ width: '100%' }} />
+                <button disabled={rendering} onClick={() => edit(scene.id, { soundEffects: draft.soundEffects.filter((_, i) => i !== cueIndex) })}>Remove sound</button>
+              </div>)}
+              <div className="motionActions"><button disabled={rendering || draft.soundEffects.length >= 3} onClick={() => edit(scene.id, { soundEffects: [...draft.soundEffects, { soundId: 'ui-pop-sound', time: Math.min(scene.sourceEnd - scene.sourceStart - 0.04, draft.soundEffects.length * 0.5 + 0.1), gainDb: -16 }] })}>Add sound</button><button disabled={rendering} onClick={() => void autosave(scene)}>Save sounds</button></div>
+            </details>
             <div className="motionForm">
               <label>Type<select value={draft.graphicType} disabled={rendering} onChange={(event) => { edit(scene.id, { graphicType: event.target.value as MotionGraphicType }); }} onBlur={() => void autosave(scene)}>{GRAPHIC_TYPES.map((type) => <option key={type.id} value={type.id}>{type.label}</option>)}</select></label>
               <label>Placement<select value={draft.placement} disabled={rendering} onChange={(event) => edit(scene.id, { placement: event.target.value as MotionPlacement })} onBlur={() => void autosave(scene)}>{PLACEMENTS.map((place) => <option key={place.id} value={place.id}>{place.label}</option>)}</select></label>
@@ -267,6 +357,7 @@ export default function MotionGraphics(props: Props) {
           </article>;
         })}
       </div>
+      </>}
     </>}
   </section>;
 }
