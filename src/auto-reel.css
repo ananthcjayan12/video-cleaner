@@ -52,3 +52,24 @@
 .reelItem { display: grid; gap: 2px; text-align: left; padding: 14px 16px; border-radius: 14px; border: 1px solid #232833; background: #121419; color: #f3f4f6; font: inherit; min-height: 56px; }
 .reelItem strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .reelItem small { color: #9aa3b2; }
+.autoSaveStatus { flex-basis: 100%; color: #9aa3b2; }
+
+/* Thumbnail + post caption */
+.pkg { display: grid; gap: 16px; margin-top: 18px; }
+.pkgBlock { display: grid; gap: 10px; }
+.pkgWait { color: #c4cad4; margin: 6px 0 0; }
+.pkgThumb { width: min(100%, 360px); aspect-ratio: 9 / 16; object-fit: cover; border-radius: 16px; background: #000; justify-self: center; }
+.pkgEdit { border: 1px solid #232833; border-radius: 12px; padding: 10px 12px; background: #0f1115; }
+.pkgEdit summary { min-height: 32px; display: flex; align-items: center; color: #c4cad4; cursor: pointer; }
+.pkgEdit[open] { display: grid; gap: 10px; }
+.pkgEdit label { display: grid; gap: 4px; font-size: 13px; color: #9aa3b2; }
+.pkgEdit input, .pkgEdit textarea, .pkgCaption, .pkgTags { width: 100%; box-sizing: border-box; font: inherit; font-size: 16px; padding: 10px 12px; border-radius: 10px; border: 1px solid #2f3542; background: #0b0d10; color: #fff; }
+.pkgCaption, .pkgTags { resize: vertical; line-height: 1.45; }
+.pkgTags { color: #7fe3d6; }
+.pkgEdit button { min-height: 44px; border-radius: 12px; }
+.pkgFrames { display: grid; gap: 6px; font-size: 13px; color: #9aa3b2; }
+.pkgFrames > div { display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px; }
+.pkgFrames button { padding: 0; border: 2px solid transparent; border-radius: 8px; overflow: hidden; background: #000; min-height: 0; }
+.pkgFrames button.on { border-color: #7fe3d6; }
+.pkgFrames img { display: block; width: 100%; aspect-ratio: 9 / 16; object-fit: cover; }
+.pkgMessage { color: #86efac; margin: 0; }

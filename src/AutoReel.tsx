@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { api, isRemote, type AutoJob, type AutoOptions, type Project } from './api';
+import { api, isRemote, type AutoJob, type AutoOptions, type Project, type ReelPackage } from './api';
 import { startDeviceUpload, VIDEO_ACCEPT } from './device-files';
 import { TranscriptReview } from './TranscriptReview';
 import './auto-reel.css';
@@ -13,6 +13,8 @@ export function AutoReelLauncher({ busy, onStarted, onError }: { busy: boolean; 
   const [images, setImages] = useState<AutoOptions['imageProvider']>('gemini');
   const [upload, setUpload] = useState('');
   const [review, setReview] = useState(true);
+  const [thumbnail, setThumbnail] = useState(true);
+  const [postCaption, setPostCaption] = useState(true);
   async function start() {
     const deviceUpload = startDeviceUpload(VIDEO_ACCEPT, true); // several clips allowed; must start inside the tap on phones
     try {
@@ -21,7 +23,7 @@ export function AutoReelLauncher({ busy, onStarted, onError }: { busy: boolean; 
       if (deviceUpload && !uploadIds) { setUpload(''); return; }
       setUpload('Creating project…');
       const project = await api.selectProject(uploadIds ?? undefined, true);
-      await api.startAuto(project.id, { targetDurationSec: target, imageProvider: images, review });
+      await api.startAuto(project.id, { targetDurationSec: target, imageProvider: images, review, thumbnail, postCaption });
       try { window.localStorage.setItem(STORE, project.id); } catch { /* private mode */ }
       setUpload(''); onStarted(project.id);
     } catch (error) { setUpload(''); onError(error instanceof Error ? error.message : String(error)); }
@@ -39,6 +41,10 @@ export function AutoReelLauncher({ busy, onStarted, onError }: { busy: boolean; 
       <div className="autoChoice"><span>Check the transcript before the reel is made</span><div>
         <button type="button" className={review ? 'on' : ''} onClick={() => setReview(true)}>Yes, let me check</button>
         <button type="button" className={!review ? 'on' : ''} onClick={() => setReview(false)}>No, fully automatic</button>
+      </div></div>
+      <div className="autoChoice"><span>Also make</span><div>
+        <button type="button" className={thumbnail ? 'on' : ''} aria-pressed={thumbnail} onClick={() => setThumbnail(!thumbnail)}>Thumbnail</button>
+        <button type="button" className={postCaption ? 'on' : ''} aria-pressed={postCaption} onClick={() => setPostCaption(!postCaption)}>Post caption</button>
       </div></div>
       <button className="primary autoStart" type="button" disabled={busy || !!upload} onClick={() => void start()}>{upload || 'Choose video(s) & start'}</button>
     </section>
@@ -60,7 +66,7 @@ export function AutoReelProgress({ projectId, onOpenEditor, onClose }: { project
   useEffect(() => {
     let cancelled = false;
     const poll = async () => {
-      try { const next = await api.autoStatus(projectId); if (!cancelled) { setJob(next); setError(''); } if (next.state === 'running' || next.state === 'review') timer.current = window.setTimeout(poll, next.state === 'review' ? 3000 : 2000); }
+      try { const next = await api.autoStatus(projectId); if (!cancelled) { setJob(next); setError(''); } if (next.state === 'running' || next.state === 'review' || next.package?.state === 'running') timer.current = window.setTimeout(poll, next.state === 'review' ? 3000 : 2000); }
       catch (err) { if (!cancelled) { setError(err instanceof Error ? err.message : String(err)); timer.current = window.setTimeout(poll, 5000); } }
     };
     void poll();
@@ -80,12 +86,13 @@ export function AutoReelProgress({ projectId, onOpenEditor, onClose }: { project
         <div className="autoPreview">
           <video src={job.previewUrl} controls playsInline preload="metadata" />
           <div className="autoActions">
-            <a className="primary" href={job.downloadUrl} download>Download</a>
+            {job.downloadUrl && <SaveFile url={job.downloadUrl} type="video/mp4" label="Save video" />}
             {onOpenEditor && <button type="button" onClick={() => void openEditor()}>Open in full editor</button>}
           </div>
           {job.sourceSeconds && job.finalSeconds ? <small>{Math.round(job.sourceSeconds)} s of talking → {Math.round(job.finalSeconds)} s reel</small> : null}
         </div>
       )}
+      {job?.state === 'completed' && <PackagePanel projectId={projectId} pkg={job.package} options={job.options} onJob={setJob} />}
       {job?.state === 'review' && job.review && <TranscriptReview key={job.review.keepRanges.map((r) => r.startWordId + r.endWordId).join()} projectId={projectId} review={job.review} />}
       <ol className="autoStages">
         {(job?.stages ?? []).map((stage) => (
@@ -119,6 +126,120 @@ export function ReelList({ projects, onOpen }: { projects: Project[]; onOpen: (i
           <small>{new Date(project.updatedAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}</small>
         </button>
       ))}
+    </section>
+  );
+}
+
+/**
+ * Save the finished reel on a phone. iPhone Safari (and the home-screen app) ignores <a download> for videos, so the
+ * file is fetched as soon as the reel is ready and handed to the share sheet ("Save Video" puts it in Photos).
+ * The file is fetched ahead of the tap because the share sheet only opens straight from a tap.
+ * Where sharing files is not supported (most computers), it is a normal download link.
+ */
+function SaveFile({ url, type, label }: { url: string; type: 'video/mp4' | 'image/jpeg'; label: string }) {
+  const name = `${type === 'video/mp4' ? 'reel' : 'thumbnail'}-${url.match(/(\d{8}-\d{6})/)?.[1] ?? 'file'}.${type === 'video/mp4' ? 'mp4' : 'jpg'}`;
+  const canShareFiles = typeof navigator !== 'undefined' && typeof navigator.canShare === 'function'
+    && (() => { try { return navigator.canShare({ files: [new File([], name, { type })] }); } catch { return false; } })();
+  const [file, setFile] = useState<File | null>(null);
+  const [status, setStatus] = useState('');
+  useEffect(() => {
+    if (!canShareFiles) return;
+    let cancelled = false;
+    setStatus(type === 'video/mp4' ? 'Getting the reel ready to save…' : '');
+    fetch(url, { credentials: 'same-origin' })
+      .then((response) => { if (!response.ok) throw new Error(`Download failed (${response.status})`); return response.blob(); })
+      .then((blob) => { if (!cancelled) { setFile(new File([blob], name, { type })); setStatus(''); } })
+      .catch((err) => { if (!cancelled) setStatus(err instanceof Error ? err.message : String(err)); });
+    return () => { cancelled = true; };
+  }, [url, canShareFiles, name, type]);
+  async function share() {
+    if (!file) return;
+    try { await navigator.share({ files: [file], title: label }); }
+    catch (err) { if ((err as Error)?.name !== 'AbortError') setStatus('Could not open the save menu. Use "Download file" below.'); }
+  }
+  if (!canShareFiles) return <a className="primary" href={url} download={name}>Download</a>;
+  return (
+    <>
+      <button type="button" className="primary" disabled={!file} onClick={() => void share()}>{file ? label : 'Preparing…'}</button>
+      <a className="ghost" href={url} download={name} target="_blank" rel="noopener">Download file</a>
+      {status && <small className="autoSaveStatus">{status}</small>}
+    </>
+  );
+}
+
+/** Thumbnail + post caption for a finished reel: preview, save, edit the cover text/frame, copy the caption, or ask the AI again. */
+function PackagePanel({ projectId, pkg, options, onJob }: { projectId: string; pkg?: ReelPackage; options?: AutoOptions; onJob: (job: AutoJob) => void }) {
+  const [lines, setLines] = useState<string[]>(pkg?.lines ?? ['', '', '']);
+  const [label, setLabel] = useState(pkg?.label ?? '');
+  const [caption, setCaption] = useState(pkg?.caption ?? '');
+  const [hashtags, setHashtags] = useState((pkg?.hashtags ?? []).join(' '));
+  const [notes, setNotes] = useState('');
+  const [busy, setBusy] = useState('');
+  const [message, setMessage] = useState('');
+  const version = pkg ? `${pkg.state}|${pkg.thumbnailUrl}|${pkg.caption}|${pkg.lines.join('/')}` : '';
+  useEffect(() => {
+    if (!pkg || pkg.state === 'running') return;
+    setLines(pkg.lines.length ? pkg.lines : ['', '', '']); setLabel(pkg.label); setCaption(pkg.caption); setHashtags(pkg.hashtags.join(' '));
+  }, [version]); // eslint-disable-line react-hooks/exhaustive-deps
+  async function act(text: string, work: () => Promise<AutoJob>) {
+    setBusy(text); setMessage('');
+    try { onJob(await work()); } catch (err) { setMessage(err instanceof Error ? err.message : String(err)); } finally { setBusy(''); }
+  }
+  const tags = () => hashtags.split(/[\s,]+/).filter(Boolean);
+  const save = (extra: { frame?: number } = {}) => act('Updating the thumbnail…', () => api.editPackage(projectId, { lines, label, caption, hashtags: tags(), ...extra }));
+  async function copyCaption() {
+    const text = `${caption.trim()}\n\n${tags().join(' ')}`.trim();
+    try { await navigator.clipboard.writeText(text); setMessage('Caption copied. Paste it in Instagram.'); }
+    catch { setMessage('Could not copy here. Press and hold the caption text to copy it.'); }
+    if (pkg && (caption !== pkg.caption || tags().join(' ') !== pkg.hashtags.join(' '))) void api.editPackage(projectId, { caption, hashtags: tags() }).then(onJob).catch(() => undefined);
+  }
+  if (!pkg) {
+    return (
+      <section className="pkg">
+        <span className="autoKicker">Thumbnail & caption</span>
+        <button type="button" className="primary" disabled={!!busy} onClick={() => void act('Starting…', () => api.remakePackage(projectId))}>{busy || 'Make thumbnail & post caption'}</button>
+        {message && <p className="autoError">{message}</p>}
+      </section>
+    );
+  }
+  if (pkg.state === 'running') return <section className="pkg"><span className="autoKicker">Thumbnail & caption</span><p className="pkgWait">◐ Picking a cover frame and writing the thumbnail and caption… (about a minute)</p></section>;
+  const showThumb = options?.thumbnail !== false || !!pkg.thumbnailUrl;
+  const showCaption = options?.postCaption !== false || !!pkg.caption;
+  return (
+    <section className="pkg">
+      {pkg.state === 'failed' && <p className="autoError">Thumbnail/caption failed: {pkg.error}</p>}
+      {showThumb && pkg.thumbnailUrl && (
+        <div className="pkgBlock">
+          <span className="autoKicker">Thumbnail</span>
+          <img className="pkgThumb" src={pkg.thumbnailUrl} alt="Reel thumbnail" />
+          <div className="autoActions">{pkg.thumbnailDownloadUrl && <SaveFile key={pkg.thumbnailDownloadUrl} url={pkg.thumbnailDownloadUrl} type="image/jpeg" label="Save thumbnail" />}</div>
+          <details className="pkgEdit">
+            <summary>Edit the thumbnail</summary>
+            <label>Top line<input value={lines[0] ?? ''} onChange={(e) => setLines([e.target.value, lines[1] ?? '', lines[2] ?? ''])} /></label>
+            <label>Highlighted line<input value={lines[1] ?? ''} onChange={(e) => setLines([lines[0] ?? '', e.target.value, lines[2] ?? ''])} /></label>
+            <label>Bottom line<input value={lines[2] ?? ''} onChange={(e) => setLines([lines[0] ?? '', lines[1] ?? '', e.target.value])} /></label>
+            <label>Label strip<input value={label} onChange={(e) => setLabel(e.target.value)} /></label>
+            {pkg.frames.length > 0 && <div className="pkgFrames"><span>Frame</span><div>{pkg.frames.map((src, n) => (
+              <button key={src} type="button" className={n === pkg.frame ? 'on' : ''} disabled={!!busy} onClick={() => void save({ frame: n })}><img src={src} alt={`Frame ${n + 1}`} /></button>
+            ))}</div></div>}
+            <button type="button" className="primary" disabled={!!busy} onClick={() => void save()}>{busy || 'Update thumbnail'}</button>
+          </details>
+        </div>
+      )}
+      {showCaption && (
+        <div className="pkgBlock">
+          <span className="autoKicker">Post caption</span>
+          <textarea className="pkgCaption" rows={7} value={caption} onChange={(e) => setCaption(e.target.value)} />
+          <textarea className="pkgTags" rows={2} value={hashtags} onChange={(e) => setHashtags(e.target.value)} />
+          <div className="autoActions"><button type="button" className="primary" onClick={() => void copyCaption()}>Copy caption + hashtags</button></div>
+        </div>
+      )}
+      <details className="pkgEdit">
+        <summary>Ask the AI to redo both</summary>
+        <textarea rows={3} placeholder="e.g. make the headline about the price, caption in English" value={notes} onChange={(e) => setNotes(e.target.value)} />
+        <button type="button" disabled={!!busy} onClick={() => void act('Starting…', () => api.remakePackage(projectId, notes))}>{busy || 'Redo thumbnail & caption'}</button>
+      </details>
+      {message && <p className="pkgMessage">{message}</p>}
     </section>
   );
 }

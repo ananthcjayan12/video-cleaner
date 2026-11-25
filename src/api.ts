@@ -233,15 +233,20 @@ export async function uploadFile(file: File, onProgress?: (progress: UploadProgr
 
 export type AutoStageId = 'audio' | 'transcribe' | 'clean' | 'review' | 'broll-plan' | 'broll-images' | 'edit' | 'captions' | 'compose';
 export type AutoStage = { id: AutoStageId; label: string; state: 'pending' | 'running' | 'done' | 'skipped' | 'failed'; detail?: string; seconds?: number };
-export type AutoOptions = { targetDurationSec?: number; imageProvider: 'gemini' | 'chatgpt'; broll?: boolean; captions?: boolean; review?: boolean };
+export type AutoOptions = { targetDurationSec?: number; imageProvider: 'gemini' | 'chatgpt'; broll?: boolean; captions?: boolean; review?: boolean; thumbnail?: boolean; postCaption?: boolean };
+export type ThumbnailBadge = { icon: string; label?: string };
+export type ReelPackage = { state: 'running' | 'ready' | 'failed'; error?: string; frames: string[]; frame: number; lines: string[]; label: string; badges: ThumbnailBadge[]; caption: string; hashtags: string[]; thumbnailUrl?: string; thumbnailDownloadUrl?: string };
+export type PackageEdit = Partial<Pick<ReelPackage, 'frame' | 'lines' | 'label' | 'badges' | 'caption' | 'hashtags'>>;
 export type ReviewWord = { id: string; text: string; start: number; end: number };
 export type AutoReview = { words: ReviewWord[]; keepRanges: KeepRange[]; keptSeconds: number; sourceSeconds: number; notes?: string; redoing?: boolean };
-export type AutoJob = { state: 'idle' | 'running' | 'review' | 'completed' | 'failed' | 'stopped'; review?: AutoReview; stages?: AutoStage[]; startedAt?: number; finishedAt?: number; error?: string; previewUrl?: string; downloadUrl?: string; sourceSeconds?: number; finalSeconds?: number };
+export type AutoJob = { state: 'idle' | 'running' | 'review' | 'completed' | 'failed' | 'stopped'; review?: AutoReview; stages?: AutoStage[]; startedAt?: number; finishedAt?: number; error?: string; previewUrl?: string; downloadUrl?: string; sourceSeconds?: number; finalSeconds?: number; options?: AutoOptions; package?: ReelPackage };
 
 export const api = {
   startAuto: (id: string, options: AutoOptions) => request<AutoJob>(`/api/projects/${id}/auto`, { method: 'POST', body: JSON.stringify(options) }),
   autoStatus: (id: string) => request<AutoJob>(`/api/projects/${id}/auto`),
   reviewAuto: (id: string, body: { action: 'continue' | 'redo'; keepRanges?: KeepRange[]; notes?: string }) => request<{ ok: boolean }>(`/api/projects/${id}/auto/review`, { method: 'POST', body: JSON.stringify(body) }),
+  remakePackage: (id: string, notes?: string) => request<AutoJob>(`/api/projects/${id}/auto/package`, { method: 'POST', body: JSON.stringify({ notes }) }),
+  editPackage: (id: string, edit: PackageEdit) => request<AutoJob>(`/api/projects/${id}/auto/package`, { method: 'PUT', body: JSON.stringify(edit) }),
   stopAuto: (id: string) => request<AutoJob>(`/api/projects/${id}/auto/stop`, { method: 'POST' }),
   status: () => request<SystemStatus>('/api/system/status'),
   settings: () => request<SystemStatus>('/api/settings'),

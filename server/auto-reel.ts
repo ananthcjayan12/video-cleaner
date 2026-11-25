@@ -11,7 +11,7 @@ import type { KeepRange, Word } from './project-store.js';
  * to quiet points, alternating zoom, mastered voice) -> Glass Card captions -> composite with B-roll and whooshes.
  * This module holds the pieces that do not need the web server; server/index.ts runs the job.
  */
-export type AutoStageId = 'audio' | 'transcribe' | 'clean' | 'review' | 'broll-plan' | 'broll-images' | 'edit' | 'captions' | 'compose';
+export type AutoStageId = 'audio' | 'transcribe' | 'clean' | 'review' | 'broll-plan' | 'broll-images' | 'edit' | 'captions' | 'compose' | 'package';
 export type AutoStage = { id: AutoStageId; label: string; state: 'pending' | 'running' | 'done' | 'skipped' | 'failed'; detail?: string; seconds?: number };
 export type AutoJob = {
   state: 'running' | 'review' | 'completed' | 'failed' | 'stopped'; stages: AutoStage[]; startedAt: number; finishedAt?: number;
@@ -19,16 +19,26 @@ export type AutoJob = {
   review?: { words: Array<{ id: string; text: string; start: number; end: number }>; keepRanges: KeepRange[]; keptSeconds: number; sourceSeconds: number; notes?: string; redoing?: boolean };
   error?: string; outputPath?: string; previewUrl?: string; downloadUrl?: string; sourceSeconds?: number; finalSeconds?: number;
   options: AutoOptions; stopRequested?: boolean;
+  /** Thumbnail and Instagram post caption, made after the reel (and remade from the review screen). */
+  package?: ReelPackage;
 };
-export type AutoOptions = { targetDurationSec?: number; imageProvider: 'gemini' | 'chatgpt'; broll: boolean; captions: boolean; review: boolean };
+export type AutoOptions = { targetDurationSec?: number; imageProvider: 'gemini' | 'chatgpt'; broll: boolean; captions: boolean; review: boolean; thumbnail?: boolean; postCaption?: boolean };
+export type ThumbnailBadge = { icon: string; label?: string };
+export type ReelPackage = {
+  state: 'running' | 'ready' | 'failed'; error?: string;
+  /** Candidate frames of the speaker (URLs of small previews) and the one used. */
+  frames: string[]; frame: number; faces?: number[];
+  lines: string[]; label: string; badges: ThumbnailBadge[]; caption: string; hashtags: string[];
+  thumbnailPath?: string; thumbnailUrl?: string; thumbnailDownloadUrl?: string;
+};
 
 export const AUTO_STAGES: Array<[AutoStageId, string]> = [
   ['audio', 'Preparing audio'], ['transcribe', 'Transcribing'], ['clean', 'Cleaning the talk'], ['review', 'Your review'], ['broll-plan', 'Planning B-roll'],
-  ['broll-images', 'Making B-roll images'], ['edit', 'Cutting, zoom and voice'], ['captions', 'Rendering captions'], ['compose', 'Putting it together'],
+  ['broll-images', 'Making B-roll images'], ['edit', 'Cutting, zoom and voice'], ['captions', 'Rendering captions'], ['compose', 'Putting it together'], ['package', 'Thumbnail & post caption'],
 ];
 export const newAutoJob = (options: AutoOptions): AutoJob => ({
   state: 'running', startedAt: Date.now(), options,
-  stages: AUTO_STAGES.map(([id, label]) => ({ id, label, state: (!options.broll && id.startsWith('broll')) || (!options.captions && id === 'captions') || (!options.review && id === 'review') ? 'skipped' : 'pending' })),
+  stages: AUTO_STAGES.map(([id, label]) => ({ id, label, state: (!options.broll && id.startsWith('broll')) || (!options.captions && id === 'captions') || (!options.review && id === 'review') || (id === 'package' && options.thumbnail === false && options.postCaption === false) ? 'skipped' : 'pending' })),
 });
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -128,5 +138,18 @@ export async function renderCaptionLayer(options: { phrases: CaptionPhrase[]; du
     composition, serveUrl, inputProps, codec: 'vp9', imageFormat: 'png', pixelFormat: 'yuva420p', outputLocation: options.outputPath,
     concurrency: 2, browserExecutable, muted: true, overwrite: true, cancelSignal, onProgress: ({ progress }) => options.onProgress?.(progress),
   });
+  return options.outputPath;
+}
+
+/** Render the reel cover (1080x1920 JPEG) from a frame of the speaker and the headline text. */
+export async function renderThumbnail(options: { framePath: string; faceX?: number; lines: string[]; label: string; badges: ThumbnailBadge[]; outputPath: string; chromeBin?: string | null; workDir: string }) {
+  const serveUrl = await captionServeUrl(options.workDir);
+  const { renderStill, selectComposition } = await import('@remotion/renderer');
+  const image = `data:image/jpeg;base64,${(await fs.readFile(options.framePath)).toString('base64')}`;
+  const inputProps = { image, lines: options.lines, label: options.label, badges: options.badges.slice(0, 2), faceX: options.faceX ?? 0.5 };
+  const browserExecutable = options.chromeBin || null;
+  const composition = await selectComposition({ serveUrl, id: 'Thumbnail', inputProps, browserExecutable });
+  await fs.mkdir(path.dirname(options.outputPath), { recursive: true });
+  await renderStill({ composition, serveUrl, inputProps, output: options.outputPath, imageFormat: 'jpeg', jpegQuality: 92, browserExecutable, overwrite: true });
   return options.outputPath;
 }

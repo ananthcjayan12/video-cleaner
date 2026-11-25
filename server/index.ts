@@ -67,7 +67,8 @@ import { verifyAccessJwt } from './access.js';
 import { DEFAULT_PICTURES_ENGINE } from './chatgpt-images.js';
 import { checkCredentials, issueSession, loadAuth, LOGIN_PAGE, LoginLimiter, readCookie, SESSION_COOKIE, SESSION_DAYS, verifySession } from './auth.js';
 import { appendChunk, completedUploadPath, createUpload, readUpload, type UploadKind } from './uploads.js';
-import { AUTO_COMPOSITE_SCRIPT, AUTO_EDIT_SCRIPT, keepIndexRanges, newAutoJob, placeBroll, renderCaptionLayer, runPython, WHOOSH, type AutoJob, type AutoOptions, type AutoStageId, type EditRange } from './auto-reel.js';
+import { AUTO_COMPOSITE_SCRIPT, AUTO_EDIT_SCRIPT, keepIndexRanges, newAutoJob, placeBroll, renderCaptionLayer, renderThumbnail, runPython, WHOOSH, type AutoJob, type AutoOptions, type AutoStageId, type EditRange, type ReelPackage } from './auto-reel.js';
+import { buildPackagePrompt, cleanPackage, extractCandidateFrames, FRAME_COUNT, framePaths, PACKAGE_SCHEMA } from './reel-package.js';
 import { buildCaptionPhrases, type CaptionWordIn } from './captions.js';
 import { buildCleanPrompt, cleanIntensityValue, keptDuration, targetDurationValue, targetFeedback, type CleanNotes } from './clean.js';
 import { DEFAULT_GEMINI_STT_MODEL, sttProviderValue, transcribeAudio, type SttProvider } from './stt.js';
@@ -1482,6 +1483,51 @@ async function runAutoReel(project: Project, job: AutoJob) {
     job.outputPath = output; job.downloadUrl = downloadUrlFor(project, output); job.previewUrl = job.downloadUrl ? `${job.downloadUrl}?inline=1` : undefined;
     note(`${broll.length} B-roll · captions ${captioned ? 'on' : 'off'}`);
   });
+  // The reel is done; a failed thumbnail/caption must not throw it away (it can be remade from the reel screen).
+  await stage('package', async (note) => {
+    note('Picking a cover frame and writing the caption…');
+    await makeReelPackage(project, job);
+    note(job.options.thumbnail === false ? 'Post caption ready' : 'Thumbnail and post caption ready');
+  }).catch((error) => { if (job.stopRequested) throw error; });
+}
+
+const thumbDir = (project: Project) => path.join(project.workDir, 'auto', 'thumb');
+const frameUrl = (project: Project, n: number) => `/api/projects/${project.id}/auto/frames/${n}?v=${Date.now()}`;
+/** Frames + AI text (cover lines, label, badges, post caption, hashtags), then the cover image. */
+async function makeReelPackage(project: Project, job: AutoJob, notes?: string) {
+  const settings = await resolvedSettings();
+  if (!settings.ffmpegBin) throw new Error('FFmpeg was not found');
+  const dir = path.join(project.workDir, 'auto');
+  const edited = JSON.parse(await fs.readFile(path.join(dir, 'edited-words.json'), 'utf8')) as { words: Array<{ text: string }>; duration: number };
+  job.package = { frames: [], frame: 0, lines: ['', '', ''], label: '', badges: [], caption: '', hashtags: [], ...job.package, state: 'running', error: undefined };
+  void persistAutoJob(project, job);
+  try {
+    const smalls = await extractCandidateFrames(settings.ffmpegBin, path.join(dir, 'video.mp4'), edited.duration, thumbDir(project));
+    const choice: TextModelChoice = { provider: settings.planningProvider, model: settings.planningModel, effort: settings.planningEffort };
+    const raw = await generateStructuredText({ choice, config: settings, workDir: project.workDir, prompt: buildPackagePrompt(edited.words.map((word) => word.text).join(' '), smalls, notes), schema: PACKAGE_SCHEMA as unknown as Record<string, unknown>, outputName: 'reel-package', images: smalls });
+    Object.assign(job.package, cleanPackage(raw), { frames: smalls.map((_, n) => frameUrl(project, n)) });
+    if (job.options.thumbnail !== false) await renderPackageThumbnail(project, job.package);
+    job.package.state = 'ready';
+  } catch (error) {
+    job.package.state = 'failed'; job.package.error = error instanceof Error ? error.message : String(error);
+    throw error;
+  } finally { void persistAutoJob(project, job); }
+}
+async function renderPackageThumbnail(project: Project, pkg: ReelPackage) {
+  await fs.mkdir(exportsDir(project), { recursive: true });
+  const output = path.join(exportsDir(project), `${new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15)}-thumbnail.jpg`);
+  await renderThumbnail({ framePath: framePaths(thumbDir(project), pkg.frame).full, faceX: pkg.faces?.[pkg.frame], lines: pkg.lines, label: pkg.label, badges: pkg.badges, outputPath: output, chromeBin: await detectChromeBin(), workDir: project.workDir });
+  if (pkg.thumbnailPath && pkg.thumbnailPath !== output) await fs.rm(pkg.thumbnailPath, { force: true }).catch(() => undefined);
+  pkg.thumbnailPath = output; pkg.thumbnailDownloadUrl = downloadUrlFor(project, output);
+  pkg.thumbnailUrl = pkg.thumbnailDownloadUrl ? `${pkg.thumbnailDownloadUrl}?inline=1` : undefined;
+}
+/** The live job, or the finished one saved on disk (after a restart). */
+async function loadAutoJob(project: Project) {
+  const live = autoJobs.get(project.id); if (live) return live;
+  const saved = await fs.readFile(autoJobFile(project), 'utf8').then((text) => JSON.parse(text) as AutoJob).catch(() => null);
+  if (!saved || saved.state === 'running' || saved.state === 'review') return null;
+  if (saved.package?.state === 'running') { saved.package.state = 'failed'; saved.package.error = 'Interrupted by a restart of the app.'; }
+  autoJobs.set(project.id, saved); return saved;
 }
 app.post('/api/projects/:id/auto', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id));
@@ -1489,6 +1535,7 @@ app.post('/api/projects/:id/auto', route(async (req, res) => {
   const options: AutoOptions = {
     targetDurationSec: targetDurationValue(req.body?.targetDurationSec), imageProvider: req.body?.imageProvider === 'chatgpt' ? 'chatgpt' : 'gemini',
     broll: req.body?.broll !== false, captions: req.body?.captions !== false, review: req.body?.review !== false,
+    thumbnail: req.body?.thumbnail !== false, postCaption: req.body?.postCaption !== false,
   };
   const job = newAutoJob(options); autoJobs.set(project.id, job);
   void runAutoReel(project, job).then(() => { job.state = 'completed'; }).catch((error) => { job.state = job.stopRequested ? 'stopped' : 'failed'; job.error = error instanceof Error ? error.message : String(error); }).finally(() => { job.finishedAt = Date.now(); void persistAutoJob(project, job); });
@@ -1512,6 +1559,33 @@ app.post('/api/projects/:id/auto/review', route(async (req, res) => {
   const keepRanges = Array.isArray(req.body?.keepRanges) ? req.body.keepRanges : undefined;
   if (keepRanges) validateEdl(project.transcript!.words, { keepRanges }); // throws a clear error before resuming
   resolve({ action, notes, keepRanges }); res.json({ ok: true });
+}));
+app.get('/api/projects/:id/auto/frames/:n', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id)); const n = Number(routeParam(req.params.n));
+  if (!Number.isInteger(n) || n < 0 || n >= FRAME_COUNT) return void res.status(404).json({ error: 'No such frame' });
+  const file = framePaths(thumbDir(project), n).small; if (!(await fs.stat(file).catch(() => null))) return void res.status(404).json({ error: 'No such frame' });
+  res.sendFile(file);
+}));
+// Remake the thumbnail and post caption with AI (optionally with the owner's notes).
+app.post('/api/projects/:id/auto/package', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id)); const job = await loadAutoJob(project);
+  if (!job || job.state !== 'completed') return void res.status(409).json({ error: 'The reel is not finished yet.' });
+  if (job.package?.state === 'running') return void res.status(409).json({ error: 'Already making the thumbnail.' });
+  const notes = typeof req.body?.notes === 'string' ? req.body.notes.trim().slice(0, 2000) : '';
+  job.options.thumbnail = true; job.options.postCaption = true;
+  void makeReelPackage(project, job, notes || undefined).catch(() => undefined);
+  res.status(202).json(job);
+}));
+// Owner edits: new text / another frame -> re-render the cover (no AI).
+app.put('/api/projects/:id/auto/package', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id)); const job = await loadAutoJob(project);
+  const pkg = job?.package; if (!job || !pkg || pkg.state === 'running') return void res.status(409).json({ error: 'There is no thumbnail to edit yet.' });
+  const body = req.body ?? {};
+  const edited = cleanPackage({ frame: body.frame ?? pkg.frame, faces: pkg.faces, lines: body.lines ?? pkg.lines, label: body.label ?? pkg.label, badges: body.badges ?? pkg.badges, caption: body.caption ?? pkg.caption, hashtags: body.hashtags ?? pkg.hashtags });
+  const coverChanged = edited.frame !== pkg.frame || JSON.stringify([edited.lines, edited.label, edited.badges]) !== JSON.stringify([pkg.lines, pkg.label, pkg.badges]);
+  Object.assign(pkg, edited);
+  if (coverChanged || !pkg.thumbnailPath) { job.options.thumbnail = true; await renderPackageThumbnail(project, pkg); pkg.state = 'ready'; pkg.error = undefined; }
+  await persistAutoJob(project, job); res.json(job);
 }));
 app.post('/api/projects/:id/auto/stop', route(async (req, res) => {
   const id = routeParam(req.params.id); const job = autoJobs.get(id);

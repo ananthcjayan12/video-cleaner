@@ -4,3 +4,5 @@ All are licensed under the SIL Open Font License 1.1:
 - Plus Jakarta Sans (Tokotype)        https://github.com/google/fonts/tree/main/ofl/plusjakartasans
 - Montserrat                          https://github.com/google/fonts/tree/main/ofl/montserrat
 - Noto Sans Malayalam (Google)        https://github.com/google/fonts/tree/main/ofl/notosansmalayalam
+
+NotoSansMono-ExtraBold.ttf: Noto Sans Mono by Google, SIL Open Font License 1.1 (thumbnail label strip).

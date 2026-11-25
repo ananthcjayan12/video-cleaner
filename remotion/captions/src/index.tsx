@@ -6,6 +6,7 @@ import { NameTag } from './NameTag';
 import { CleanPop } from './CleanPop';
 import { MinimalLower } from './MinimalLower';
 import { GlassCard } from './GlassCard';
+import { Thumbnail } from './Thumbnail';
 
 const common = { width: 1080, height: 1920, fps: 30 } as const;
 
@@ -19,6 +20,8 @@ const Root: React.FC = () => (
     <Composition id="GlassCard" component={GlassCard as React.ComponentType<any>} durationInFrames={90} fps={30} width={1080} height={300}
       calculateMetadata={({ props }) => ({ durationInFrames: Math.round(Number((props as any).duration ?? 3) * 30) })}
       defaultProps={{ phrases: [], size: 46, duration: 3 }} />
+    <Composition id="Thumbnail" component={Thumbnail as React.ComponentType<any>} durationInFrames={1} fps={30} width={1080} height={1920}
+      defaultProps={{ image: '', lines: ['', '', ''], label: '', badges: [] }} />
     <Composition id="CleanPop" component={CleanPop as React.ComponentType<any>} durationInFrames={90} {...common}
       calculateMetadata={({ props }) => ({ durationInFrames: Math.round(Number((props as any).duration ?? 3) * 30) })}
       defaultProps={{ phrases: [], y: 1180, size: 76, duration: 3 }} />
