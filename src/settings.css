@@ -323,3 +323,12 @@ textarea:focus { border-color:#71717a; }
 }
 @media(prefers-reduced-motion:reduce){.creatorStage {transition:none}}
 .metaFixButton { border-color:#f59e0b; color:#fbbf24; }
+
+/* Phone use (through the tunnel): a clear download button and comfortable touch targets. */
+.downloadButton { display:block; margin-top:10px; padding:12px 14px; border-radius:10px; text-align:center; text-decoration:none; font-weight:600; }
+@media (max-width:620px) {
+  button, .primary, .ghost, .danger { min-height:44px; }
+  input, select, textarea { font-size:16px; } /* stops iOS zooming into fields */
+}
+.settingsSection { grid-column: 1 / -1; display: grid; gap: 4px; margin-top: 8px; padding-top: 12px; border-top: 1px solid #27272a; }
+.settingsSection small { color: #9aa3b2; }

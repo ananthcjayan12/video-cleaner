@@ -8,6 +8,28 @@ The browser is only the editor UI. The local Node service owns filesystem access
 
 Dialogue cleaning remains non-destructive: FFmpeg creates a tiny analysis-audio file and optional 30 fps proxy, ElevenLabs provides word timestamps, Codex returns a delete-only EDL, and final export reads the untouched master once.
 
+## One-tap Auto reel (phone friendly)
+
+The home screen shows only **Make my reel**: pick a length (Auto/30/45/60/90 s) and the B-roll image source (Gemini or ChatGPT), choose a video, and everything runs on its own:
+
+1. audio → transcript (Gemini, English words kept in English letters; `server/stt.ts`)
+2. aggressive delete-only clean with the Claude/Codex CLI, optional target length (`server/clean.ts`)
+3. **review**: the cleaned talk is shown with removed text struck through; tap sentences to keep/remove or write notes and let the AI redo the clean (`src/TranscriptReview.tsx`)
+4. B-roll plan + images (Gemini API, or ChatGPT in Chrome driven by Claude/Codex; `server/chatgpt-images.ts`)
+5. cuts snapped to quiet points, alternating punch-in zoom, voice mastering to −15 LUFS (`server/auto_edit.py`)
+6. Glass Card captions rendered with Remotion (`remotion/captions`, `server/captions.ts`)
+7. composite with B-roll dissolves and whooshes (`server/auto_composite.py`) → preview + download
+
+The old step-by-step editor is hidden; open it with `?advanced=1` (and `?advanced=0` to hide it again). Settings → **AI engines** sets provider, model and effort per task (cleaning, planning, pictures in Chrome), like story-reels.
+
+## Remote access (Cloudflare tunnel)
+
+Run the production build as a user service and expose it through a Cloudflare tunnel; requests that do not come from this computer need a login:
+
+- uploads go in 8 MB resumable slices (Cloudflare caps one request at 100 MB) and exports come back as downloads (`server/uploads.ts`)
+- set the username/password on this computer with `node scripts/set-login.mjs` (scrypt hash in `~/.video-cleaner/auth.json`; 30-day sessions; 8 failed attempts lock a client for 15 minutes)
+- a valid Cloudflare Access token is also accepted if Access is configured (`server/access.ts`)
+
 ## Live narration transcript preview
 
 When a proxy and word-timestamp transcript are available, the transcript becomes a karaoke-style narration preview. The currently spoken word is highlighted from the existing ElevenLabs timestamps and the transcript auto-follows playback inside its own scroll area. Removed words remain visibly struck through and cleaned preview playback continues to skip removed EDL sections. In multi-clip projects the combined proxy and global word timestamps make highlighting continue across clip boundaries.

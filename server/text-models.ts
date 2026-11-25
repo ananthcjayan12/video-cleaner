@@ -3,7 +3,8 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
 export type TextProvider = 'codex-cli' | 'claude-cli' | 'agy-cli' | 'gemini' | 'openai';
-export type TextModelChoice = { provider: TextProvider; model: string };
+/** effort: reasoning effort passed to the Claude CLI (--effort) or Codex (model_reasoning_effort), like story-reels. */
+export type TextModelChoice = { provider: TextProvider; model: string; effort?: string };
 export type TextModelConfig = {
   codexBin?: string; claudeBin?: string; agyBin?: string; openAiApiKey?: string; geminiApiKey?: string;
 };
@@ -156,6 +157,7 @@ export async function generateStructuredText(options: {
     await fs.writeFile(schemaFile, JSON.stringify(schema, null, 2));
     const args = ['exec', '--ephemeral', '--skip-git-repo-check'];
     if (model) args.push('--model', model);
+    if (choice.effort) args.push('--config', `model_reasoning_effort=${JSON.stringify(choice.effort)}`);
     for (const image of images) args.push('--image', image);
     args.push('--output-schema', schemaFile, '--output-last-message', outputFile, '-');
     await command(config.codexBin, args, jsonPrompt, workDir, undefined, options.signal);
@@ -165,6 +167,7 @@ export async function generateStructuredText(options: {
     if (!config.claudeBin) throw new Error('Claude CLI was not found.');
     const args = ['--print', '--no-session-persistence', '--disable-slash-commands', '--strict-mcp-config', '--tools', images.length ? 'Read' : '', ...(images.length ? ['--allowedTools', 'Read'] : []), '--output-format', 'json', '--json-schema', JSON.stringify(schema)];
     if (model) args.push('--model', model);
+    if (choice.effort) args.push('--effort', choice.effort);
     const envelope = parseModelJson(await command(config.claudeBin, args, jsonPrompt, workDir, undefined, options.signal)) as {
       is_error?: boolean; result?: string; structured_output?: unknown;
     };

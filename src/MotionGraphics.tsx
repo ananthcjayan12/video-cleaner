@@ -107,7 +107,7 @@ export default function MotionGraphics(props: Props) {
 
   const busy = planning || planningSounds || batchRunning || locked;
   const designReady = textProviderConfigured(system, settings.planningProvider);
-  const planningReady = designReady && Boolean(system?.elevenLabs.configured);
+  const planningReady = designReady && Boolean(system?.transcription?.configured);
   const browser = system?.motionGraphics?.browserPath;
 
   function patchSettings(patch: Partial<MotionSettings>) {

@@ -13,8 +13,9 @@ export async function uploadEditorMedia(id: string, file: File): Promise<EditorM
   return body.media as EditorMediaEntry;
 }
 export type KeepRange = { startWordId: string; endWordId: string; reason?: string };
-export type Edl = { keepRanges: KeepRange[]; notes?: string[] };
-export type ImageProvider = 'openai' | 'gemini' | 'grok-cli' | 'codex-cli';
+export type Edl = { keepRanges: KeepRange[]; notes?: string[]; keptSeconds?: number; sourceSeconds?: number; intensity?: CleanIntensity; targetDurationSec?: number };
+export type CleanIntensity = 'light' | 'balanced' | 'aggressive';
+export type ImageProvider = 'openai' | 'gemini' | 'grok-cli' | 'codex-cli' | 'chatgpt-browser';
 export type TextProvider = 'codex-cli' | 'claude-cli' | 'agy-cli' | 'gemini' | 'openai';
 export type ModelOption = { id: string; label: string };
 export type VideoProvider = 'grok-cli' | 'google-flow' | 'magnific';
@@ -58,11 +59,12 @@ export type SystemStatus = {
   claude: { installed: boolean; authenticated: boolean; path: string | null };
   grok: { installed: boolean; path: string | null; model: string; videoModel?: string };
   agy: { installed: boolean; path: string | null };
-  textModels: { clean: { provider: TextProvider; model: string }; planning: { provider: TextProvider; model: string }; codexModel: string };
+  textModels: { clean: { provider: TextProvider; model: string; effort?: string }; planning: { provider: TextProvider; model: string; effort?: string }; pictures?: { provider: 'claude' | 'codex'; model: string; effort?: string }; codexModel: string };
   gflow: { installed: boolean; authenticated: boolean; path: string | null; model: string; profile: string };
   ffmpeg: { installed: boolean; path: string | null; capabilities?: { videoToolboxDecode: boolean; h264VideoToolbox: boolean; hevcVideoToolbox: boolean } };
   ffprobe: { installed: boolean; path: string | null };
   elevenLabs: { configured: boolean };
+  transcription?: { provider: 'gemini' | 'elevenlabs'; model: string; configured: boolean };
   imageProvider: ImageProvider;
   imageProviders: {
     openai: { configured: boolean; model: string };
@@ -75,7 +77,7 @@ export type SystemStatus = {
   motionGraphics?: { browserPath: string | null; renderer: string };
   matting?: { configured: boolean; pythonInstalled: boolean; dependenciesInstalled: boolean; pythonPath: string | null; detail: string };
   projectsDir: string;
-  overrides?: {
+  overrides?: { cleanEffort?: string; planningEffort?: string; picturesProvider?: string; picturesModel?: string; picturesEffort?: string; sttProvider?: string; geminiSttModel?: string;
     cleanProvider?: string; cleanModel?: string; planningProvider?: string; planningModel?: string; codexModel?: string; agyBin?: string; claudeBin?: string;
     codexBin: string; grokBin: string; gflowBin: string; ffmpegBin: string; ffprobeBin: string; projectsDir: string;
     imageProvider: string; openAiImageModel: string; geminiImageModel: string; grokModel: string; grokVideoModel?: string; gflowProfile?: string; gflowVideoModel?: string; magnificVideoModel?: string; magnificVideoEndpoint?: string;
@@ -95,7 +97,7 @@ export type ProjectExportOptions = {
   brollVideos: boolean;
   brollTiming: boolean;
 };
-export type ProjectZipExportResult = { destination: string; archiveBytes: number; clips: number; words: number; brollImages: number; brollVideos: number; files: number };
+export type ProjectZipExportResult = { downloadUrl?: string; destination: string; archiveBytes: number; clips: number; words: number; brollImages: number; brollVideos: number; files: number };
 export type ThumbnailState = {
   version: 1;
   hook?: string;
@@ -107,7 +109,7 @@ export type ThumbnailState = {
   prompt?: string;
   hasImage: boolean;
 };
-export type ExportStatus = { state: 'idle' | 'running' | 'completed' | 'failed' | 'stopped'; progress: number; outTime: string; speed: string; frame: number; outputPath?: string; encoder?: string; error?: string; checkpointCompleted?: number; checkpointTotal?: number; resumable?: boolean; resumed?: boolean };
+export type ExportStatus = { state: 'idle' | 'running' | 'completed' | 'failed' | 'stopped'; progress: number; outTime: string; speed: string; frame: number; outputPath?: string; downloadUrl?: string; encoder?: string; error?: string; checkpointCompleted?: number; checkpointTotal?: number; resumable?: boolean; resumed?: boolean };
 export type BrollPlanSettings = {
   workflowMode: BrollWorkflowMode; provider: ImageProvider; imageModel?: string; planningProvider?: TextProvider; planningModel?: string; videoPromptProvider?: TextProvider; videoPromptModel?: string; videoProvider: VideoProvider; countMode: BrollCountMode; targetCount: number; imagesPerMinute: number; intervalSeconds: number;
   minSceneDuration: number; maxSceneDuration: number; aspectRatio: 'auto' | '9:16' | '16:9'; displayTemplate?: BrollDisplayTemplate; returnVideoWithAudio: boolean;
@@ -171,11 +173,76 @@ export type MotionScenePatch = {
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, { ...init, headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) } });
   const body = await response.json().catch(() => ({}));
+  // Logged out (session expired) on a phone: go to the login page and come back here afterwards.
+  if (response.status === 401 && body.login) { window.location.href = `/login?next=${encodeURIComponent(window.location.pathname + window.location.search)}`; }
   if (!response.ok) throw new Error(body.error || `Request failed (${response.status})`);
   return body as T;
 }
 
+/** True when the app is opened from another device (e.g. a phone through the Cloudflare tunnel). */
+export const isRemote = () => !['localhost', '127.0.0.1', '[::1]', '::1'].includes(window.location.hostname);
+export type UploadProgress = { name: string; sent: number; size: number };
+// 8 MB slices: each finishes well inside Cloudflare's ~100 s request window even on slow mobile uploads,
+// and a dropped slice costs little to resend.
+const CHUNK = 8 * 1024 * 1024;
+
+/** PUT one slice with XHR so the progress bar moves while the slice is still uploading. */
+function putSlice(url: string, slice: Blob, onBytes: (loaded: number) => void, signal?: AbortSignal) {
+  return new Promise<{ status: number; body: any }>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', url);
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    xhr.timeout = 95_000;
+    xhr.upload.onprogress = (event) => onBytes(event.loaded);
+    xhr.onload = () => { let body: any = {}; try { body = JSON.parse(xhr.responseText); } catch { /* not JSON */ } resolve({ status: xhr.status, body }); };
+    xhr.onerror = () => reject(new Error('Network error while uploading'));
+    xhr.ontimeout = () => reject(new Error('Upload slice timed out'));
+    signal?.addEventListener('abort', () => xhr.abort(), { once: true });
+    xhr.onabort = () => reject(new Error('Upload cancelled'));
+    xhr.send(slice);
+  });
+}
+
+/**
+ * Upload a file in slices; resumes after dropped connections by asking the server how much it already has.
+ * Returns the upload id to pass as uploadIds to project/clip/image routes.
+ */
+export async function uploadFile(file: File, onProgress?: (progress: UploadProgress) => void, signal?: AbortSignal): Promise<string> {
+  const created = await request<{ id: string }>('/api/uploads', { method: 'POST', body: JSON.stringify({ name: file.name, size: file.size }), signal });
+  let sent = 0; let failures = 0;
+  while (sent < file.size) {
+    if (signal?.aborted) throw new Error('Upload cancelled');
+    const slice = file.slice(sent, Math.min(file.size, sent + CHUNK));
+    try {
+      const base = sent;
+      const { status, body } = await putSlice(`/api/uploads/${created.id}?offset=${sent}`, slice, (loaded) => onProgress?.({ name: file.name, sent: base + loaded, size: file.size }), signal);
+      if (status === 409 && typeof body.expected === 'number') { sent = body.expected; continue; }
+      if (status === 401 && body.login) { window.location.href = '/login'; throw new Error('Please log in again'); }
+      if (status < 200 || status >= 300) throw new Error(body.error || `Upload failed (${status})`);
+      sent = body.received; failures = 0;
+      onProgress?.({ name: file.name, sent, size: file.size });
+    } catch (error) {
+      if (signal?.aborted || ++failures > 8) throw error;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(15000, 1000 * 2 ** failures)));
+      const status = await request<{ received: number }>(`/api/uploads/${created.id}`).catch(() => null);
+      if (status) sent = status.received;
+    }
+  }
+  return created.id;
+}
+
+export type AutoStageId = 'audio' | 'transcribe' | 'clean' | 'review' | 'broll-plan' | 'broll-images' | 'edit' | 'captions' | 'compose';
+export type AutoStage = { id: AutoStageId; label: string; state: 'pending' | 'running' | 'done' | 'skipped' | 'failed'; detail?: string; seconds?: number };
+export type AutoOptions = { targetDurationSec?: number; imageProvider: 'gemini' | 'chatgpt'; broll?: boolean; captions?: boolean; review?: boolean };
+export type ReviewWord = { id: string; text: string; start: number; end: number };
+export type AutoReview = { words: ReviewWord[]; keepRanges: KeepRange[]; keptSeconds: number; sourceSeconds: number; notes?: string; redoing?: boolean };
+export type AutoJob = { state: 'idle' | 'running' | 'review' | 'completed' | 'failed' | 'stopped'; review?: AutoReview; stages?: AutoStage[]; startedAt?: number; finishedAt?: number; error?: string; previewUrl?: string; downloadUrl?: string; sourceSeconds?: number; finalSeconds?: number };
+
 export const api = {
+  startAuto: (id: string, options: AutoOptions) => request<AutoJob>(`/api/projects/${id}/auto`, { method: 'POST', body: JSON.stringify(options) }),
+  autoStatus: (id: string) => request<AutoJob>(`/api/projects/${id}/auto`),
+  reviewAuto: (id: string, body: { action: 'continue' | 'redo'; keepRanges?: KeepRange[]; notes?: string }) => request<{ ok: boolean }>(`/api/projects/${id}/auto/review`, { method: 'POST', body: JSON.stringify(body) }),
+  stopAuto: (id: string) => request<AutoJob>(`/api/projects/${id}/auto/stop`, { method: 'POST' }),
   status: () => request<SystemStatus>('/api/system/status'),
   settings: () => request<SystemStatus>('/api/settings'),
   agyModels: () => request<{ models: ModelOption[] }>('/api/models/agy'),
@@ -183,18 +250,18 @@ export const api = {
   saveSettings: (body: Record<string, string>) => request<SystemStatus>('/api/settings', { method: 'PUT', body: JSON.stringify(body) }),
 
   listProjects: () => request<Project[]>('/api/projects'),
-  selectProject: () => request<Project>('/api/projects/select', { method: 'POST' }),
+  selectProject: (uploadIds?: string[]) => request<Project>('/api/projects/select', { method: 'POST', body: JSON.stringify({ uploadIds }) }),
   openProject: (id: string) => request<ProjectSnapshot>(`/api/projects/${id}/open`, { method: 'POST' }),
   renameProject: (id: string, name: string) => request<Project>(`/api/projects/${id}/meta`, { method: 'PUT', body: JSON.stringify({ name }) }),
   deleteProject: (id: string) => request<{ deleted: boolean; id: string }>(`/api/projects/${id}`, { method: 'DELETE' }),
-  relinkProject: (id: string) => request<Project>(`/api/projects/${id}/relink`, { method: 'POST' }),
-  addProjectClips: (id: string) => request<Project>(`/api/projects/${id}/clips`, { method: 'POST' }),
+  relinkProject: (id: string, uploadIds?: string[]) => request<Project>(`/api/projects/${id}/relink`, { method: 'POST', body: JSON.stringify({ uploadIds }) }),
+  addProjectClips: (id: string, uploadIds?: string[]) => request<Project>(`/api/projects/${id}/clips`, { method: 'POST', body: JSON.stringify({ uploadIds }) }),
   reorderProjectClips: (id: string, clipIds: string[]) => request<Project>(`/api/projects/${id}/clips/order`, { method: 'PUT', body: JSON.stringify({ clipIds }) }),
   removeProjectClip: (id: string, clipId: string) => request<Project>(`/api/projects/${id}/clips/${clipId}`, { method: 'DELETE' }),
 
   prepare: (id: string) => request<{ proxyUrl: string; proxy: { width: number; height: number; fps: number; hardware: boolean } }>(`/api/projects/${id}/prepare`, { method: 'POST' }),
   transcribe: (id: string) => request<{ transcript: { text?: string; words: Word[] }; edl: Edl }>(`/api/projects/${id}/transcribe`, { method: 'POST' }),
-  clean: (id: string, intensity: string) => request<Edl>(`/api/projects/${id}/clean`, { method: 'POST', body: JSON.stringify({ intensity }) }),
+  clean: (id: string, intensity: CleanIntensity, targetDurationSec?: number) => request<Edl>(`/api/projects/${id}/clean`, { method: 'POST', body: JSON.stringify({ intensity, targetDurationSec }) }),
   setEdl: (id: string, keepRanges: KeepRange[]) => request<Edl>(`/api/projects/${id}/edl`, { method: 'PUT', body: JSON.stringify({ keepRanges }) }),
   planBroll: (id: string, settings: Partial<BrollPlanSettings>) => request<{ plan: BrollPlan; transcript: { text?: string; words: Word[] }; edl: Edl }>(`/api/projects/${id}/broll/plan`, { method: 'POST', body: JSON.stringify({ settings: { ...settings, displayTemplate: undefined } }) }),
   getBroll: (id: string) => request<BrollPlan>(`/api/projects/${id}/broll`),
@@ -235,7 +302,7 @@ export const api = {
   editorBaseVideoUrl: (id: string, version?: string) => `/api/projects/${id}/editor/base-video${version ? `?v=${encodeURIComponent(version)}` : ''}`,
   editorBaseClipUrl: (id: string, clipId: string, version?: string) => `/api/projects/${id}/editor/base-clips/${encodeURIComponent(clipId)}${version ? `?v=${encodeURIComponent(version)}` : ''}`,
   getThumbnail: (id: string) => request<ThumbnailState>(`/api/projects/${id}/thumbnail`),
-  selectThumbnailReferences: (id: string) => request<ThumbnailState>(`/api/projects/${id}/thumbnail/references`, { method: 'POST' }),
+  selectThumbnailReferences: (id: string, uploadIds?: string[]) => request<ThumbnailState>(`/api/projects/${id}/thumbnail/references`, { method: 'POST', body: JSON.stringify({ uploadIds }) }),
   generateThumbnail: (id: string, hook?: string) => request<ThumbnailState>(`/api/projects/${id}/thumbnail/generate`, { method: 'POST', body: JSON.stringify({ hook }) }),
   thumbnailImageUrl: (id: string, version?: string) => `/api/projects/${id}/thumbnail/image${version ? `?v=${encodeURIComponent(version)}` : ''}`,
   thumbnailReferenceUrl: (id: string, referenceId: string, version?: string) => `/api/projects/${id}/thumbnail/references/${encodeURIComponent(referenceId)}${version ? `?v=${encodeURIComponent(version)}` : ''}`,
@@ -243,8 +310,8 @@ export const api = {
   updateBrollScene: (id: string, sceneId: string, patch: { title?: string; imagePrompt?: string; videoPrompt?: string; sourceStart?: number; sourceEnd?: number; enabled?: boolean; displayTemplate?: BrollDisplayTemplate | 'default'; assetAspectRatio?: BrollAssetAspectRatio }) => request<BrollScene>(`/api/projects/${id}/broll/scenes/${sceneId}`, { method: 'PUT', body: JSON.stringify(patch) }),
   deleteBrollScene: (id: string, sceneId: string) => request<BrollPlan>(`/api/projects/${id}/broll/scenes/${sceneId}`, { method: 'DELETE' }),
   generateBrollScene: (id: string, sceneId: string, regenerationComment?: string) => request<{ scene: BrollScene; imageUrl: string }>(`/api/projects/${id}/broll/scenes/${sceneId}/generate`, { method: 'POST', body: JSON.stringify({ regenerationComment }) }),
-  importBrollImage: (id: string, sceneId: string) => request<{ scene: BrollScene; imageUrl: string }>(`/api/projects/${id}/broll/scenes/${sceneId}/manual-image`, { method: 'POST' }),
-  importBrollVideo: (id: string, sceneId: string) => request<{ scene: BrollScene; videoUrl: string }>(`/api/projects/${id}/broll/scenes/${sceneId}/manual-video`, { method: 'POST' }),
+  importBrollImage: (id: string, sceneId: string, uploadIds?: string[]) => request<{ scene: BrollScene; imageUrl: string }>(`/api/projects/${id}/broll/scenes/${sceneId}/manual-image`, { method: 'POST', body: JSON.stringify({ uploadIds }) }),
+  importBrollVideo: (id: string, sceneId: string, uploadIds?: string[]) => request<{ scene: BrollScene; videoUrl: string }>(`/api/projects/${id}/broll/scenes/${sceneId}/manual-video`, { method: 'POST', body: JSON.stringify({ uploadIds }) }),
   fixBrollSceneForMeta: (id: string, sceneId: string) => request<BrollScene>(`/api/projects/${id}/broll/scenes/${sceneId}/fix-meta`, { method: 'POST' }),
   createBrollVideoPrompt: (id: string, sceneId: string) => request<BrollScene>(`/api/projects/${id}/broll/scenes/${sceneId}/video-prompt`, { method: 'POST' }),
   setBrollStillEffect: (id: string, sceneId: string, effect: StillEffect | 'ai') => request<BrollScene>(`/api/projects/${id}/broll/scenes/${sceneId}/still-effect`, { method: 'POST', body: JSON.stringify({ effect }) }),

@@ -18,6 +18,7 @@ import {
   deleteBrollScene,
   displayTemplateNeedsPresenterMatte,
   generateBrollImage,
+  generateBrollImagesWithChatGpt,
   fixSceneForMetaPolicy,
   generateBrollVideoWithGoogleFlow,
   generateBrollVideoWithGrokCli,
@@ -57,11 +58,19 @@ import {
   type MotionSettings,
 } from './motion.js';
 import { addMotionTemplate, deleteMotionTemplate, listMotionTemplates, motionTemplatePath, MOTION_TEMPLATE_MIME, updateMotionTemplate } from './motion-templates.js';
-import { ensurePresenterMatte, mattingSystemStatus, presenterMatteStatus, type PresenterMatteSpecInput } from './presenter.js';
+import { ensurePresenterMatte, mattingSystemStatus, presenterMatteStatus, resolvePythonBin, type PresenterMatteSpecInput } from './presenter.js';
 import { exportProjectZip, normalizeProjectExportOptions } from './project-export.js';
 import { buildEditorRender } from './editor-render.js';
 import { formatMetaFinding, metaTextGuidelinesPrompt, scanMetaText } from './meta-guidelines.js';
 import { availableAgyModels, availableCodexModels, generateStructuredText, type TextModelChoice, type TextProvider } from './text-models.js';
+import { verifyAccessJwt } from './access.js';
+import { DEFAULT_PICTURES_ENGINE } from './chatgpt-images.js';
+import { checkCredentials, issueSession, loadAuth, LOGIN_PAGE, LoginLimiter, readCookie, SESSION_COOKIE, SESSION_DAYS, verifySession } from './auth.js';
+import { appendChunk, completedUploadPath, createUpload, readUpload, type UploadKind } from './uploads.js';
+import { AUTO_COMPOSITE_SCRIPT, AUTO_EDIT_SCRIPT, keepIndexRanges, newAutoJob, placeBroll, renderCaptionLayer, runPython, WHOOSH, type AutoJob, type AutoOptions, type AutoStageId, type EditRange } from './auto-reel.js';
+import { buildCaptionPhrases, type CaptionWordIn } from './captions.js';
+import { buildCleanPrompt, cleanIntensityValue, keptDuration, targetDurationValue, targetFeedback, type CleanNotes } from './clean.js';
+import { DEFAULT_GEMINI_STT_MODEL, sttProviderValue, transcribeAudio, type SttProvider } from './stt.js';
 import { generateProjectThumbnail, loadThumbnailState, replaceThumbnailReferences, thumbnailImageFile, thumbnailReferenceFile, thumbnailStateView } from './thumbnail.js';
 import {
   atomicWriteJson,
@@ -89,6 +98,10 @@ dotenv.config({ path: path.resolve('.env') });
 
 type LocalSettings = {
   elevenLabsApiKey?: string; openAiApiKey?: string; geminiApiKey?: string; imageProvider?: ImageProvider;
+  sttProvider?: SttProvider; geminiSttModel?: string;
+  // Per-task AI engine like story-reels: provider + model + effort. Pictures = ChatGPT in Chrome.
+  cleanEffort?: string; planningEffort?: string; picturesProvider?: 'claude' | 'codex'; picturesModel?: string; picturesEffort?: string;
+  accessTeamDomain?: string; accessAud?: string; accessAllowedEmails?: string;
   openAiImageModel?: string; geminiImageModel?: string; grokModel?: string; grokVideoModel?: string; gflowProfile?: string; gflowVideoModel?: string;
   magnificApiKey?: string; magnificVideoModel?: string; magnificVideoEndpoint?: string;
   // Legacy names from the initial Magnific integration; retained for automatic migration.
@@ -112,7 +125,43 @@ const exportJobs = new Map<string, ExportJob>();
 const exportProcesses = new Map<string, ReturnType<typeof spawn>>();
 const capabilityCache = new Map<string, FfmpegCapabilities>();
 let localSettings: LocalSettings = {};
+// Requests from outside this computer (the Cloudflare tunnel) need a login: the app's own username + password session,
+// or (optional) a valid Cloudflare Access token. Local requests are not affected.
+const loginLimiter = new LoginLimiter();
+app.use((req, res, next) => {
+  if (!isRemoteRequest(req) || req.path === '/login' || req.path === '/api/login') return next();
+  void (async () => {
+    const auth = await loadAuth();
+    if (auth && verifySession(auth, readCookie(req.headers.cookie, SESSION_COOKIE))) return next();
+    const teamDomain = localSettings.accessTeamDomain || process.env.CF_ACCESS_TEAM_DOMAIN || '';
+    const aud = localSettings.accessAud || process.env.CF_ACCESS_AUD || '';
+    const jwt = req.header('Cf-Access-Jwt-Assertion');
+    if (jwt && teamDomain && aud) {
+      const allowedEmails = (localSettings.accessAllowedEmails || process.env.CF_ACCESS_ALLOWED_EMAILS || '').split(',').map((e) => e.trim()).filter(Boolean);
+      if (await verifyAccessJwt(jwt, { teamDomain, aud, allowedEmails }).then(() => true, () => false)) return next();
+    }
+    if (!auth) return void res.status(403).json({ error: 'Remote login is not set up yet. On the computer, run: node scripts/set-login.mjs' });
+    if (req.path.startsWith('/api/')) return void res.status(401).json({ error: 'Please log in again.', login: true });
+    res.redirect(302, `/login?next=${encodeURIComponent(req.originalUrl)}`);
+  })().catch((error) => res.status(500).json({ error: String(error) }));
+});
 app.use(express.json({ limit: '1mb' }));
+app.get('/login', (_req, res) => { res.set('Cache-Control', 'no-store').type('html').send(LOGIN_PAGE); });
+app.post('/api/login', (req, res) => {
+  void (async () => {
+    const client = req.header('cf-connecting-ip') || req.ip || 'unknown';
+    if (loginLimiter.blocked(client)) return void res.status(429).json({ error: 'Too many attempts. Wait 15 minutes and try again.' });
+    const auth = await loadAuth();
+    if (!auth) return void res.status(403).json({ error: 'Login is not set up yet. On the computer, run: node scripts/set-login.mjs' });
+    if (!await checkCredentials(auth, String(req.body?.username ?? ''), String(req.body?.password ?? ''))) {
+      loginLimiter.fail(client); return void res.status(401).json({ error: 'Wrong username or password.' });
+    }
+    loginLimiter.clear(client);
+    res.setHeader('Set-Cookie', `${SESSION_COOKIE}=${issueSession(auth)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${SESSION_DAYS * 86400}`);
+    res.json({ ok: true });
+  })().catch((error) => res.status(500).json({ error: String(error) }));
+});
+app.post('/api/logout', (_req, res) => { res.setHeader('Set-Cookie', `${SESSION_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`); res.json({ ok: true }); });
 
 const EDL_SCHEMA = {
   type: 'object', additionalProperties: false, required: ['keepRanges', 'notes'],
@@ -162,8 +211,8 @@ async function detectBinary(name: string) {
   }
   return '';
 }
-function providerValue(value: unknown): ImageProvider { return ['openai', 'gemini', 'grok-cli', 'codex-cli'].includes(String(value)) ? value as ImageProvider : 'gemini'; }
-function textProviderValue(value: unknown): TextProvider { return ['codex-cli', 'claude-cli', 'agy-cli', 'gemini', 'openai'].includes(String(value)) ? value as TextProvider : 'codex-cli'; }
+function providerValue(value: unknown): ImageProvider { return ['openai', 'gemini', 'grok-cli', 'codex-cli', 'chatgpt-browser'].includes(String(value)) ? value as ImageProvider : 'gemini'; }
+function textProviderValue(value: unknown): TextProvider { return ['codex-cli', 'claude-cli', 'agy-cli', 'gemini', 'openai'].includes(String(value)) ? value as TextProvider : 'claude-cli'; }
 function videoProviderValue(value: unknown): VideoProvider { return ['grok-cli', 'google-flow', 'magnific'].includes(String(value)) ? value as VideoProvider : 'grok-cli'; }
 function displayTemplateValue(value: unknown): BrollDisplayTemplate {
   const candidate = String(value || 'full-frame') as BrollDisplayTemplate;
@@ -198,9 +247,15 @@ async function resolvedSettings() {
     elevenLabsApiKey: localSettings.elevenLabsApiKey || process.env.ELEVENLABS_API_KEY || '',
     openAiApiKey: localSettings.openAiApiKey || process.env.OPENAI_API_KEY || '',
     geminiApiKey: localSettings.geminiApiKey || process.env.GEMINI_API_KEY || '',
+    // Gemini is the default transcriber when a Gemini key exists; ElevenLabs Scribe stays available.
+    sttProvider: sttProviderValue(localSettings.sttProvider || process.env.STT_PROVIDER, (localSettings.geminiApiKey || process.env.GEMINI_API_KEY) ? 'gemini' : 'elevenlabs'),
+    geminiSttModel: localSettings.geminiSttModel || process.env.GEMINI_STT_MODEL || DEFAULT_GEMINI_STT_MODEL,
     magnificApiKey: localSettings.magnificApiKey || localSettings.freepikApiKey || process.env.MAGNIFIC_API_KEY || process.env.FREEPIK_API_KEY || '',
     imageProvider: providerValue(localSettings.imageProvider || process.env.IMAGE_PROVIDER),
     cleanProvider: textProviderValue(localSettings.cleanProvider || process.env.CLEAN_PROVIDER), cleanModel: localSettings.cleanModel || process.env.CLEAN_MODEL || '',
+    cleanEffort: localSettings.cleanEffort || 'medium', planningEffort: localSettings.planningEffort || 'medium',
+    picturesProvider: (localSettings.picturesProvider === 'codex' ? 'codex' : 'claude') as 'claude' | 'codex',
+    picturesModel: localSettings.picturesModel ?? (localSettings.picturesProvider === 'codex' ? '' : DEFAULT_PICTURES_ENGINE.model), picturesEffort: localSettings.picturesEffort || DEFAULT_PICTURES_ENGINE.effort,
     planningProvider: textProviderValue(localSettings.planningProvider || process.env.BROLL_PLANNING_PROVIDER), planningModel: localSettings.planningModel || process.env.BROLL_PLANNING_MODEL || '',
     codexModel: localSettings.codexModel || process.env.CODEX_MODEL || '',
     openAiImageModel: localSettings.openAiImageModel || process.env.OPENAI_IMAGE_MODEL || 'gpt-image-2',
@@ -217,6 +272,9 @@ async function resolvedSettings() {
   };
 }
 
+function picturesEngine(settings: Awaited<ReturnType<typeof resolvedSettings>>) {
+  return { provider: settings.picturesProvider, model: settings.picturesModel || undefined, effort: settings.picturesEffort || undefined, claudeBin: settings.claudeBin, codexBin: settings.codexBin };
+}
 async function hydrateProjects(clear = false) {
   const settings = await resolvedSettings();
   const loaded = await scanProjects(settings.projectsDir);
@@ -264,11 +322,12 @@ async function systemStatus() {
     codex: { installed: codexInstalled, authenticated: codexAuthenticated, path: settings.codexBin || null },
     claude: { installed: claudeInstalled, authenticated: claudeAuthenticated, path: settings.claudeBin || null },
     agy: { installed: Boolean(settings.agyBin) && await canRun(settings.agyBin, ['--version']), path: settings.agyBin || null },
-    textModels: { clean: { provider: settings.cleanProvider, model: settings.cleanModel }, planning: { provider: settings.planningProvider, model: settings.planningModel }, codexModel: settings.codexModel },
+    textModels: { clean: { provider: settings.cleanProvider, model: settings.cleanModel, effort: settings.cleanEffort }, planning: { provider: settings.planningProvider, model: settings.planningModel, effort: settings.planningEffort }, pictures: { provider: settings.picturesProvider, model: settings.picturesModel, effort: settings.picturesEffort }, codexModel: settings.codexModel },
     grok: { installed: grokInstalled, path: settings.grokBin || null, model: settings.grokModel || 'CLI default', videoModel: settings.grokVideoModel },
     gflow: { installed: gflowInstalled, authenticated: gflowAuthenticated, path: settings.gflowBin || null, model: settings.gflowVideoModel, profile: settings.gflowProfile || 'default' },
     ffmpeg: { installed: ffmpegInstalled, path: settings.ffmpegBin || null, capabilities }, ffprobe: { installed: ffprobeInstalled, path: settings.ffprobeBin || null },
     elevenLabs: { configured: Boolean(settings.elevenLabsApiKey) }, imageProvider: settings.imageProvider,
+    transcription: { provider: settings.sttProvider, model: settings.sttProvider === 'gemini' ? settings.geminiSttModel : 'scribe_v2', configured: Boolean(settings.sttProvider === 'gemini' ? settings.geminiApiKey : settings.elevenLabsApiKey) },
     imageProviders: {
       openai: { configured: Boolean(settings.openAiApiKey), model: settings.openAiImageModel }, gemini: { configured: Boolean(settings.geminiApiKey), model: settings.geminiImageModel },
       grokCli: { configured: grokInstalled, model: settings.grokModel || 'CLI default', experimental: true }, codexCli: { configured: codexInstalled && codexAuthenticated, model: 'Codex CLI', experimental: true },
@@ -596,12 +655,19 @@ async function ensureAnalysisAudio(project: Project) {
   await prepareProjectMedia(project, false); if (!project.audioPath) throw new Error('Analysis audio was not created'); return project.audioPath;
 }
 async function transcribeProject(project: Project) {
-  if (project.transcript?.words.length) return project.transcript; const settings = await resolvedSettings(); if (!settings.elevenLabsApiKey) throw new Error('ElevenLabs API key is not configured');
-  const audioPath = await ensureAnalysisAudio(project); const bytes = await fs.readFile(audioPath); const form = new FormData(); form.append('model_id', 'scribe_v2'); form.append('timestamps_granularity', 'word'); form.append('file', new Blob([bytes]), 'analysis.m4a');
-  const response = await fetch('https://api.elevenlabs.io/v1/speech-to-text', { method: 'POST', headers: { 'xi-api-key': settings.elevenLabsApiKey }, body: form }); if (!response.ok) throw new Error(`ElevenLabs failed: ${response.status} ${await response.text()}`);
-  const raw: any = await response.json(); const words: Word[] = (raw.words ?? []).filter((word: any) => word.type === 'word' && Number.isFinite(word.start) && Number.isFinite(word.end)).map((word: any, index: number) => ({ id: `w${String(index + 1).padStart(6, '0')}`, text: word.text, start: word.start, end: word.end }));
-  if (!words.length) throw new Error('No timestamped words returned by ElevenLabs'); project.transcript = { text: raw.text ?? words.map((word) => word.text).join(' '), words }; project.edl = { keepRanges: [{ startWordId: words[0].id, endWordId: words.at(-1)!.id, reason: 'Original recording' }], notes: [] }; await invalidateBroll(project);
-  await Promise.all([atomicWriteJson(path.join(project.workDir, 'transcript.json'), project.transcript), touchProject(project)]); return project.transcript;
+  if (project.transcript?.words.length) return project.transcript;
+  const settings = await resolvedSettings();
+  if (!settings.ffmpegBin) throw new Error('FFmpeg was not found');
+  const audioPath = await ensureAnalysisAudio(project);
+  const result = await transcribeAudio(audioPath, {
+    provider: settings.sttProvider, ffmpegBin: settings.ffmpegBin, workDir: project.workDir,
+    geminiApiKey: settings.geminiApiKey, geminiModel: settings.geminiSttModel, elevenLabsApiKey: settings.elevenLabsApiKey,
+  });
+  const words = result.words;
+  project.transcript = { text: result.text, words };
+  project.edl = { keepRanges: [{ startWordId: words[0].id, endWordId: words.at(-1)!.id, reason: 'Original recording' }], notes: [] }; await invalidateBroll(project);
+  await Promise.all([atomicWriteJson(path.join(project.workDir, 'transcript.json'), { ...project.transcript, language: result.language, provider: result.provider, model: result.model }), touchProject(project)]);
+  return project.transcript;
 }
 
 function defaultBitRate(media: MediaProfile, hevc: boolean) { const pixels = (media.width || 1920) * (media.height || 1080); const highFps = (media.frameRate || 30) > 35; if (pixels >= 3840 * 2000) return hevc ? (highFps ? 70_000_000 : 45_000_000) : (highFps ? 95_000_000 : 65_000_000); if (pixels >= 1920 * 1000) return hevc ? (highFps ? 25_000_000 : 16_000_000) : (highFps ? 35_000_000 : 22_000_000); return hevc ? 10_000_000 : 14_000_000; }
@@ -717,16 +783,66 @@ async function ensureProjectPresenterMattes(project: Project, plan: BrollPlan, f
   return result;
 }
 
+// ---- Phone/remote support: uploads replace native file pickers, exports land in the project for download.
+async function uploadsDir() { return path.join(path.dirname((await resolvedSettings()).projectsDir), 'uploads'); }
+/** Requests from anything but this computer (e.g. through the Cloudflare tunnel) cannot use desktop file dialogs. */
+function isRemoteRequest(req: express.Request) { return !['localhost', '127.0.0.1', '::1', '[::1]'].includes(req.hostname); }
+/** Files the browser uploaded (body.uploadIds), or the desktop file picker when the request is local. */
+async function uploadedOr(req: express.Request, kind: UploadKind, pick: () => Promise<string[]>) {
+  const ids = Array.isArray(req.body?.uploadIds) ? req.body.uploadIds.map(String) : [];
+  if (ids.length) { const dir = await uploadsDir(); return Promise.all(ids.map((id: string) => completedUploadPath(dir, id, kind))); }
+  if (isRemoteRequest(req)) throw new Error('Upload the file from this device first.');
+  return (await pick()).filter(Boolean);
+}
+const exportsDir = (project: Project) => path.join(project.workDir, 'exports');
+/** Remote requests (or delivery: "download") render into the project's exports folder; local ones keep the save dialog. */
+async function outputFor(req: express.Request, project: Project, defaultName: string, pick: () => Promise<string>) {
+  if (req.body?.delivery === 'download' || isRemoteRequest(req)) {
+    await fs.mkdir(exportsDir(project), { recursive: true });
+    const stamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
+    return path.join(exportsDir(project), `${stamp}-${defaultName}`);
+  }
+  return pick();
+}
+function downloadUrlFor(project: Project, outputPath?: string) {
+  if (!outputPath || path.dirname(outputPath) !== exportsDir(project)) return undefined;
+  return `/api/projects/${project.id}/exports/${encodeURIComponent(path.basename(outputPath))}`;
+}
+
+app.post('/api/uploads', route(async (req, res) => { const meta = await createUpload(await uploadsDir(), { name: req.body?.name, size: req.body?.size }); res.json({ id: meta.id, received: 0, size: meta.size, kind: meta.kind }); }));
+app.get('/api/uploads/:uploadId', route(async (req, res) => { const meta = await readUpload(await uploadsDir(), routeParam(req.params.uploadId)); res.json({ id: meta.id, received: meta.received, size: meta.size, complete: meta.complete, kind: meta.kind }); }));
+app.put('/api/uploads/:uploadId', (req, res) => {
+  void (async () => {
+    try {
+      const meta = await appendChunk(await uploadsDir(), routeParam(req.params.uploadId), Number(req.query.offset), req);
+      res.json({ id: meta.id, received: meta.received, size: meta.size, complete: meta.complete });
+    } catch (error: any) {
+      res.status(error?.status ?? 500).json({ error: error instanceof Error ? error.message : String(error), expected: error?.expected });
+    }
+  })();
+});
+app.get('/api/projects/:id/exports/:file', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id)); const name = path.basename(routeParam(req.params.file));
+  const file = path.join(exportsDir(project), name); const stat = await fs.stat(file).catch(() => null);
+  if (!stat?.isFile()) return void res.status(404).json({ error: 'Export not found' });
+  if (req.query.inline) return void res.sendFile(file); // plays in the page's video player
+  res.download(file, name.replace(/^\d{8}-\d{6}-/, ''));
+}));
+
 app.get('/api/system/status', route(async (_req, res) => { res.json(await systemStatus()); }));
 app.get('/api/models/agy', route(async (_req, res) => { const settings = await resolvedSettings(); res.json({ models: await availableAgyModels(settings.agyBin) }); }));
 app.get('/api/models/codex', route(async (_req, res) => { const settings = await resolvedSettings(); res.json({ models: await availableCodexModels(settings.codexBin) }); }));
-app.get('/api/settings', route(async (_req, res) => { const status = await systemStatus(); res.json({ ...status, overrides: { codexBin: localSettings.codexBin ?? '', claudeBin: localSettings.claudeBin ?? '', agyBin: localSettings.agyBin ?? '', cleanProvider: localSettings.cleanProvider ?? '', cleanModel: localSettings.cleanModel ?? '', planningProvider: localSettings.planningProvider ?? '', planningModel: localSettings.planningModel ?? '', codexModel: localSettings.codexModel ?? '', grokBin: localSettings.grokBin ?? '', gflowBin: localSettings.gflowBin ?? '', ffmpegBin: localSettings.ffmpegBin ?? '', ffprobeBin: localSettings.ffprobeBin ?? '', projectsDir: localSettings.projectsDir ?? '', imageProvider: localSettings.imageProvider ?? '', openAiImageModel: localSettings.openAiImageModel ?? '', geminiImageModel: localSettings.geminiImageModel ?? '', grokModel: localSettings.grokModel ?? '', grokVideoModel: localSettings.grokVideoModel ?? '', gflowProfile: localSettings.gflowProfile ?? '', gflowVideoModel: localSettings.gflowVideoModel ?? '', magnificVideoModel: localSettings.magnificVideoModel ?? '', magnificVideoEndpoint: localSettings.magnificVideoEndpoint ?? '' } }); }));
+app.get('/api/settings', route(async (_req, res) => { const status = await systemStatus(); res.json({ ...status, overrides: { codexBin: localSettings.codexBin ?? '', claudeBin: localSettings.claudeBin ?? '', agyBin: localSettings.agyBin ?? '', sttProvider: localSettings.sttProvider ?? '', geminiSttModel: localSettings.geminiSttModel ?? '', cleanEffort: localSettings.cleanEffort ?? '', planningEffort: localSettings.planningEffort ?? '', picturesProvider: localSettings.picturesProvider ?? '', picturesModel: localSettings.picturesModel ?? '', picturesEffort: localSettings.picturesEffort ?? '', cleanProvider: localSettings.cleanProvider ?? '', cleanModel: localSettings.cleanModel ?? '', planningProvider: localSettings.planningProvider ?? '', planningModel: localSettings.planningModel ?? '', codexModel: localSettings.codexModel ?? '', grokBin: localSettings.grokBin ?? '', gflowBin: localSettings.gflowBin ?? '', ffmpegBin: localSettings.ffmpegBin ?? '', ffprobeBin: localSettings.ffprobeBin ?? '', projectsDir: localSettings.projectsDir ?? '', imageProvider: localSettings.imageProvider ?? '', openAiImageModel: localSettings.openAiImageModel ?? '', geminiImageModel: localSettings.geminiImageModel ?? '', grokModel: localSettings.grokModel ?? '', grokVideoModel: localSettings.grokVideoModel ?? '', gflowProfile: localSettings.gflowProfile ?? '', gflowVideoModel: localSettings.gflowVideoModel ?? '', magnificVideoModel: localSettings.magnificVideoModel ?? '', magnificVideoEndpoint: localSettings.magnificVideoEndpoint ?? '' } }); }));
 app.put('/api/settings', route(async (req, res) => {
   const body = req.body ?? {}; const previousProjectsDir = (await resolvedSettings()).projectsDir;
   if (typeof body.elevenLabsApiKey === 'string' && body.elevenLabsApiKey.trim()) localSettings.elevenLabsApiKey = body.elevenLabsApiKey.trim(); if (typeof body.openAiApiKey === 'string' && body.openAiApiKey.trim()) localSettings.openAiApiKey = body.openAiApiKey.trim(); if (typeof body.geminiApiKey === 'string' && body.geminiApiKey.trim()) localSettings.geminiApiKey = body.geminiApiKey.trim(); if (typeof body.magnificApiKey === 'string' && body.magnificApiKey.trim()) localSettings.magnificApiKey = body.magnificApiKey.trim(); if (typeof body.imageProvider === 'string') localSettings.imageProvider = providerValue(body.imageProvider);
+  if (typeof body.sttProvider === 'string') localSettings.sttProvider = body.sttProvider ? sttProviderValue(body.sttProvider, 'gemini') : undefined;
+  if (typeof body.picturesProvider === 'string') localSettings.picturesProvider = body.picturesProvider === 'codex' ? 'codex' : body.picturesProvider === 'claude' ? 'claude' : undefined;
+  if (typeof body.picturesModel === 'string') localSettings.picturesModel = body.picturesModel.trim();
+  for (const key of ['cleanEffort', 'planningEffort', 'picturesEffort'] as const) if (typeof body[key] === 'string') localSettings[key] = ['low', 'medium', 'high', 'xhigh', 'max'].includes(body[key]) ? body[key] : undefined;
   if (typeof body.cleanProvider === 'string') localSettings.cleanProvider = textProviderValue(body.cleanProvider);
   if (typeof body.planningProvider === 'string') localSettings.planningProvider = textProviderValue(body.planningProvider);
-  for (const key of ['cleanModel', 'planningModel', 'codexModel', 'agyBin', 'codexBin', 'claudeBin', 'grokBin', 'gflowBin', 'ffmpegBin', 'ffprobeBin', 'projectsDir', 'openAiImageModel', 'geminiImageModel', 'grokModel', 'grokVideoModel', 'gflowProfile', 'gflowVideoModel', 'magnificVideoModel', 'magnificVideoEndpoint'] as const) if (typeof body[key] === 'string') localSettings[key] = body[key].trim() || undefined;
+  for (const key of ['geminiSttModel', 'cleanModel', 'planningModel', 'codexModel', 'agyBin', 'codexBin', 'claudeBin', 'grokBin', 'gflowBin', 'ffmpegBin', 'ffprobeBin', 'projectsDir', 'openAiImageModel', 'geminiImageModel', 'grokModel', 'grokVideoModel', 'gflowProfile', 'gflowVideoModel', 'magnificVideoModel', 'magnificVideoEndpoint'] as const) if (typeof body[key] === 'string') localSettings[key] = body[key].trim() || undefined;
   capabilityCache.clear(); await saveSettings(); const nextProjectsDir = (await resolvedSettings()).projectsDir; if (nextProjectsDir !== previousProjectsDir) await hydrateProjects(true); res.json(await systemStatus());
 }));
 
@@ -737,8 +853,8 @@ app.get('/api/projects', route(async (_req, res) => {
   res.json(summaries);
 }));
 
-app.post('/api/projects/select', route(async (_req, res) => {
-  const sourcePaths = await pickNativeFiles(); if (!sourcePaths.length) return void res.status(400).json({ error: 'No video clips selected' }); const probed = await Promise.all(sourcePaths.map(async (sourcePath) => ({ sourcePath, media: await probe(sourcePath) }))); assertCompatibleClips(probed);
+app.post('/api/projects/select', route(async (req, res) => {
+  const sourcePaths = await uploadedOr(req, 'video', () => pickNativeFiles()); if (!sourcePaths.length) return void res.status(400).json({ error: 'No video clips selected' }); const probed = await Promise.all(sourcePaths.map(async (sourcePath) => ({ sourcePath, media: await probe(sourcePath) }))); assertCompatibleClips(probed);
   const settings = await resolvedSettings(); const id = randomUUID(); const workDir = path.join(settings.projectsDir, id); await fs.mkdir(workDir, { recursive: true }); const now = new Date().toISOString(); const firstName = path.basename(sourcePaths[0]);
   const clips: ProjectClip[] = probed.map((item, index) => ({ id: `clip-${String(index + 1).padStart(3, '0')}`, sourcePath: item.sourcePath, sourceName: path.basename(item.sourcePath), media: item.media, timelineStart: 0, timelineEnd: 0 }));
   const project: Project = { id, name: firstName.replace(/\.[^.]+$/, ''), createdAt: now, updatedAt: now, sourcePath: sourcePaths[0], sourceName: firstName, clips, workDir, media: { ...probed[0].media } }; syncProjectTimeline(project);
@@ -764,14 +880,14 @@ app.delete('/api/projects/:id', route(async (req, res) => {
 app.post('/api/projects/:id/relink', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id)); const clips = projectClips(project); let target = clips[0];
   for (const clip of clips) { const available = await fs.stat(clip.sourcePath).then((stat) => stat.isFile()).catch(() => false); if (!available) { target = clip; break; } }
-  const sourcePath = await pickNativeFile(`Relink ${target.sourceName}`); if (!sourcePath) return void res.status(400).json({ error: 'Relink cancelled' }); const media = await probe(sourcePath); const durationTolerance = Math.max(1.5, (target.media.duration || 0) * 0.02); const durationMismatch = Math.abs((media.duration || 0) - (target.media.duration || 0)) > durationTolerance; const dimensionsMismatch = Boolean(target.media.width && target.media.height && media.width && media.height && (target.media.width !== media.width || target.media.height !== media.height));
+  const sourcePath = (await uploadedOr(req, 'video', async () => [await pickNativeFile(`Relink ${target.sourceName}`)]))[0]; if (!sourcePath) return void res.status(400).json({ error: 'Relink cancelled' }); const media = await probe(sourcePath); const durationTolerance = Math.max(1.5, (target.media.duration || 0) * 0.02); const durationMismatch = Math.abs((media.duration || 0) - (target.media.duration || 0)) > durationTolerance; const dimensionsMismatch = Boolean(target.media.width && target.media.height && media.width && media.height && (target.media.width !== media.width || target.media.height !== media.height));
   if (durationMismatch || dimensionsMismatch) return void res.status(409).json({ error: `Selected video does not match ${target.sourceName}. Expected roughly ${target.media.width || '?'}×${target.media.height || '?'} and ${target.media.duration.toFixed(1)}s.` });
   target.sourcePath = sourcePath; target.sourceName = path.basename(sourcePath); target.media = { ...target.media, ...media }; syncProjectTimeline(project); await touchProject(project); res.json(await summarizeProject(project, brollPlans.get(project.id)));
 }));
 
 app.post('/api/projects/:id/clips', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id));
-  const sourcePaths = await pickNativeFiles('Add one or more base clips in playback order');
+  const sourcePaths = await uploadedOr(req, 'video', () => pickNativeFiles('Add one or more base clips in playback order'));
   if (!sourcePaths.length) return void res.status(400).json({ error: 'No additional video clips selected' });
   const existing = projectClips(project); const existingPaths = new Set(existing.map((clip) => path.resolve(clip.sourcePath)));
   const uniquePaths = sourcePaths.filter((sourcePath) => !existingPaths.has(path.resolve(sourcePath)));
@@ -859,14 +975,34 @@ app.put('/api/projects/:id/editor-project', route(async (req, res) => {
   res.json({ project: safe, savedAt: new Date().toISOString() });
 }));
 app.post('/api/projects/:id/transcribe', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const transcript = await transcribeProject(project); res.json({ transcript, edl: project.edl }); }));
+/** Delete-only clean with the selected text model (aggressive by default); one retry when a length target is missed. */
+async function cleanProject(project: Project, intensity: ReturnType<typeof cleanIntensityValue>, target: number | undefined, owner?: CleanNotes) {
+  const settings = await resolvedSettings();
+  if (!project.transcript) await transcribeProject(project);
+  const words = project.transcript!.words;
+  const choice: TextModelChoice = { provider: settings.cleanProvider, model: settings.cleanModel, effort: settings.cleanEffort };
+  await atomicWriteJson(path.join(project.workDir, 'edl.schema.json'), EDL_SCHEMA);
+  let edl = validateEdl(words, await generateStructuredText({ choice, config: settings, workDir: project.workDir, prompt: buildCleanPrompt(words, intensity, target, undefined, owner), schema: EDL_SCHEMA, outputName: 'clean-edl' }));
+  const feedback = targetFeedback(keptDuration(words, edl.keepRanges), target);
+  if (feedback) {
+    const retry = validateEdl(words, await generateStructuredText({ choice, config: settings, workDir: project.workDir, prompt: buildCleanPrompt(words, intensity, target, feedback, owner), schema: EDL_SCHEMA, outputName: 'clean-edl-retry' }));
+    if (!targetFeedback(keptDuration(words, retry.keepRanges), target) || Math.abs(keptDuration(words, retry.keepRanges) - target!) < Math.abs(keptDuration(words, edl.keepRanges) - target!)) edl = retry;
+  }
+  project.edl = edl;
+  const wordIndex = new Map(words.map((word, i) => [word.id, i]));
+  const keptText = project.edl.keepRanges.map((range: KeepRange) => words.slice(wordIndex.get(range.startWordId), wordIndex.get(range.endWordId)! + 1).map((word) => word.text).join(' ')).join(' ');
+  project.edl.notes = [...(project.edl.notes ?? []), ...scanMetaText(keptText).map((finding) => formatMetaFinding(finding, 'the cleaned narration'))];
+  await invalidateBroll(project); await Promise.all([atomicWriteJson(path.join(project.workDir, 'edl.json'), project.edl), touchProject(project)]);
+  return { ...project.edl, keptSeconds: Math.round(keptDuration(words, project.edl.keepRanges) * 10) / 10, sourceSeconds: Math.round((words.at(-1)!.end - words[0].start) * 10) / 10, intensity, targetDurationSec: target };
+}
 app.post('/api/projects/:id/clean', route(async (req, res) => {
-  const project = getProject(routeParam(req.params.id)); const settings = await resolvedSettings(); const intensity = ['light', 'balanced', 'aggressive'].includes(req.body?.intensity) ? req.body.intensity : 'balanced'; if (!project.transcript) await transcribeProject(project); const choice: TextModelChoice = { provider: settings.cleanProvider, model: settings.cleanModel };
-  const schemaPath = path.join(project.workDir, 'edl.schema.json'); const outputPath = path.join(project.workDir, 'codex-edl.json'); await atomicWriteJson(schemaPath, EDL_SCHEMA); const transcript = project.transcript!.words.map((word) => `[${word.id} ${word.start.toFixed(3)}-${word.end.toFixed(3)}] ${word.text}`).join('\n'); const prompt = `You are a decisive professional talking-head dialogue editor. Produce a concise, natural final narration containing only material that earns its place.\n\nThis is DELETE-ONLY editing. Never invent, paraphrase, replace, reorder, or combine spoken words. Keep source chronology. Return only ranges of ORIGINAL words to keep, and never cut inside a word.\n\nREMOVE ALL NON-ESSENTIAL MATERIAL:\n- Silence, dead air, setup time, and unnecessarily long pauses. Infer silence from the timestamp gap between consecutive words. Split keep ranges around removable gaps instead of returning one range that bridges them.\n- Repeated sentences, repeated ideas, duplicate takes, and attempts where the speaker says the same thing again. Keep only the clearest, most complete, most natural version.\n- Fillers, verbal clutter, false starts, abandoned phrases, self-corrections, stumbles, off-topic remarks, production chatter, and low-value tangents.\n- Redundant lead-ins and conclusions that do not add meaning.\n\nPRESERVE:\n- The complete intended meaning, important facts, necessary context, and the speaker's natural voice.\n- Short pauses that make speech understandable or emotionally natural. Make cuts at safe phrase/sentence boundaries so the result remains grammatical and does not sound rushed.\n\nCleanup intensity: ${intensity}.\nLight: remove obvious mistakes, duplicate takes, fillers, and long silence while retaining relaxed pacing.\nBalanced: remove all clear repetition and non-essential wording, tighten ordinary pauses, and preserve only useful context.\nAggressive: keep the shortest coherent version of every necessary idea and remove nearly all avoidable pause or redundancy.\n\nFor every returned keep range, provide a short reason describing why that exact passage is necessary. In notes, summarize removed duplicate takes and major silence cleanup.\n\n${metaTextGuidelinesPrompt()}\nBecause editing is delete-only, you may REMOVE a sentence that clearly breaks these policies (e.g. a guaranteed-cure claim or a superiority claim) when the remaining narration still makes sense, and you must say so in notes prefixed \"Meta policy:\". Never rewrite or add words.\n\nSOURCE WORDS:\n${transcript}`;
-  const raw = await generateStructuredText({ choice, config: settings, workDir: project.workDir, prompt, schema: EDL_SCHEMA, outputName: 'clean-edl' }); project.edl = validateEdl(project.transcript!.words, raw); { const wordIndex = new Map(project.transcript!.words.map((word, i) => [word.id, i])); const keptText = project.edl.keepRanges.map((range: KeepRange) => project.transcript!.words.slice(wordIndex.get(range.startWordId), wordIndex.get(range.endWordId)! + 1).map((word) => word.text).join(' ')).join(' '); project.edl.notes = [...(project.edl.notes ?? []), ...scanMetaText(keptText).map((finding) => formatMetaFinding(finding, 'the cleaned narration'))]; } await invalidateBroll(project); await Promise.all([atomicWriteJson(path.join(project.workDir, 'edl.json'), project.edl), touchProject(project)]); res.json(project.edl);
+  res.json(await cleanProject(getProject(routeParam(req.params.id)), cleanIntensityValue(req.body?.intensity), targetDurationValue(req.body?.targetDurationSec)));
 }));
+
+
 app.put('/api/projects/:id/edl', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); if (!project.transcript) throw new Error('Missing transcript'); project.edl = validateEdl(project.transcript.words, { keepRanges: req.body?.keepRanges, notes: ['Manually adjusted'] }); await invalidateBroll(project); await atomicWriteJson(path.join(project.workDir, 'edl.json'), project.edl); res.json(project.edl); }));
 
-app.post('/api/projects/:id/broll/plan', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const settings = await resolvedSettings(); const transcript = await transcribeProject(project); const requested = (req.body?.settings ?? {}) as Partial<BrollPlanSettings>; const workflowMode = ['cleaned-video', 'raw-video', 'assets-only'].includes(String(requested.workflowMode)) ? requested.workflowMode : 'cleaned-video'; const keepRanges = workflowMode === 'cleaned-video' ? project.edl?.keepRanges : undefined; const orientation = (project.media.height || 0) > (project.media.width || 0) ? 'portrait' : 'landscape'; const plan = await createBrollPlan({ textConfig: settings, workDir: project.workDir, words: transcript.words, keepRanges, orientation, settings: { ...requested, provider: requested.provider || settings.imageProvider, planningProvider: requested.planningProvider || settings.planningProvider, planningModel: requested.planningModel ?? settings.planningModel } }); brollPlans.set(project.id, plan); await touchProject(project); res.json({ plan, transcript, edl: project.edl }); }));
+app.post('/api/projects/:id/broll/plan', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const settings = await resolvedSettings(); const transcript = await transcribeProject(project); const requested = (req.body?.settings ?? {}) as Partial<BrollPlanSettings>; const workflowMode = ['cleaned-video', 'raw-video', 'assets-only'].includes(String(requested.workflowMode)) ? requested.workflowMode : 'cleaned-video'; const keepRanges = workflowMode === 'cleaned-video' ? project.edl?.keepRanges : undefined; const orientation = (project.media.height || 0) > (project.media.width || 0) ? 'portrait' : 'landscape'; const plan = await createBrollPlan({ textConfig: settings, workDir: project.workDir, words: transcript.words, keepRanges, orientation, settings: { ...requested, provider: requested.provider || settings.imageProvider, planningProvider: requested.planningProvider || settings.planningProvider, planningModel: requested.planningModel ?? settings.planningModel, planningEffort: requested.planningEffort ?? settings.planningEffort } }); brollPlans.set(project.id, plan); await touchProject(project); res.json({ plan, transcript, edl: project.edl }); }));
 app.get('/api/projects/:id/broll', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const cached = brollPlans.get(project.id); const plan = await reconcileBrollFiles(project, cached ?? await loadBrollPlan(project.workDir)); if (!plan) return void res.status(404).json({ error: 'B-roll plan has not been created yet' }); brollPlans.set(project.id, plan); res.json(plan); }));
 app.put('/api/projects/:id/broll/settings', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet'); const patch: Partial<Pick<BrollPlanSettings, 'provider' | 'imageModel' | 'planningProvider' | 'planningModel' | 'videoPromptProvider' | 'videoPromptModel' | 'videoProvider' | 'returnVideoWithAudio'>> = {}; if (typeof req.body?.provider === 'string') patch.provider = providerValue(req.body.provider); if (typeof req.body?.imageModel === 'string') patch.imageModel = req.body.imageModel.trim().slice(0, 120); if (typeof req.body?.planningProvider === 'string') patch.planningProvider = textProviderValue(req.body.planningProvider); if (typeof req.body?.planningModel === 'string') patch.planningModel = req.body.planningModel.trim().slice(0, 120); if (typeof req.body?.videoPromptProvider === 'string') patch.videoPromptProvider = req.body.videoPromptProvider ? textProviderValue(req.body.videoPromptProvider) : undefined; if (typeof req.body?.videoPromptModel === 'string') patch.videoPromptModel = req.body.videoPromptModel.trim().slice(0, 120); if (typeof req.body?.videoProvider === 'string') patch.videoProvider = videoProviderValue(req.body.videoProvider); if (typeof req.body?.returnVideoWithAudio === 'boolean') patch.returnVideoWithAudio = req.body.returnVideoWithAudio; const updated = await updateBrollSettings(project.workDir, plan, patch); brollPlans.set(project.id, updated); await touchProject(project); res.json(updated); }));
 app.put('/api/projects/:id/broll/scenes/:sceneId', route(async (req, res) => {
@@ -1008,7 +1144,7 @@ app.get('/api/projects/:id/thumbnail', route(async (req, res) => {
 app.post('/api/projects/:id/thumbnail/references', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id));
   const settings = await resolvedSettings();
-  const sourcePaths = await pickNativeImageFiles();
+  const sourcePaths = await uploadedOr(req, 'image', () => pickNativeImageFiles());
   if (!sourcePaths.length) return void res.status(400).json({ error: 'No thumbnail references selected' });
   const state = await replaceThumbnailReferences({ workDir: project.workDir, sourcePaths, ffmpegBin: settings.ffmpegBin });
   await touchProject(project);
@@ -1065,16 +1201,16 @@ app.post('/api/projects/:id/presenter-matte', route(async (req, res) => {
 app.post('/api/projects/:id/broll/scenes/:sceneId/generate', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id)); const sceneId = routeParam(req.params.sceneId); const settings = await resolvedSettings(); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet');
   const regenerationComment = typeof req.body?.regenerationComment === 'string' ? req.body.regenerationComment.trim().slice(0, 2000) : undefined;
-  const scene = await generateBrollImage({ workDir: project.workDir, plan, sceneId, regenerationComment, config: { openAiApiKey: settings.openAiApiKey, openAiModel: settings.openAiImageModel, geminiApiKey: settings.geminiApiKey, geminiModel: settings.geminiImageModel, grokBin: settings.grokBin, grokModel: settings.grokModel, grokVideoModel: settings.grokVideoModel, codexBin: settings.codexBin, codexModel: settings.codexModel, ffmpegBin: settings.ffmpegBin } }); brollPlans.set(project.id, plan); await touchProject(project); res.json({ scene, imageUrl: `/api/projects/${project.id}/broll/scenes/${scene.id}/image?v=${encodeURIComponent(scene.generatedAt ?? '')}` });
+  const scene = await generateBrollImage({ workDir: project.workDir, plan, sceneId, regenerationComment, config: { openAiApiKey: settings.openAiApiKey, openAiModel: settings.openAiImageModel, geminiApiKey: settings.geminiApiKey, geminiModel: settings.geminiImageModel, grokBin: settings.grokBin, grokModel: settings.grokModel, grokVideoModel: settings.grokVideoModel, codexBin: settings.codexBin, codexModel: settings.codexModel, ffmpegBin: settings.ffmpegBin, claudeBin: settings.claudeBin, picturesEngine: picturesEngine(settings) } }); brollPlans.set(project.id, plan); await touchProject(project); res.json({ scene, imageUrl: `/api/projects/${project.id}/broll/scenes/${scene.id}/image?v=${encodeURIComponent(scene.generatedAt ?? '')}` });
 }));
-app.post('/api/projects/:id/broll/scenes/:sceneId/manual-image', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const settings = await resolvedSettings(); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet'); const sourcePath = await pickNativeImageFile(); if (!sourcePath) return void res.status(400).json({ error: 'No image selected' }); const scene = await importBrollImage({ workDir: project.workDir, plan, sceneId: routeParam(req.params.sceneId), sourcePath, ffmpegBin: settings.ffmpegBin }); brollPlans.set(project.id, plan); await touchProject(project); res.json({ scene, imageUrl: `/api/projects/${project.id}/broll/scenes/${scene.id}/image?v=${encodeURIComponent(scene.generatedAt ?? '')}` }); }));
-app.post('/api/projects/:id/broll/scenes/:sceneId/manual-video', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const settings = await resolvedSettings(); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet'); const sourcePath = await pickNativeFile('Choose a completed B-roll video'); if (!sourcePath) return void res.status(400).json({ error: 'No video selected' }); const media = await probe(sourcePath); if (!media.videoCodec) throw new Error('The selected file does not contain a video stream.'); const scene = await importBrollVideo({ workDir: project.workDir, plan, sceneId: routeParam(req.params.sceneId), sourcePath, ffmpegBin: settings.ffmpegBin }); brollPlans.set(project.id, plan); await touchProject(project); res.json({ scene, videoUrl: `/api/projects/${project.id}/broll/scenes/${scene.id}/video?v=${encodeURIComponent(scene.videoGeneratedAt ?? '')}` }); }));
+app.post('/api/projects/:id/broll/scenes/:sceneId/manual-image', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const settings = await resolvedSettings(); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet'); const sourcePath = (await uploadedOr(req, 'image', async () => [await pickNativeImageFile()]))[0]; if (!sourcePath) return void res.status(400).json({ error: 'No image selected' }); const scene = await importBrollImage({ workDir: project.workDir, plan, sceneId: routeParam(req.params.sceneId), sourcePath, ffmpegBin: settings.ffmpegBin }); brollPlans.set(project.id, plan); await touchProject(project); res.json({ scene, imageUrl: `/api/projects/${project.id}/broll/scenes/${scene.id}/image?v=${encodeURIComponent(scene.generatedAt ?? '')}` }); }));
+app.post('/api/projects/:id/broll/scenes/:sceneId/manual-video', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const settings = await resolvedSettings(); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet'); const sourcePath = (await uploadedOr(req, 'video', async () => [await pickNativeFile('Choose a completed B-roll video')]))[0]; if (!sourcePath) return void res.status(400).json({ error: 'No video selected' }); const media = await probe(sourcePath); if (!media.videoCodec) throw new Error('The selected file does not contain a video stream.'); const scene = await importBrollVideo({ workDir: project.workDir, plan, sceneId: routeParam(req.params.sceneId), sourcePath, ffmpegBin: settings.ffmpegBin }); brollPlans.set(project.id, plan); await touchProject(project); res.json({ scene, videoUrl: `/api/projects/${project.id}/broll/scenes/${scene.id}/video?v=${encodeURIComponent(scene.videoGeneratedAt ?? '')}` }); }));
 app.get('/api/projects/:id/broll/scenes/:sceneId/image', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const loaded = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); const plan = await reconcileBrollFiles(project, loaded); const scene = plan?.scenes.find((candidate) => candidate.id === routeParam(req.params.sceneId)); const imagePath = scene ? await resolveBrollAssetPath(project.workDir, scene, 'image') : undefined; if (!plan || !scene || !imagePath) return void res.status(404).json({ error: 'B-roll image has not been generated yet' }); brollPlans.set(project.id, plan); res.setHeader('Cache-Control', 'private, max-age=31536000, immutable'); res.sendFile(imagePath); }));
 
 app.post('/api/projects/:id/broll/scenes/:sceneId/fix-meta', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id)); const settings = await resolvedSettings();
   const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet');
-  const scene = await fixSceneForMetaPolicy({ textConfig: settings, workDir: project.workDir, plan, sceneId: routeParam(req.params.sceneId), config: { openAiApiKey: settings.openAiApiKey, openAiModel: settings.openAiImageModel, geminiApiKey: settings.geminiApiKey, geminiModel: settings.geminiImageModel, grokBin: settings.grokBin, grokModel: settings.grokModel, grokVideoModel: settings.grokVideoModel, codexBin: settings.codexBin, codexModel: settings.codexModel, ffmpegBin: settings.ffmpegBin } });
+  const scene = await fixSceneForMetaPolicy({ textConfig: settings, workDir: project.workDir, plan, sceneId: routeParam(req.params.sceneId), config: { openAiApiKey: settings.openAiApiKey, openAiModel: settings.openAiImageModel, geminiApiKey: settings.geminiApiKey, geminiModel: settings.geminiImageModel, grokBin: settings.grokBin, grokModel: settings.grokModel, grokVideoModel: settings.grokVideoModel, codexBin: settings.codexBin, codexModel: settings.codexModel, ffmpegBin: settings.ffmpegBin, claudeBin: settings.claudeBin, picturesEngine: picturesEngine(settings) } });
   brollPlans.set(project.id, plan); await touchProject(project); res.json(scene);
 }));
 app.post('/api/projects/:id/broll/scenes/:sceneId/video-prompt', route(async (req, res) => { const project = getProject(routeParam(req.params.id)); const settings = await resolvedSettings(); const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!plan) throw new Error('B-roll plan has not been created yet'); const sceneId = routeParam(req.params.sceneId); if (plan.scenes.find(candidate => candidate.id === sceneId)?.videoTreatment === 'still') throw new Error('This scene uses a still motion effect and does not need a video prompt.'); const scene = await createVideoPrompt({ textConfig: settings, workDir: project.workDir, plan, sceneId }); brollPlans.set(project.id, plan); await touchProject(project); res.json(scene); }));
@@ -1130,10 +1266,10 @@ app.post('/api/projects/:id/export-project-zip', route(async (req, res) => {
   if (!Object.values(exportOptions).some(Boolean)) throw new Error('Select at least one item to export.');
   const plan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir);
   const baseName = project.name.replace(/[\\/:*?"<>|]+/g, '-').replace(/\s+/g, ' ').trim() || 'video-cleaner-project';
-  const selectedPath = await pickZipPath(`${baseName}.zip`); if (!selectedPath) return void res.status(400).json({ error: 'Export cancelled' });
+  const selectedPath = await outputFor(req, project, `${baseName}.zip`, () => pickZipPath(`${baseName}.zip`)); if (!selectedPath) return void res.status(400).json({ error: 'Export cancelled' });
   const destination = selectedPath.toLowerCase().endsWith('.zip') ? selectedPath : `${selectedPath}.zip`;
   const result = await exportProjectZip({ project, plan: plan ?? null, destination, exportOptions });
-  res.json(result);
+  res.json({ ...result, downloadUrl: downloadUrlFor(project, destination) });
 }));
 
 app.post('/api/projects/:id/editor/export-video', route(async (req, res) => {
@@ -1146,7 +1282,7 @@ app.post('/api/projects/:id/editor/export-video', route(async (req, res) => {
   const savedPath = path.join(project.workDir, 'editor-project.json');
   const timeline = await fs.readFile(savedPath, 'utf8').then(value => JSON.parse(value)).catch(() => null);
   if (!timeline?.tracks?.length) throw new Error('No saved CJCut timeline. Save it in Live Editor first.');
-  const outputPath = await pickExportPath('video-cjcut-edited.mp4', 'Export edited timeline from CJCut');
+  const outputPath = await outputFor(req, project, 'video-cjcut-edited.mp4', () => pickExportPath('video-cjcut-edited.mp4', 'Export edited timeline from CJCut'));
   if (!outputPath) return void res.status(400).json({ error: 'Export cancelled' });
   const mode: 'fast' | 'quality' = req.body?.mode === 'fast' ? 'fast' : 'quality';
   const capabilities = await ffmpegCapabilities(settings.ffmpegBin);
@@ -1192,7 +1328,7 @@ app.post('/api/projects/:id/editor/export-video', route(async (req, res) => {
 
 app.post('/api/projects/:id/broll/export-video', route(async (req, res) => {
   const projectId = routeParam(req.params.id); const project = getProject(projectId); await requireSource(project); const settings = await resolvedSettings(); const storedPlan = brollPlans.get(project.id) ?? await loadBrollPlan(project.workDir); if (!storedPlan) throw new Error('B-roll plan has not been created yet'); if (storedPlan.settings.workflowMode === 'assets-only') throw new Error('Assets-only projects export files and timing JSON, not a rendered video'); if (!settings.ffmpegBin) throw new Error('FFmpeg was not found');
-  const active = exportJobs.get(projectId); if (active?.state === 'running') return void res.status(409).json({ error: 'An export is already running for this project' }); const outputPath = await pickExportPath('video-with-broll.mp4', 'Export video with B-roll'); if (!outputPath) return void res.status(400).json({ error: 'Export cancelled' }); const plan = storedPlan;
+  const active = exportJobs.get(projectId); if (active?.state === 'running') return void res.status(409).json({ error: 'An export is already running for this project' }); const outputPath = await outputFor(req, project, 'video-with-broll.mp4', () => pickExportPath('video-with-broll.mp4', 'Export video with B-roll')); if (!outputPath) return void res.status(400).json({ error: 'Export cancelled' }); const plan = storedPlan;
   const mode: 'fast' | 'quality' = req.body?.mode === 'fast' ? 'fast' : 'quality'; const fps = project.media.frameRate && project.media.frameRate > 0 ? project.media.frameRate : 30; const cleanedSegments = plan.settings.workflowMode === 'cleaned-video' ? rangesToSeconds(project) : undefined; const rawSegments = cleanedSegments?.length ? cleanedSegments : [{ start: 0, end: project.media.duration }]; const sourceSegments = splitSegmentsAtClipBoundaries(project, rawSegments);
   const activeScenes = plan.scenes.filter((scene) => scene.enabled && (scene.videoFile || scene.imageFile)); const needsPresenterMatte = planNeedsPresenterMatte(plan);
   const capabilities = await ffmpegCapabilities(settings.ffmpegBin); const outputHdr = project.media.hdr; const encoding = encodingArgs(project, capabilities, mode, !outputHdr); const inputAcceleration = capabilities.videoToolboxDecode ? ['-hwaccel', 'videotoolbox'] : []; const ranges = checkpointRanges(sourceSegments, activeScenes); if (!ranges.length) throw new Error('The export timeline is empty');
@@ -1225,7 +1361,7 @@ app.post('/api/projects/:id/broll/export-video', route(async (req, res) => {
 }));
 
 app.post('/api/projects/:id/export', route(async (req, res) => {
-  const projectId = routeParam(req.params.id); const project = getProject(projectId); await requireSource(project); const settings = await resolvedSettings(); if (!project.transcript || !project.edl) throw new Error('Missing transcript or edit decision list'); if (!settings.ffmpegBin) throw new Error('FFmpeg was not found'); const active = exportJobs.get(projectId); if (active?.state === 'running') return void res.status(409).json({ error: 'An export is already running for this project' }); const outputPath = await pickExportPath(); if (!outputPath) return void res.status(400).json({ error: 'Export cancelled' });
+  const projectId = routeParam(req.params.id); const project = getProject(projectId); await requireSource(project); const settings = await resolvedSettings(); if (!project.transcript || !project.edl) throw new Error('Missing transcript or edit decision list'); if (!settings.ffmpegBin) throw new Error('FFmpeg was not found'); const active = exportJobs.get(projectId); if (active?.state === 'running') return void res.status(409).json({ error: 'An export is already running for this project' }); const outputPath = await outputFor(req, project, 'cleaned-video.mp4', () => pickExportPath()); if (!outputPath) return void res.status(400).json({ error: 'Export cancelled' });
   const mode: 'fast' | 'quality' = req.body?.mode === 'fast' ? 'fast' : 'quality'; const fps = project.media.frameRate && project.media.frameRate > 0 ? project.media.frameRate : 30; const sourceSegments = splitSegmentsAtClipBoundaries(project, rangesToSeconds(project)); const capabilities = await ffmpegCapabilities(settings.ffmpegBin); const encoding = encodingArgs(project, capabilities, mode); const inputAcceleration = capabilities.videoToolboxDecode ? ['-hwaccel', 'videotoolbox'] : []; const ranges = checkpointRanges(sourceSegments, []); if (!ranges.length) throw new Error('The export timeline is empty'); const fingerprint = await checkpointFingerprint({ project, mode, segments: sourceSegments, encodingArgs: encoding.args, fps }); const checkpointRoot = path.join(project.workDir, 'render-checkpoints'); const sessionDir = path.join(checkpointRoot, fingerprint); await fs.mkdir(checkpointRoot, { recursive: true });
   const sourceMedia = new Map<string, MediaProfile>(); for (const clip of projectClips(project)) sourceMedia.set(clip.id, await probe(clip.sourcePath));
   for (const entry of await fs.readdir(checkpointRoot, { withFileTypes: true })) if (entry.isDirectory() && entry.name !== fingerprint) await fs.rm(path.join(checkpointRoot, entry.name), { recursive: true, force: true }); await fs.mkdir(sessionDir, { recursive: true });
@@ -1233,7 +1369,154 @@ app.post('/api/projects/:id/export', route(async (req, res) => {
   launchCheckpointExport({ projectId, command: settings.ffmpegBin, sessionDir, fingerprint, outputPath, encoder: encoding.encoder, ranges, buildPartArgs, audioArgs: (audioOutputPath) => timelineAudioArgs(project, sourceSegments, audioOutputPath) });
   res.status(202).json({ started: true, outputPath, encoder: encoding.encoder, hardware: encoding.hardware, targetBitRate: encoding.targetBitRate, checkpoints: ranges.length, clips: projectClips(project).length });
 }));
-app.get('/api/projects/:id/export-status', route(async (req, res) => { res.json(exportJobs.get(routeParam(req.params.id)) ?? { state: 'idle', progress: 0, outTime: '00:00:00.000000', speed: '', frame: 0 }); }));
+// ---- One-tap Auto reel: upload -> preview with no further taps (server/auto-reel.ts has the pieces).
+const autoJobs = new Map<string, AutoJob>();
+type ReviewDecision = { action: 'continue' | 'redo' | 'stop'; keepRanges?: KeepRange[]; notes?: string };
+const reviewWaiters = new Map<string, (decision: ReviewDecision) => void>();
+const autoJobFile = (project: Project) => path.join(project.workDir, 'auto', 'job.json');
+async function persistAutoJob(project: Project, job: AutoJob) {
+  const { review, ...rest } = job; // the transcript is large and rebuilt from the project when needed
+  await fs.mkdir(path.dirname(autoJobFile(project)), { recursive: true });
+  await atomicWriteJson(autoJobFile(project), { ...rest, hadReview: Boolean(review) }).catch(() => undefined);
+}
+async function runAutoReel(project: Project, job: AutoJob) {
+  const settings = await resolvedSettings();
+  if (!settings.ffmpegBin) throw new Error('FFmpeg was not found');
+  if (projectClips(project).length !== 1) throw new Error('Auto reel works on one clip for now. Use the step-by-step editor for multi-clip projects.');
+  const python = await resolvePythonBin(); if (!python) throw new Error('Python 3 was not found');
+  const dir = path.join(project.workDir, 'auto'); await fs.mkdir(dir, { recursive: true });
+  const portrait = (project.media.height || 1920) >= (project.media.width || 1080);
+  const [W, H] = portrait ? [1080, 1920] : [1920, 1080];
+  const stage = async <T>(id: AutoStageId, work: (note: (detail: string) => void) => Promise<T>): Promise<T | undefined> => {
+    const item = job.stages.find((s) => s.id === id)!; if (item.state === 'skipped') return undefined;
+    if (job.stopRequested) throw new Error('Stopped');
+    item.state = 'running'; const started = Date.now(); void persistAutoJob(project, job);
+    try { const result = await work((detail) => { item.detail = detail; }); item.state = 'done'; item.seconds = Math.round((Date.now() - started) / 1000); void persistAutoJob(project, job); return result; }
+    catch (error) { item.state = 'failed'; item.detail = error instanceof Error ? error.message : String(error); void persistAutoJob(project, job); throw error; }
+  };
+  await stage('audio', async (note) => { await ensureAnalysisAudio(project); note(`${Math.round(project.media.duration)} s of audio`); });
+  await stage('transcribe', async (note) => { const t = await transcribeProject(project); note(`${t.words.length} words`); });
+  await stage('clean', async (note) => { const r = await cleanProject(project, 'aggressive', job.options.targetDurationSec); job.sourceSeconds = r.sourceSeconds; note(`${r.sourceSeconds} s → ${r.keptSeconds} s`); });
+  const words = project.transcript!.words;
+  await stage('review', async (note) => {
+    // Pause: show the cleaned transcript; the owner keeps/removes sentences or writes notes for the AI.
+    for (;;) {
+      const keepRanges = project.edl!.keepRanges;
+      job.review = { words: words.map(({ id, text, start, end }) => ({ id, text, start, end })), keepRanges, keptSeconds: Math.round(keptDuration(words, keepRanges) * 10) / 10, sourceSeconds: Math.round((words.at(-1)!.end - words[0].start) * 10) / 10 };
+      job.state = 'review'; note('Waiting for you to check the transcript'); void persistAutoJob(project, job);
+      const decision = await new Promise<ReviewDecision>((resolve) => reviewWaiters.set(project.id, resolve));
+      reviewWaiters.delete(project.id); job.state = 'running';
+      if (decision.action === 'stop') { job.review = undefined; throw new Error('Stopped'); }
+      if (decision.action === 'redo') {
+        job.review = { ...job.review, notes: decision.notes, redoing: true }; note('Re-cleaning with your notes…');
+        await cleanProject(project, 'aggressive', job.options.targetDurationSec, { notes: decision.notes ?? '', previous: keepRanges });
+        continue;
+      }
+      if (decision.keepRanges) {
+        project.edl = { ...validateEdl(words, { keepRanges: decision.keepRanges, notes: project.edl!.notes }) };
+        await invalidateBroll(project); await Promise.all([atomicWriteJson(path.join(project.workDir, 'edl.json'), project.edl), touchProject(project)]);
+      }
+      note(`Approved · ${Math.round(keptDuration(words, project.edl!.keepRanges))} s kept`); job.review = undefined; return;
+    }
+  });
+  let plan: BrollPlan | undefined;
+  await stage('broll-plan', async (note) => {
+    plan = await createBrollPlan({ textConfig: settings, workDir: project.workDir, words, keepRanges: project.edl?.keepRanges, orientation: portrait ? 'portrait' : 'landscape',
+      settings: { workflowMode: 'cleaned-video', provider: job.options.imageProvider === 'chatgpt' ? 'chatgpt-browser' : 'gemini', planningProvider: settings.planningProvider, planningModel: settings.planningModel, planningEffort: settings.planningEffort,
+        countMode: 'per-minute', imagesPerMinute: 6, minSceneDuration: 2, maxSceneDuration: 4, aspectRatio: portrait ? '9:16' : '16:9' } });
+    brollPlans.set(project.id, plan); note(`${plan.scenes.length} moments`);
+  });
+  await stage('broll-images', async (note) => {
+    if (!plan) return;
+    const config = { openAiApiKey: settings.openAiApiKey, openAiModel: settings.openAiImageModel, geminiApiKey: settings.geminiApiKey, geminiModel: settings.geminiImageModel, grokBin: settings.grokBin, grokModel: settings.grokModel, grokVideoModel: settings.grokVideoModel, codexBin: settings.codexBin, codexModel: settings.codexModel, claudeBin: settings.claudeBin, ffmpegBin: settings.ffmpegBin, picturesEngine: picturesEngine(settings) };
+    if (job.options.imageProvider === 'chatgpt') {
+      note(`ChatGPT in Chrome · ${plan.scenes.length} pictures in one chat…`);
+      // A failed picture step should not throw away the whole reel: keep going without B-roll and say why.
+      const made = await generateBrollImagesWithChatGpt({ config, workDir: project.workDir, plan, sceneIds: plan.scenes.map((scene) => scene.id), onLine: (text) => note(text) })
+        .catch((error) => { note(`ChatGPT pictures failed: ${error instanceof Error ? error.message : String(error)}`.slice(0, 400)); return null; });
+      if (!made) { brollPlans.set(project.id, plan); return; }
+      brollPlans.set(project.id, plan); note(`${made.length} / ${plan.scenes.length} from ChatGPT`); return;
+    }
+    let done = 0; let failed = 0; const queue = [...plan.scenes];
+    const workers = 3; // Gemini images in parallel (ChatGPT returned above)
+    note(`0 / ${queue.length}`);
+    await Promise.all(Array.from({ length: Math.min(workers, queue.length) }, async () => {
+      for (let scene = queue.shift(); scene; scene = queue.shift()) {
+        if (job.stopRequested) return;
+        try { await generateBrollImage({ workDir: project.workDir, plan: plan!, sceneId: scene.id, config }); done += 1; } catch { failed += 1; }
+        note(`${done} / ${plan!.scenes.length}${failed ? ` · ${failed} failed (skipped)` : ''}`);
+      }
+    }));
+    brollPlans.set(project.id, plan);
+  });
+  const edited = await stage('edit', async (note) => {
+    await fs.writeFile(path.join(dir, 'words.json'), JSON.stringify({ words }));
+    await fs.writeFile(path.join(dir, 'keep.json'), JSON.stringify({ keep: keepIndexRanges(words, project.edl!.keepRanges) }));
+    const color = colorVideoFilter(project.media, false);
+    note('Cutting and grading shots…');
+    const result = await runPython(python, AUTO_EDIT_SCRIPT, [projectClips(project)[0].sourcePath, path.join(dir, 'words.json'), path.join(dir, 'keep.json'), dir, String(W), String(H), color, '1.07']);
+    job.finalSeconds = result.duration; note(`${result.cuts} cuts · ${result.shots} shots · ${Math.round(result.duration)} s`);
+    return result as { duration: number };
+  });
+  const duration = edited!.duration;
+  await run(settings.ffmpegBin, ['-hide_banner', '-v', 'error', '-y', '-i', path.join(dir, 'video.mp4'), '-i', path.join(dir, 'speech-master.wav'), '-map', '0:v', '-map', '1:a', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-shortest', path.join(dir, 'base.mp4')]);
+  const captionFile = path.join(dir, 'captions-glass.webm');
+  const captioned = await stage('captions', async (note) => {
+    const editedWords = JSON.parse(await fs.readFile(path.join(dir, 'edited-words.json'), 'utf8')).words as CaptionWordIn[];
+    const phrases = buildCaptionPhrases(editedWords, duration);
+    await renderCaptionLayer({ phrases, duration, outputPath: captionFile, chromeBin: await detectChromeBin(), workDir: dir, onProgress: (f) => note(`${Math.round(f * 100)}%`) });
+    note(`${phrases.length} phrases`); return true;
+  });
+  await stage('compose', async (note) => {
+    const editRanges = JSON.parse(await fs.readFile(path.join(dir, 'edit.json'), 'utf8')).ranges as EditRange[];
+    const scenes = (plan?.scenes ?? []).map((scene) => ({ id: scene.id, startWordId: scene.startWordId, sourceStart: scene.sourceStart, sourceEnd: scene.sourceEnd, image: scene.imageStatus === 'ready' ? scene.imageFile : undefined }));
+    const broll = job.options.broll ? placeBroll(words, editRanges, scenes, duration) : [];
+    await fs.writeFile(path.join(dir, 'broll-placed.json'), JSON.stringify({ scenes: broll }));
+    await fs.mkdir(exportsDir(project), { recursive: true });
+    const output = path.join(exportsDir(project), `${new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15)}-auto-reel.mp4`);
+    note(`${broll.length} B-roll cutaways…`);
+    await runPython(python, AUTO_COMPOSITE_SCRIPT, [path.join(dir, 'base.mp4'), path.join(dir, 'broll-placed.json'), path.join(dir, 'broll-clips'), captioned ? captionFile : '-', String(Math.round(H * 0.651)), WHOOSH, output, String(W), String(H)]);
+    job.outputPath = output; job.downloadUrl = downloadUrlFor(project, output); job.previewUrl = job.downloadUrl ? `${job.downloadUrl}?inline=1` : undefined;
+    note(`${broll.length} B-roll · captions ${captioned ? 'on' : 'off'}`);
+  });
+}
+app.post('/api/projects/:id/auto', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id));
+  if (['running', 'review'].includes(autoJobs.get(project.id)?.state ?? '')) return void res.status(409).json({ error: 'Auto reel is already running for this project' });
+  const options: AutoOptions = {
+    targetDurationSec: targetDurationValue(req.body?.targetDurationSec), imageProvider: req.body?.imageProvider === 'chatgpt' ? 'chatgpt' : 'gemini',
+    broll: req.body?.broll !== false, captions: req.body?.captions !== false, review: req.body?.review !== false,
+  };
+  const job = newAutoJob(options); autoJobs.set(project.id, job);
+  void runAutoReel(project, job).then(() => { job.state = 'completed'; }).catch((error) => { job.state = job.stopRequested ? 'stopped' : 'failed'; job.error = error instanceof Error ? error.message : String(error); }).finally(() => { job.finishedAt = Date.now(); void persistAutoJob(project, job); });
+  res.status(202).json(job);
+}));
+app.get('/api/projects/:id/auto', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id)); const live = autoJobs.get(project.id);
+  if (live) return void res.json(live);
+  // After a restart the job is read back from disk; one that was mid-way cannot continue.
+  const saved = await fs.readFile(autoJobFile(project), 'utf8').then((text) => JSON.parse(text) as AutoJob).catch(() => null);
+  if (!saved) return void res.json({ state: 'idle' });
+  if (saved.state === 'running' || saved.state === 'review') { saved.state = 'failed'; saved.error = 'Interrupted by a restart of the app. Start the reel again.'; }
+  res.json(saved);
+}));
+app.post('/api/projects/:id/auto/review', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id)); const job = autoJobs.get(project.id); const resolve = reviewWaiters.get(project.id);
+  if (!job || job.state !== 'review' || !resolve) return void res.status(409).json({ error: 'This reel is not waiting for a review.' });
+  const action = req.body?.action === 'redo' ? 'redo' : 'continue';
+  const notes = typeof req.body?.notes === 'string' ? req.body.notes.trim().slice(0, 4000) : '';
+  if (action === 'redo' && !notes) return void res.status(400).json({ error: 'Write what the AI should keep or remove.' });
+  const keepRanges = Array.isArray(req.body?.keepRanges) ? req.body.keepRanges : undefined;
+  if (keepRanges) validateEdl(project.transcript!.words, { keepRanges }); // throws a clear error before resuming
+  resolve({ action, notes, keepRanges }); res.json({ ok: true });
+}));
+app.post('/api/projects/:id/auto/stop', route(async (req, res) => {
+  const id = routeParam(req.params.id); const job = autoJobs.get(id);
+  if (job && (job.state === 'running' || job.state === 'review')) { job.stopRequested = true; reviewWaiters.get(id)?.({ action: 'stop' }); }
+  res.json(job ?? { state: 'idle' });
+}));
+
+app.get('/api/projects/:id/export-status', route(async (req, res) => { const id = routeParam(req.params.id); const job = exportJobs.get(id); if (!job) return void res.json({ state: 'idle', progress: 0, outTime: '00:00:00.000000', speed: '', frame: 0 }); const project = projects.get(id); res.json({ ...job, downloadUrl: job.state === 'completed' && project ? downloadUrlFor(project, job.outputPath) : undefined }); }));
 app.post('/api/projects/:id/export-stop', route(async (req, res) => { const projectId = routeParam(req.params.id); const job = exportJobs.get(projectId); if (!job || job.state !== 'running') return void res.status(409).json({ error: 'No export is currently running' }); job.stopRequested = true; job.speed = job.resumable ? 'Stopping after preserving checkpoints…' : 'Stopping…'; const child = exportProcesses.get(projectId); if (child) child.kill('SIGTERM'); res.status(202).json({ stopping: true, resumable: Boolean(job.resumable) }); }));
 
 const PORT = Number(process.env.PORT || 3001); await loadSettings(); await hydrateProjects(true);

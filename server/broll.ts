@@ -1,3 +1,4 @@
+import { DEFAULT_PICTURES_ENGINE, generateChatGptImages } from './chatgpt-images.js';
 import { colorVideoFilter, type ColorProfile } from './color.js';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -8,7 +9,7 @@ import { generateStructuredText, type TextModelChoice, type TextModelConfig, typ
 
 export type BrollWord = { id: string; text: string; start: number; end: number };
 export type BrollKeepRange = { startWordId: string; endWordId: string };
-export type ImageProvider = 'openai' | 'gemini' | 'grok-cli' | 'codex-cli';
+export type ImageProvider = 'openai' | 'gemini' | 'grok-cli' | 'codex-cli' | 'chatgpt-browser';
 export type VideoProvider = 'grok-cli' | 'google-flow' | 'magnific';
 export type StillEffect = 'hold' | 'zoom-in' | 'zoom-out' | 'pan-left' | 'pan-right';
 export type BrollWorkflowMode = 'cleaned-video' | 'raw-video' | 'assets-only';
@@ -44,6 +45,7 @@ export type BrollPlanSettings = {
   imageModel?: string;
   planningProvider?: TextProvider;
   planningModel?: string;
+  planningEffort?: string;
   videoPromptProvider?: TextProvider;
   videoPromptModel?: string;
   videoProvider: VideoProvider;
@@ -62,7 +64,7 @@ export type BrollPlanSettings = {
 function videoPromptChoice(settings: BrollPlanSettings): TextModelChoice {
   return settings.videoPromptProvider
     ? { provider: settings.videoPromptProvider, model: settings.videoPromptModel || '' }
-    : { provider: settings.planningProvider || 'codex-cli', model: settings.planningModel || '' };
+    : { provider: settings.planningProvider || 'codex-cli', model: settings.planningModel || '', effort: settings.planningEffort };
 }
 export function planningModelLabel(choice: TextModelChoice): string {
   const provider = choice.provider === 'agy-cli' ? 'AGY' : choice.provider === 'codex-cli' ? 'Codex' : choice.provider === 'claude-cli' ? 'Claude' : choice.provider === 'openai' ? 'OpenAI' : 'Gemini';
@@ -135,7 +137,7 @@ export type BrollScene = {
 };
 
 export type BrollPlan = { version: 2; orientation: 'portrait' | 'landscape'; stylePreset: string; settings: BrollPlanSettings; scenes: BrollScene[]; notes: string[]; googleFlow?: GoogleFlowProjectState };
-export type ImageProviderConfig = { openAiApiKey?: string; openAiModel?: string; geminiApiKey?: string; geminiModel?: string; grokBin?: string; grokModel?: string; grokVideoModel?: string; gflowBin?: string; gflowProfile?: string; gflowVideoModel?: string; magnificApiKey?: string; magnificVideoModel?: string; magnificVideoEndpoint?: string; magnificFetch?: typeof fetch; magnificPollIntervalMs?: number; magnificTimeoutMs?: number; codexBin?: string; codexModel?: string; ffmpegBin?: string };
+export type ImageProviderConfig = { claudeBin?: string; picturesEngine?: import('./chatgpt-images.js').BrowserEngine; openAiApiKey?: string; openAiModel?: string; geminiApiKey?: string; geminiModel?: string; grokBin?: string; grokModel?: string; grokVideoModel?: string; gflowBin?: string; gflowProfile?: string; gflowVideoModel?: string; magnificApiKey?: string; magnificVideoModel?: string; magnificVideoEndpoint?: string; magnificFetch?: typeof fetch; magnificPollIntervalMs?: number; magnificTimeoutMs?: number; codexBin?: string; codexModel?: string; ffmpegBin?: string };
 type RunOptions = { cwd?: string; env?: NodeJS.ProcessEnv };
 
 export const BROLL_STYLE_PRESET = [
@@ -241,13 +243,13 @@ function normalizeDisplayTemplate(value: unknown): BrollDisplayTemplate {
 }
 function normalizeSettings(raw: Partial<BrollPlanSettings> | undefined): BrollPlanSettings {
   const workflowMode: BrollWorkflowMode = ['cleaned-video', 'raw-video', 'assets-only'].includes(String(raw?.workflowMode)) ? raw!.workflowMode as BrollWorkflowMode : 'cleaned-video';
-  const provider: ImageProvider = ['openai', 'gemini', 'grok-cli', 'codex-cli'].includes(String(raw?.provider)) ? raw!.provider as ImageProvider : 'gemini';
+  const provider: ImageProvider = ['openai', 'gemini', 'grok-cli', 'codex-cli', 'chatgpt-browser'].includes(String(raw?.provider)) ? raw!.provider as ImageProvider : 'gemini';
   const videoProvider: VideoProvider = ['grok-cli', 'google-flow', 'magnific'].includes(String(raw?.videoProvider)) ? raw!.videoProvider as VideoProvider : 'grok-cli';
   const countMode: BrollCountMode = ['auto', 'exact', 'per-minute', 'interval'].includes(String(raw?.countMode)) ? raw!.countMode as BrollCountMode : 'auto';
   const aspectRatio = ['auto', '9:16', '16:9'].includes(String(raw?.aspectRatio)) ? raw!.aspectRatio as BrollPlanSettings['aspectRatio'] : 'auto';
   const planningProvider: TextProvider = ['codex-cli', 'claude-cli', 'agy-cli', 'gemini', 'openai'].includes(String(raw?.planningProvider)) ? raw!.planningProvider as TextProvider : 'codex-cli';
   const videoPromptProvider: TextProvider | undefined = ['codex-cli', 'claude-cli', 'agy-cli', 'gemini', 'openai'].includes(String(raw?.videoPromptProvider)) ? raw!.videoPromptProvider as TextProvider : undefined;
-  return { workflowMode, provider, imageModel: raw?.imageModel?.trim() || '', videoPromptProvider, videoPromptModel: raw?.videoPromptModel?.trim() || '', planningProvider, planningModel: raw?.planningModel?.trim() || '', videoProvider, countMode, targetCount: Math.max(1, Math.min(40, Number(raw?.targetCount) || 6)), imagesPerMinute: Math.max(0.5, Math.min(20, Number(raw?.imagesPerMinute) || 5)), intervalSeconds: Math.max(10, Math.min(300, Number(raw?.intervalSeconds) || 20)), minSceneDuration: Math.max(1, Math.min(20, Number(raw?.minSceneDuration) || 3)), maxSceneDuration: Math.max(2, Math.min(30, Number(raw?.maxSceneDuration) || 8)), aspectRatio, displayTemplate: normalizeDisplayTemplate(raw?.displayTemplate), returnVideoWithAudio: raw?.returnVideoWithAudio === true };
+  return { planningEffort: raw?.planningEffort?.trim() || undefined, workflowMode, provider, imageModel: raw?.imageModel?.trim() || '', videoPromptProvider, videoPromptModel: raw?.videoPromptModel?.trim() || '', planningProvider, planningModel: raw?.planningModel?.trim() || '', videoProvider, countMode, targetCount: Math.max(1, Math.min(40, Number(raw?.targetCount) || 6)), imagesPerMinute: Math.max(0.5, Math.min(20, Number(raw?.imagesPerMinute) || 5)), intervalSeconds: Math.max(10, Math.min(300, Number(raw?.intervalSeconds) || 20)), minSceneDuration: Math.max(1, Math.min(20, Number(raw?.minSceneDuration) || 3)), maxSceneDuration: Math.max(2, Math.min(30, Number(raw?.maxSceneDuration) || 8)), aspectRatio, displayTemplate: normalizeDisplayTemplate(raw?.displayTemplate), returnVideoWithAudio: raw?.returnVideoWithAudio === true };
 }
 function validateStoryPlan(words: BrollWord[], keepRanges: BrollKeepRange[] | undefined, raw: any, settings: BrollPlanSettings) {
   const { index, kept } = keptWordIndexes(words, keepRanges); const { times } = keptTimeline(words, keepRanges);
@@ -318,7 +320,7 @@ async function createVisualPlan(options: { textConfig: TextModelConfig; choice: 
 
 export async function createBrollPlan(options: { textConfig: TextModelConfig; workDir: string; words: BrollWord[]; keepRanges?: BrollKeepRange[]; orientation: 'portrait' | 'landscape'; settings?: Partial<BrollPlanSettings> }) {
   const settings = normalizeSettings(options.settings); const { workDir, words, keepRanges, orientation } = options;
-  const choice: TextModelChoice = { provider: settings.planningProvider || 'codex-cli', model: settings.planningModel || '' }; const { kept } = keptWordIndexes(words, keepRanges);
+  const choice: TextModelChoice = { provider: settings.planningProvider || 'codex-cli', model: settings.planningModel || '', effort: settings.planningEffort }; const { kept } = keptWordIndexes(words, keepRanges);
   const { times } = keptTimeline(words, keepRanges);
   const transcript = words.map((word, index) => ({ word, index })).filter(({ index }) => kept.has(index)).map(({ word, index }) => { const timeline = times.get(index)!; return `[${word.id} source:${word.start.toFixed(3)}-${word.end.toFixed(3)} final:${timeline.start.toFixed(3)}-${timeline.end.toFixed(3)}] ${word.text}`; }).join('\\n');
   const requestedCount = targetSceneCount(words, keepRanges, settings); const schemaPath = path.join(workDir, 'broll-story-plan.schema.json');
@@ -457,7 +459,7 @@ Deliver exactly ONE ${resolveSceneAssetAspect(plan, scene)} starting frame for a
 }
 function findBase64Image(value: any): string | undefined { if (!value) return undefined; if (typeof value === 'object') { if (typeof value.data === 'string' && (value.type === 'image' || value.mime_type?.startsWith?.('image/'))) return value.data; if (typeof value.b64_json === 'string') return value.b64_json; if (value.output_image) { const nested = findBase64Image(value.output_image); if (nested) return nested; } for (const child of Object.values(value)) { const nested = findBase64Image(child); if (nested) return nested; } } if (Array.isArray(value)) for (const child of value) { const nested = findBase64Image(child); if (nested) return nested; } return undefined; }
 async function generateOpenAi(prompt: string, aspect: '9:16' | '16:9', config: ImageProviderConfig, outputPath: string) { if (!config.openAiApiKey) throw new Error('OPENAI_API_KEY is not configured'); const model = config.openAiModel || 'gpt-image-2'; const size = aspect === '9:16' ? '1024x1536' : '1536x1024'; const response = await fetch('https://api.openai.com/v1/images/generations', { method: 'POST', headers: { Authorization: `Bearer ${config.openAiApiKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ model, prompt, size, quality: 'high' }) }); if (!response.ok) throw new Error(`OpenAI image generation failed: ${response.status} ${await response.text()}`); const encoded = (await response.json() as any).data?.[0]?.b64_json; if (!encoded) throw new Error('OpenAI image generation returned no image data'); await fs.writeFile(outputPath, Buffer.from(encoded, 'base64')); return model; }
-async function generateGemini(prompt: string, aspect: '9:16' | '16:9', config: ImageProviderConfig, outputPath: string) { if (!config.geminiApiKey) throw new Error('GEMINI_API_KEY is not configured'); const model = config.geminiModel || 'gemini-3.1-flash-image'; const response = await fetch('https://generativelanguage.googleapis.com/v1beta/interactions', { method: 'POST', headers: { 'x-goog-api-key': config.geminiApiKey, 'Content-Type': 'application/json' }, body: JSON.stringify({ model, input: prompt, response_format: { type: 'image', mime_type: 'image/png', aspect_ratio: aspect, image_size: '2K' } }) }); if (!response.ok) throw new Error(`Gemini image generation failed: ${response.status} ${await response.text()}`); const encoded = findBase64Image(await response.json()); if (!encoded) throw new Error('Gemini image generation returned no image data'); await fs.writeFile(outputPath, Buffer.from(encoded, 'base64')); return model; }
+async function generateGemini(prompt: string, aspect: '9:16' | '16:9', config: ImageProviderConfig, outputPath: string) { if (!config.geminiApiKey) throw new Error('GEMINI_API_KEY is not configured'); const model = config.geminiModel || 'gemini-3.1-flash-image'; const response = await fetch('https://generativelanguage.googleapis.com/v1beta/interactions', { method: 'POST', headers: { 'x-goog-api-key': config.geminiApiKey, 'Content-Type': 'application/json' }, body: JSON.stringify({ model, input: prompt, response_format: { type: 'image', mime_type: 'image/jpeg', aspect_ratio: aspect, image_size: '2K' } /* the image API now only accepts JPEG; normalizeImage converts it */ }) }); if (!response.ok) throw new Error(`Gemini image generation failed: ${response.status} ${await response.text()}`); const encoded = findBase64Image(await response.json()); if (!encoded) throw new Error('Gemini image generation returned no image data'); await fs.writeFile(outputPath, Buffer.from(encoded, 'base64')); return model; }
 function codexImageQuality() { return String(process.env.CODEX_IMAGE_QUALITY || 'high').toLowerCase() === 'medium' ? 'medium' : 'high'; }
 async function ensureGitRepo(workDir: string) {
   const gitDir = path.join(workDir, '.git'); const stat = await fs.stat(gitDir).catch(() => null); if (stat?.isDirectory()) return;
@@ -566,6 +568,11 @@ export async function generateBrollImage(options: { config: ImageProviderConfig;
   const scene = plan.scenes.find((candidate) => candidate.id === sceneId);
   if (!scene) throw new Error('B-roll scene not found');
   const provider = plan.settings.provider;
+  if (provider === 'chatgpt-browser') {
+    const [made] = await generateBrollImagesWithChatGpt({ config, workDir, plan, sceneIds: [sceneId], regenerationComment: options.regenerationComment });
+    if (!made) throw new Error('ChatGPT did not save the image. Check that Chrome on this computer is open, signed in to ChatGPT and connected to Claude.');
+    return made;
+  }
   const customModel = plan.settings.imageModel?.trim();
   const imageConfig: ImageProviderConfig = { ...config, ...(customModel ? (provider === 'openai' ? { openAiModel: customModel } : provider === 'gemini' ? { geminiModel: customModel } : provider === 'grok-cli' ? { grokModel: customModel } : { codexModel: customModel }) : {}) };
   const aspect = resolveSceneAssetAspect(plan, scene);
@@ -1049,4 +1056,49 @@ ${metaVisualGuidelinesPrompt()}`,
   await generateBrollImage({ config: options.config, workDir, plan, sceneId: scene.id });
   if (scene.videoTreatment === 'still') return await setStillEffect({ workDir, plan, sceneId: scene.id, effect: scene.stillEffect || 'hold', ffmpegBin: options.config.ffmpegBin });
   return await createVideoPrompt({ textConfig: options.textConfig, workDir, plan, sceneId: scene.id });
+}
+
+
+/**
+ * ChatGPT-in-Chrome images for several scenes in one Claude session (much faster than one session per picture).
+ * Scenes whose file did not appear are marked failed; the others are normalised and marked ready.
+ */
+export async function generateBrollImagesWithChatGpt(options: { config: ImageProviderConfig; workDir: string; plan: BrollPlan; sceneIds: string[]; regenerationComment?: string; onLine?: (text: string) => void; signal?: AbortSignal }) {
+  const { config, workDir, plan } = options;
+  const engine = config.picturesEngine ?? { ...DEFAULT_PICTURES_ENGINE, claudeBin: config.claudeBin, codexBin: config.codexBin };
+  const brollDir = path.join(workDir, 'broll'); await fs.mkdir(brollDir, { recursive: true });
+  const scenes = options.sceneIds.map((id) => plan.scenes.find((scene) => scene.id === id)).filter((scene): scene is BrollScene => Boolean(scene));
+  const requests = [];
+  for (const scene of scenes) {
+    assertMetaVisualCompliant('image prompt', `${scene.imagePrompt}\n${options.regenerationComment ?? ''}`);
+    const aspect = resolveSceneAssetAspect(plan, scene);
+    requests.push({ id: scene.id, prompt: generatedImagePrompt(scene, plan, options.regenerationComment), aspect, outputPath: path.join(brollDir, `${scene.id}.raw.png`) });
+    await fs.rm(path.join(brollDir, `${scene.id}.raw.png`), { force: true });
+    await beginSceneImageGeneration(workDir, plan, scene);
+  }
+  let madeIds = new Set<string>();
+  try {
+    let made = await generateChatGptImages({ engine, workDir, requests, onLine: options.onLine, signal: options.signal });
+    // Codex often has no Chrome connection on this computer; Claude in Chrome does. Retry the missing pictures with Claude.
+    if (engine.provider === 'codex' && made.length < requests.length && config.claudeBin) {
+      const missing = requests.filter((r) => !made.some((m) => m.id === r.id));
+      options.onLine?.(`Codex could not use Chrome (${made.lastMessage.slice(0, 120) || 'no reply'}); making ${missing.length} picture(s) with Claude instead…`);
+      const retry = await generateChatGptImages({ engine: { ...DEFAULT_PICTURES_ENGINE, claudeBin: config.claudeBin }, workDir, requests: missing, onLine: options.onLine, signal: options.signal });
+      made = Object.assign([...made, ...retry], { lastMessage: retry.lastMessage, logPath: retry.logPath });
+    }
+    madeIds = new Set(made.map((r) => r.id));
+    if (!made.length) throw new Error(`ChatGPT made no pictures. Last message: ${made.lastMessage.slice(0, 300) || '(none)'} (log: ${made.logPath})`);
+  } finally {
+    for (const scene of scenes) {
+      const request = requests.find((r) => r.id === scene.id)!;
+      if (!madeIds.has(scene.id)) { await failSceneImageGeneration(workDir, plan, scene); continue; }
+      const outputPath = path.join(brollDir, `${scene.id}.png`);
+      try {
+        await normalizeImage(request.outputPath, outputPath, request.aspect, config.ffmpegBin, true);
+        Object.assign(scene, { imageFile: outputPath, generatedAt: new Date().toISOString(), generatedAspectRatio: request.aspect, orientationChanged: false, provider: 'chatgpt-browser', model: 'ChatGPT (browser)', imageStatus: 'ready' });
+      } catch { await failSceneImageGeneration(workDir, plan, scene); }
+    }
+    await saveBrollPlan(workDir, plan);
+  }
+  return scenes.filter((scene) => scene.imageStatus === 'ready' && madeIds.has(scene.id));
 }
