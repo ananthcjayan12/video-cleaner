@@ -854,7 +854,9 @@ app.get('/api/projects', route(async (_req, res) => {
 }));
 
 app.post('/api/projects/select', route(async (req, res) => {
-  const sourcePaths = await uploadedOr(req, 'video', () => pickNativeFiles()); if (!sourcePaths.length) return void res.status(400).json({ error: 'No video clips selected' }); const probed = await Promise.all(sourcePaths.map(async (sourcePath) => ({ sourcePath, media: await probe(sourcePath) }))); assertCompatibleClips(probed);
+  // Auto reels re-render every clip to 1080x1920 with its own colour handling, so clips only need audio there.
+  const relaxed = req.body?.auto === true;
+  const sourcePaths = await uploadedOr(req, 'video', () => pickNativeFiles()); if (!sourcePaths.length) return void res.status(400).json({ error: 'No video clips selected' }); const probed = await Promise.all(sourcePaths.map(async (sourcePath) => ({ sourcePath, media: await probe(sourcePath) }))); if (relaxed) { const silent = probed.find((item) => !item.media.audioCodec); if (silent) throw new Error(`${path.basename(silent.sourcePath)} has no audio track.`); } else assertCompatibleClips(probed);
   const settings = await resolvedSettings(); const id = randomUUID(); const workDir = path.join(settings.projectsDir, id); await fs.mkdir(workDir, { recursive: true }); const now = new Date().toISOString(); const firstName = path.basename(sourcePaths[0]);
   const clips: ProjectClip[] = probed.map((item, index) => ({ id: `clip-${String(index + 1).padStart(3, '0')}`, sourcePath: item.sourcePath, sourceName: path.basename(item.sourcePath), media: item.media, timelineStart: 0, timelineEnd: 0 }));
   const project: Project = { id, name: firstName.replace(/\.[^.]+$/, ''), createdAt: now, updatedAt: now, sourcePath: sourcePaths[0], sourceName: firstName, clips, workDir, media: { ...probed[0].media } }; syncProjectTimeline(project);
@@ -1382,7 +1384,6 @@ async function persistAutoJob(project: Project, job: AutoJob) {
 async function runAutoReel(project: Project, job: AutoJob) {
   const settings = await resolvedSettings();
   if (!settings.ffmpegBin) throw new Error('FFmpeg was not found');
-  if (projectClips(project).length !== 1) throw new Error('Auto reel works on one clip for now. Use the step-by-step editor for multi-clip projects.');
   const python = await resolvePythonBin(); if (!python) throw new Error('Python 3 was not found');
   const dir = path.join(project.workDir, 'auto'); await fs.mkdir(dir, { recursive: true });
   const portrait = (project.media.height || 1920) >= (project.media.width || 1080);
@@ -1452,10 +1453,12 @@ async function runAutoReel(project: Project, job: AutoJob) {
   const edited = await stage('edit', async (note) => {
     await fs.writeFile(path.join(dir, 'words.json'), JSON.stringify({ words }));
     await fs.writeFile(path.join(dir, 'keep.json'), JSON.stringify({ keep: keepIndexRanges(words, project.edl!.keepRanges) }));
-    const color = colorVideoFilter(project.media, false);
-    note('Cutting and grading shots…');
-    const result = await runPython(python, AUTO_EDIT_SCRIPT, [projectClips(project)[0].sourcePath, path.join(dir, 'words.json'), path.join(dir, 'keep.json'), dir, String(W), String(H), color, '1.07']);
-    job.finalSeconds = result.duration; note(`${result.cuts} cuts · ${result.shots} shots · ${Math.round(result.duration)} s`);
+    // Every clip with its place on the project timeline, its own analysis audio and its own colour conversion.
+    const clips = syncProjectTimeline(project).map((clip) => ({ path: clip.sourcePath, start: clip.timelineStart, end: clip.timelineEnd, audio: clip.audioPath ?? '', color: colorVideoFilter(clip.media, false) }));
+    await fs.writeFile(path.join(dir, 'clips.json'), JSON.stringify(clips));
+    note(clips.length > 1 ? `Cutting and grading shots from ${clips.length} clips…` : 'Cutting and grading shots…');
+    const result = await runPython(python, AUTO_EDIT_SCRIPT, [path.join(dir, 'clips.json'), path.join(dir, 'words.json'), path.join(dir, 'keep.json'), dir, String(W), String(H), '-', '1.07']);
+    job.finalSeconds = result.duration; note(`${result.clips > 1 ? `${result.clips} clips · ` : ''}${result.cuts} cuts · ${result.shots} shots · ${Math.round(result.duration)} s`);
     return result as { duration: number };
   });
   const duration = edited!.duration;

@@ -250,7 +250,7 @@ export const api = {
   saveSettings: (body: Record<string, string>) => request<SystemStatus>('/api/settings', { method: 'PUT', body: JSON.stringify(body) }),
 
   listProjects: () => request<Project[]>('/api/projects'),
-  selectProject: (uploadIds?: string[]) => request<Project>('/api/projects/select', { method: 'POST', body: JSON.stringify({ uploadIds }) }),
+  selectProject: (uploadIds?: string[], auto?: boolean) => request<Project>('/api/projects/select', { method: 'POST', body: JSON.stringify({ uploadIds, auto }) }),
   openProject: (id: string) => request<ProjectSnapshot>(`/api/projects/${id}/open`, { method: 'POST' }),
   renameProject: (id: string, name: string) => request<Project>(`/api/projects/${id}/meta`, { method: 'PUT', body: JSON.stringify({ name }) }),
   deleteProject: (id: string) => request<{ deleted: boolean; id: string }>(`/api/projects/${id}`, { method: 'DELETE' }),

@@ -14,13 +14,13 @@ export function AutoReelLauncher({ busy, onStarted, onError }: { busy: boolean; 
   const [upload, setUpload] = useState('');
   const [review, setReview] = useState(true);
   async function start() {
-    const deviceUpload = startDeviceUpload(VIDEO_ACCEPT, false); // must start inside the tap on phones
+    const deviceUpload = startDeviceUpload(VIDEO_ACCEPT, true); // several clips allowed; must start inside the tap on phones
     try {
       setUpload('Choose a video…');
       const uploadIds = deviceUpload ? await deviceUpload(setUpload) : undefined;
       if (deviceUpload && !uploadIds) { setUpload(''); return; }
       setUpload('Creating project…');
-      const project = await api.selectProject(uploadIds ?? undefined);
+      const project = await api.selectProject(uploadIds ?? undefined, true);
       await api.startAuto(project.id, { targetDurationSec: target, imageProvider: images, review });
       try { window.localStorage.setItem(STORE, project.id); } catch { /* private mode */ }
       setUpload(''); onStarted(project.id);
@@ -30,7 +30,7 @@ export function AutoReelLauncher({ busy, onStarted, onError }: { busy: boolean; 
     <section className="autoLauncher">
       <span className="autoKicker">One tap</span>
       <h2>Make my reel</h2>
-      <p>Upload a talking video. It is cleaned, cut, captioned and given B-roll automatically. You check the cleaned talk, then get a preview to download.</p>
+      <p>Upload a talking video, or several clips of the same reel (they play in recording order). It is cleaned, cut, captioned and given B-roll automatically. You check the cleaned talk, then get a preview to download.</p>
       <div className="autoChoice"><span>Length</span><div>{LENGTHS.map((option) => <button key={option.label} type="button" className={target === option.value ? 'on' : ''} onClick={() => setTarget(option.value)}>{option.label}</button>)}</div></div>
       <div className="autoChoice"><span>B-roll images</span><div>
         <button type="button" className={images === 'gemini' ? 'on' : ''} onClick={() => setImages('gemini')}>Gemini</button>
@@ -40,7 +40,7 @@ export function AutoReelLauncher({ busy, onStarted, onError }: { busy: boolean; 
         <button type="button" className={review ? 'on' : ''} onClick={() => setReview(true)}>Yes, let me check</button>
         <button type="button" className={!review ? 'on' : ''} onClick={() => setReview(false)}>No, fully automatic</button>
       </div></div>
-      <button className="primary autoStart" type="button" disabled={busy || !!upload} onClick={() => void start()}>{upload || (isRemote() ? 'Choose video & start' : 'Choose video & start')}</button>
+      <button className="primary autoStart" type="button" disabled={busy || !!upload} onClick={() => void start()}>{upload || 'Choose video(s) & start'}</button>
     </section>
   );
 }

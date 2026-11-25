@@ -40,7 +40,11 @@ export function startDeviceUpload(accept: string, multiple: boolean) {
   if (!isRemote()) return null;
   const chosen = chooseFiles(accept, multiple);
   return async (onStatus: (text: string) => void): Promise<string[] | null> => {
-    const files = await chosen;
+    // Several clips of one reel play in recording order. Camera names (IMG_0001, DJI_…_0001, PXL_…) sort that way;
+    // iPhone Photos hands over random names, so then the order the clips were tapped in is kept.
+    const picked = await chosen;
+    const cameraNames = picked.every((file) => /^(IMG|DJI|VID|PXL|MVI|GX|GOPR|DSC|MOV|CLIP)[_-]?\d/i.test(file.name));
+    const files = cameraNames ? [...picked].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true })) : picked;
     if (!files.length) return null;
     return uploadAll(files, onStatus);
   };
