@@ -1,4 +1,5 @@
-import { loadStickDraft, makeStickDraft, renderStickReel, saveStickDraft, stickMusicPath, type StickRender } from './stick-reel.js';
+import { listStickFacePacks, loadStickDraft, makeStickDraft, renderStickReel, saveStickDraft, STICK_THEMES, stickMusicPath, type StickRender } from './stick-reel.js';
+import { planStickReelWithAi } from './stick-planner.js';
 import { EMOTIONS } from './emotion-sfx.js';
 import { MOTION_SOUNDS, motionSoundPath } from './motion-sfx.js';
 import { colorVideoFilter } from './color.js';
@@ -1835,7 +1836,21 @@ const stickRoute = (handler: (req: express.Request, res: express.Response, proje
 app.get('/api/projects/:id/stick', stickRoute(async (_req, res, project) => {
   const saved = await fs.readFile(path.join(project.workDir, 'stick-render.json'), 'utf8')
     .then(text => JSON.parse(text) as StickRender).catch(() => null);
-  res.json({ draft: await loadStickDraft(project), render: stickJobs.get(project.id) ?? saved, customMusic: await fs.access(stickMusicPath(project)).then(() => true, () => false) });
+  const render = stickJobs.get(project.id) ?? (saved?.state === 'running' ? { state: 'failed' as const, progress: 0, error: 'Interrupted by a server restart.' } : saved);
+  res.json({
+    draft: await loadStickDraft(project),
+    render,
+    duration: project.media.duration,
+    audioUrl: `/api/projects/${project.id}/stick/audio`,
+    customMusic: await fs.access(stickMusicPath(project)).then(() => true, () => false),
+    facePacks: await listStickFacePacks(),
+    themes: STICK_THEMES,
+  });
+}));
+app.get('/api/projects/:id/stick/audio', stickRoute(async (_req, res, project) => {
+  await requireSource(project);
+  res.setHeader('Accept-Ranges', 'bytes');
+  res.sendFile(project.sourcePath);
 }));
 app.put('/api/projects/:id/stick', stickRoute(async (req, res, project) => {
   res.json({ draft: await saveStickDraft(project, req.body) });
@@ -1858,13 +1873,43 @@ app.delete('/api/projects/:id/stick/music', stickRoute(async (_req, res, project
 app.post('/api/projects/:id/stick/transcribe', stickRoute(async (_req, res, project) => {
   const context = await projectUsageContext(project);
   const transcript = await runWithUsage(context, () => transcribeProject(project));
-  res.json({ draft: await saveStickDraft(project, makeStickDraft(transcript.words.filter(word => word.start < project.media.duration))) });
+  const existing = await loadStickDraft(project);
+  const next = makeStickDraft(transcript.words.filter(word => word.start < project.media.duration));
+  next.themeId = existing.themeId;
+  next.faces = existing.faces;
+  next.music = existing.music;
+  next.sfx = existing.sfx;
+  next.useOpenverse = existing.useOpenverse;
+  res.json({ draft: await saveStickDraft(project, next) });
+}));
+app.post('/api/projects/:id/stick/plan', stickRoute(async (req, res, project) => {
+  const context = await projectUsageContext(project);
+  const settings = await resolvedSettings();
+  const existing = await loadStickDraft(project);
+  let words = existing.words;
+  if (!words.length) {
+    const transcript = await runWithUsage(context, () => transcribeProject(project));
+    words = transcript.words.filter(word => word.start < project.media.duration);
+  }
+  const brief = typeof req.body?.brief === 'string' ? req.body.brief.trim().slice(0, 1200) : undefined;
+  const themeId = typeof req.body?.themeId === 'string' ? req.body.themeId.trim() : undefined;
+  const planned = await runWithUsage(context, () => planStickReelWithAi({
+    textConfig: settings,
+    choice: textEngines(settings).planning,
+    workDir: project.workDir,
+    words,
+    duration: project.media.duration,
+    existing,
+    brief,
+    themeId,
+  }));
+  res.json({ draft: await saveStickDraft(project, planned) });
 }));
 app.post('/api/projects/:id/stick/render', stickRoute(async (req, res, project) => {
   if ([...stickJobs.values()].some(job => job.state === 'running')) {
     return void res.status(409).json({ error: 'A stick-figure reel is already rendering.' });
   }
-  const job: StickRender = { state: 'running', progress: 0 };
+  const job: StickRender = { state: 'running', progress: 0, stage: 'Preparing render…' };
   stickJobs.set(project.id, job);
   try {
     await requireSource(project);
@@ -1875,17 +1920,27 @@ app.post('/api/projects/:id/stick/render', stickRoute(async (req, res, project) 
     const renderId = randomUUID();
     const temporary = path.join(project.workDir, `stick-${renderId}-visual.mp4`);
     const output = path.join(exportsDir(project), `stick-reel-${renderId}.mp4`);
+    const creditsPath = path.join(exportsDir(project), `stick-reel-${renderId}-credits.txt`);
     await fs.mkdir(exportsDir(project), { recursive: true });
     res.status(202).json({ render: job });
     void (async () => {
       try {
-        await renderStickReel({ project, draft, visual: temporary, output, chromeBin: await detectChromeBin(),
-          ffmpeg: args => run(ffmpegBin, args, undefined, 600_000), progress: value => { job.progress = value; } });
-        const finished: StickRender = { state: 'ready', progress: 1, url: downloadUrlFor(project, output) };
+        const result = await renderStickReel({
+          project, draft, visual: temporary, output, creditsPath, chromeBin: await detectChromeBin(),
+          ffmpeg: args => run(ffmpegBin, args, undefined, 600_000),
+          progress: (value, stage) => { job.progress = value; if (stage) job.stage = stage; },
+        });
+        const finished: StickRender = {
+          state: 'ready', progress: 1, stage: 'Ready',
+          url: downloadUrlFor(project, output),
+          ...(result.wroteCredits ? { creditsUrl: downloadUrlFor(project, creditsPath) } : {}),
+        };
         await atomicWriteJson(path.join(project.workDir, 'stick-render.json'), finished);
         Object.assign(job, finished);
       } catch (error) {
-        Object.assign(job, { state: 'failed', error: error instanceof Error ? error.message : String(error) });
+        const failed: StickRender = { state: 'failed', progress: 0, error: error instanceof Error ? error.message : String(error) };
+        await atomicWriteJson(path.join(project.workDir, 'stick-render.json'), failed).catch(() => undefined);
+        Object.assign(job, failed);
         await fs.rm(output, { force: true }).catch(() => undefined);
       } finally {
         await fs.rm(temporary, { force: true }).catch(() => undefined);

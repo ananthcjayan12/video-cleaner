@@ -9,6 +9,7 @@ dist-server/
 !.env.example
 
 /remotion/stick-reel/local/
+/assets/sfx-cache/
 /assets/stick-reel/pop.mp3
 /assets/stick-reel/chime.mp3
 /assets/stick-reel/sweep.mp3
