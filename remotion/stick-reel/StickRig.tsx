@@ -73,6 +73,11 @@ export function StickRig({
   shadowColor,
   isSpeaking,
   punch,
+  x,
+  top = 1215,
+  scale = 1,
+  plain = false,
+  outline,
 }: {
   frame: number;
   localFrame: number;
@@ -88,6 +93,12 @@ export function StickRig({
   shadowColor: string;
   isSpeaking: boolean;
   punch: number;
+  /** Cinematic look: stand anywhere, any size, plain round head (cast), dark outline for dark sets. */
+  x?: number;
+  top?: number;
+  scale?: number;
+  plain?: boolean;
+  outline?: string;
 }) {
   const entrance = spring({ frame: localFrame, fps: 30, config: { damping: 15, stiffness: 150 } });
   const poseBlend = spring({ frame: Math.max(0, poseTransitionFrame), fps: 30, config: { damping: 14, stiffness: 180 } });
@@ -103,7 +114,7 @@ export function StickRig({
   const leftArm = limbPath(0, 18, 74, 62, angles.lShoulder + talkWave * 0.35, angles.lElbow + talkWave * 0.5);
   const rightArm = limbPath(0, 18, 74, 62, angles.rShoulder - talkWave * 0.45, angles.rElbow - talkWave * 0.6 + waveExtra);
 
-  const anchorX = side === 'left' ? 235 : side === 'right' ? 815 : 540;
+  const anchorX = x ?? (side === 'left' ? 235 : side === 'right' ? 815 : 540);
   const enterOffsetX = enter === 'slide' ? (1 - entrance) * (side === 'right' ? 180 : -180) : 0;
   const enterOffsetY = enter === 'peek' ? (1 - entrance) * 220 : 0;
   const enterScale = enter === 'pop' ? interpolate(entrance, [0, 1], [0.45, 1]) : 0.88 + entrance * 0.12;
@@ -120,8 +131,9 @@ export function StickRig({
       style={{
         position: 'absolute',
         left: anchorX,
-        top: 1215 + bounceY + enterOffsetY,
-        transform: `translateX(calc(-50% + ${(enterOffsetX + swayX).toFixed(1)}px)) rotate(${bodyRotate.toFixed(2)}deg) scale(${(enterScale + punch * 0.09).toFixed(3)})`,
+        top: top + bounceY + enterOffsetY,
+        transform: `translateX(calc(-50% + ${(enterOffsetX + swayX).toFixed(1)}px)) rotate(${bodyRotate.toFixed(2)}deg) scale(${((enterScale + punch * 0.09) * scale).toFixed(3)})`,
+        transformOrigin: '50% 100%',
         width: 340,
         height: 300,
         opacity: Math.min(1, entrance * 2.2),
@@ -129,6 +141,12 @@ export function StickRig({
     >
       <svg viewBox="-170 -20 340 290" width="340" height="290" style={{ position: 'absolute', top: 10 }}>
         <ellipse cx="0" cy="252" rx="94" ry="12" fill={shadowColor} />
+        {outline && (
+          <g stroke={outline} fill="none" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M0 0L0 113 M0 113L-31 183L-45 246L-70 246 M0 113L41 181L57 246L79 246" strokeWidth="26" />
+            <path d={`${leftArm} ${rightArm}`} strokeWidth="24" />
+          </g>
+        )}
         <path
           d="M0 0L0 113 M0 113L-31 183L-45 246L-70 246 M0 113L41 181L57 246L79 246"
           stroke={ink}
@@ -146,7 +164,13 @@ export function StickRig({
           strokeLinejoin="round"
         />
       </svg>
-      <Img
+      {plain ? (
+        <div style={{ position: 'absolute', width: 132, height: 132, left: 104, bottom: 262, borderRadius: '50%', border: `11px solid ${ink}`, background: outline ?? '#1b1f22', boxShadow: outline ? `0 0 0 6px ${outline}` : undefined, transform: `rotate(${headRotate.toFixed(2)}deg)`, boxSizing: 'border-box' }}>
+          <i style={{ position: 'absolute', width: 14, height: 18, borderRadius: 8, background: ink, top: 40, left: 34 }} />
+          <i style={{ position: 'absolute', width: 14, height: 18, borderRadius: 8, background: ink, top: 40, right: 34 }} />
+          <i style={{ position: 'absolute', width: 34, height: 10, borderBottom: `5px solid ${ink}`, borderRadius: '0 0 20px 20px', top: 66, left: 38 }} />
+        </div>
+      ) : <Img
         src={faceSrc}
         style={{
           position: 'absolute',
@@ -157,8 +181,9 @@ export function StickRig({
           bottom: 266,
           left: 65,
           transform: `rotate(${headRotate.toFixed(2)}deg)`,
+          filter: outline ? `drop-shadow(0 0 6px ${outline})` : undefined,
         }}
-      />
+      />}
     </div>
   );
 }

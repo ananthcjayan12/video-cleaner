@@ -24,12 +24,15 @@ export function Stage({
   note,
   beat,
   theme,
+  glass = false,
 }: {
   template: StickTemplateId;
   data: StickSceneData;
   note: string;
   beat: number;
   theme: StickTheme;
+  /** Cinematic look: dark frosted panel instead of the bordered card. */
+  glass?: boolean;
 }) {
   const { ink, paper, accent, highlight, surface } = theme;
   const dark = theme.id === 'midnight';
@@ -45,18 +48,18 @@ export function Stage({
   return (
     <div
       style={{
-        border: `4px solid ${ink}`,
+        border: glass ? '2px solid rgba(255,255,255,0.16)' : `4px solid ${ink}`,
         borderRadius: 28,
-        background: surface,
+        background: glass ? 'rgba(14,17,19,0.84)' : surface,
         color: ink,
-        boxShadow: `9px 11px 0 ${ink}`,
+        boxShadow: glass ? '0 40px 90px rgba(0,0,0,0.6)' : `9px 11px 0 ${ink}`,
         overflow: 'hidden',
         position: 'relative',
         height: 575,
         fontFamily: STICK_FONT_STACK,
       }}
     >
-      <div style={{ ...row, height: 68, background: ink, color: paper, padding: '0 26px', fontSize: 23, fontWeight: 700 }}>
+      <div style={{ ...row, height: 68, background: glass ? 'rgba(255,255,255,0.06)' : ink, color: glass ? highlight : paper, padding: '0 26px', fontSize: 23, fontWeight: 700, letterSpacing: glass ? 1.5 : undefined, textTransform: glass ? 'uppercase' : undefined }}>
         <div style={{ display: 'flex', gap: 8 }}>
           {[accent, '#ffdf79', highlight].map((color, idx) => (
             <i key={idx} style={{ width: 13, height: 13, background: color, borderRadius: 20, display: 'block' }} />

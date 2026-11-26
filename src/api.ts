@@ -3,6 +3,7 @@ import type { NarrationJob, StickScript, StickStudioSettings } from '../server/s
 import type { ReelSource, SourceJob } from '../server/stick-source';
 export type { ReelSource };
 export type StickPlanState = { state: 'running' | 'failed'; error?: string } | null;
+export type StickPicturesState = { state: 'running' | 'failed' | 'ready'; stage?: string; error?: string } | null;
 export type StudioInfo = { settings: StickStudioSettings; voices: Array<{ id: string; label: string }>; themes: StickTheme[]; facePacks: string[]; scriptEngine: { provider: string; model: string; effort: string }; geminiReady: boolean };
 export type ScriptJob = { id: string; state: 'running' | 'ready' | 'failed'; script?: StickScript; error?: string };
 export type Word = { id: string; text: string; start: number; end: number };
@@ -283,7 +284,8 @@ export const api = {
   addMember: (workspaceId: string, username: string, password: string) => request<{ username: string }>(`/api/admin/workspaces/${encodeURIComponent(workspaceId)}/members`, { method: 'POST', body: JSON.stringify({ username, password }) }),
   removeMember: (username: string) => request<{ ok: true }>(`/api/admin/members/${encodeURIComponent(username)}`, { method: 'DELETE' }),
   createStick: (uploadId: string) => request<Project>('/api/projects/select', { method: 'POST', body: JSON.stringify({ uploadIds: [uploadId], stick: true }) }),
-  stick: (id: string) => request<{ draft: StickDraft; render: StickRender | null; duration: number; audioUrl: string; customMusic: boolean; facePacks: string[]; themes: StickTheme[]; plan: StickPlanState }>(`/api/projects/${id}/stick`),
+  stick: (id: string) => request<{ draft: StickDraft; render: StickRender | null; duration: number; audioUrl: string; customMusic: boolean; facePacks: string[]; themes: StickTheme[]; plan: StickPlanState; pictures: StickPicturesState; assetBase: string }>(`/api/projects/${id}/stick`),
+  makeStickPictures: (id: string) => request<{ pictures: StickPicturesState }>(`/api/projects/${id}/stick/pictures`, { method: 'POST' }),
   stickMusic: (id: string, uploadId?: string) => request<{ customMusic: boolean }>(`/api/projects/${id}/stick/music`, uploadId
     ? { method: 'PUT', body: JSON.stringify({ uploadId }) } : { method: 'DELETE' }),
   saveStick: (id: string, draft: StickDraft) => request<{ draft: StickDraft }>(`/api/projects/${id}/stick`, { method: 'PUT', body: JSON.stringify(draft) }),
@@ -293,7 +295,7 @@ export const api = {
   saveStudio: (settings: Partial<StickStudioSettings>) => request<{ settings: StickStudioSettings }>('/api/stick/studio', { method: 'PUT', body: JSON.stringify(settings) }),
   cancelStudioJob: (kind: 'source' | 'script' | 'narrate', jobId: string) => request<{ stopped: boolean }>(`/api/stick/${kind}/${jobId}/cancel`, { method: 'POST' }),
   cancelStick: (projectId: string) => request<{ stopped: boolean }>(`/api/projects/${projectId}/stick/cancel`, { method: 'POST' }),
-  stickReels: () => request<{ reels: Array<{ id: string; name: string; updatedAt: string; duration: number; state: 'planning' | 'rendering' | 'ready' | 'failed' | 'draft'; url?: string }> }>('/api/stick/reels'),
+  stickReels: () => request<{ reels: Array<{ id: string; name: string; updatedAt: string; duration: number; state: 'planning' | 'pictures' | 'rendering' | 'ready' | 'failed' | 'draft'; url?: string }> }>('/api/stick/reels'),
   fetchSource: (url: string) => request<{ job: SourceJob }>('/api/stick/source', { method: 'POST', body: JSON.stringify({ url }) }),
   sourceJob: (jobId: string) => request<{ job: SourceJob }>(`/api/stick/source/${jobId}`),
   writeScript: (body: { concept: string; seconds?: number; feedback?: string; previous?: StickScript; source?: ReelSource }) => request<{ job: ScriptJob }>('/api/stick/script', { method: 'POST', body: JSON.stringify(body) }),

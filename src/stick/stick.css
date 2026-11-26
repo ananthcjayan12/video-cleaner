@@ -34,3 +34,7 @@
 .st-source ul { padding-left: 20px; display: flex; flex-direction: column; gap: 4px; }
 .st-source .pr-pill { align-self: flex-start; }
 .st-plain { display: flex; align-items: center; gap: 12px; flex: 1; min-width: 0; text-align: left; border: 0; background: none; padding: 0; color: inherit; font: inherit; }
+.st-thumbs { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 4px; }
+.st-thumbs img { height: 96px; width: 72px; object-fit: cover; border-radius: 8px; flex: none; background: var(--sunk); }
+.st-thumbs img.set { width: 64px; }
+.st-thumb-empty { font-size: 13px; color: var(--muted); padding: 8px 0; }

@@ -63,8 +63,12 @@ export function dropNulls(value: any): any {
 const LOOSE_PLANNER_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['badge', 'marquee', 'themeId', 'scenes', 'notes'],
+  required: ['badge', 'marquee', 'themeId', 'scenes', 'notes', 'tracker', 'cast', 'setPrompt', 'photoPrompts'],
   properties: {
+    tracker: { type: 'array', minItems: 3, maxItems: 3, items: { type: 'string' } },
+    cast: { type: 'array', maxItems: 3, items: { type: 'object', additionalProperties: false, required: ['id', 'label'], properties: { id: { type: 'string' }, label: { type: 'string' } } } },
+    setPrompt: { type: 'string' },
+    photoPrompts: { type: 'array', minItems: 6, maxItems: 6, items: { type: 'string' } },
     badge: { type: 'string' },
     marquee: { type: 'string' },
     themeId: { type: 'string', enum: STICK_THEMES.map(t => t.id) },
@@ -89,6 +93,18 @@ const LOOSE_PLANNER_SCHEMA = {
           energy: { type: 'string', enum: [...stickEnergies] },
           sfx: { type: 'string' },
           sfxQuery: { type: 'string' },
+          chapter: { type: 'integer' },
+          camera: { type: 'number' },
+          photo: { type: 'integer' },
+          punchText: { type: 'object', additionalProperties: false, required: ['text', 'wordId'], properties: { text: { type: 'string' }, wordId: { type: 'string' } } },
+          myBubble: { type: 'object', additionalProperties: false, required: ['text', 'wordId'], properties: { text: { type: 'string' }, wordId: { type: 'string' } } },
+          actors: {
+            type: 'array', maxItems: 3,
+            items: { type: 'object', additionalProperties: false, required: ['castId', 'pose'], properties: {
+              castId: { type: 'string' }, pose: { type: 'string', enum: [...stickPoses] },
+              bubble: { type: 'object', additionalProperties: false, required: ['text', 'wordId'], properties: { text: { type: 'string' }, wordId: { type: 'string' } } },
+            } },
+          },
           data: {
             type: 'object',
             additionalProperties: false,
@@ -169,13 +185,13 @@ function formatTranscript(words: Word[]) {
 }
 
 function buildDirectorPrompt(words: Word[], duration: number, brief?: string, themeId?: string) {
-  const targetScenes = Math.max(4, Math.min(22, Math.round(duration / 4.2)));
+  const targetScenes = Math.max(5, Math.min(28, Math.round(duration / 3.2)));
   return [
     'You are the creative director & motion choreographer for a punchy vertical (9:16) stick-figure explainer reel.',
-    'The speaker is represented by an expressive cutout head on a dynamic 2D stick-figure body beside a clean editorial stage card.',
+    'The speaker is represented by an expressive cutout head on a dynamic 2D stick-figure body, acting the story out with other plain stick characters.',
     'Read the timestamped narration (which may be English, Malayalam, or Manglish) and design a dynamic, visually varied storyboard.',
     '',
-    `TARGET PACING: Plan roughly ${targetScenes} scenes across ${duration.toFixed(1)} seconds (every 3–6 seconds, cutting on natural narrative beats — never mid-phrase).`,
+    `TARGET PACING: Plan roughly ${targetScenes} scenes across ${duration.toFixed(1)} seconds (every 2.5–4.5 seconds, cutting on natural narrative beats — never mid-phrase).`,
     brief ? `CREATIVE BRIEF / NOTES: ${brief}` : '',
     themeId ? `PREFERRED THEME: ${themeId}` : `THEMES: ${STICK_THEMES.map(t => `${t.id} (${t.label})`).join(', ')}. Pick the best fit.`,
     '',
@@ -190,6 +206,16 @@ function buildDirectorPrompt(words: Word[], duration: number, brief?: string, th
     '- chat_bubble: { title, messages: [{ sender: "them"|"me", text }] } — 2–3 quick back-and-forth messages.',
     '- steps: { title, items: ["...", ...] } — numbered 1-2-3 guide.',
     '- cta_click: { title, subtitle, button, doneLabel } — interactive cursor click CTA (use for final call-to-action).',
+    '',
+    'CINEMATIC LOOK (this reel is a short film, not slides):',
+    '- The figures stand inside ONE photo-real set that the camera glides across. Write setPrompt: a photorealistic, empty location that fits the topic (for dental: e.g. a modern dental clinic reception or treatment room), described as a real photograph: natural light, real materials, slightly dark and cinematic, wide shot at eye level, lots of empty floor in the lower half, no people, no text, no logos.',
+    '- camera: 0 = left part of the set, 1 = right part. Move it every scene (big moves between chapters, small moves within one).',
+    '- tracker: exactly 3 short UPPERCASE chapter labels for the story arc in English (e.g. "MYTH", "WHY", "FIX"); give every scene its chapter 0, 1 or 2 in order.',
+    '- cast: 0-3 plain stick characters the story needs (id like "patient", label in English UPPERCASE like "PATIENT", "RECEPTIONIST", "KID"). Put them in scenes via actors (0-2 per scene, most scenes should have at least one) with a pose and, when they speak in the story, a short bubble (<= 7 words, same language as the narration) anchored to the wordId where it should pop.',
+    '- myBubble: an occasional short line the main figure says out loud (<= 7 words), anchored to a wordId.',
+    '- punchText: in about half the scenes, a 1-4 word punch box (UPPERCASE English or a number like "6 MONTHS", "NOT NORMAL", "60% → 90%") slammed in exactly on the wordId where it is said. Never a full sentence.',
+    '- photoPrompts: exactly 6 real-photo ideas that illustrate key moments (e.g. close-up of bleeding gums on a toothbrush, a dentist checking a patient). Each is described as a natural real photograph (real people or objects, real light, phone or DSLR look), never illustration, 3D or cartoon, no text. Use photo (0-5) on the scenes where a real picture explains best (about a third of the scenes); other scenes use a stage template, which builds up on screen step by step.',
+    '- Every 1-2 seconds something new should happen: a bubble, a punch box, a beat, a list item. Keep the scene headline short (it shows as a yellow tag).',
     '',
     'STICK-FIGURE CHOREOGRAPHY:',
     `- poses: ${stickPoses.join(', ')} (use celebrate or wave for opener/closer, think_chin for questions, shrug for problems, point_stage/present_both for reveals).`,
@@ -260,6 +286,11 @@ export async function planStickReelWithAi(options: {
       if (at < 0 || at >= duration) continue;
       if (mapped.length && at <= mapped.at(-1)!.at + 0.4) continue;
 
+      const timed = (value: any, sceneAt: number) => {
+        if (!value || typeof value.text !== 'string' || !value.text.trim()) return undefined;
+        const word = wordById.get(String(value.wordId ?? ''));
+        return { text: value.text.trim(), at: word && word.start >= sceneAt ? word.start : sceneAt + 0.6, wordId: word?.id };
+      };
       const beats = Array.isArray(item?.beats)
         ? item.beats
           .map((beat: any) => {
@@ -294,6 +325,12 @@ export async function planStickReelWithAi(options: {
         sfx: item.sfx,
         sfxQuery: item.sfxQuery,
         beats,
+        chapter: Number.isInteger(item.chapter) ? item.chapter : undefined,
+        camera: typeof item.camera === 'number' ? item.camera : undefined,
+        photo: Number.isInteger(item.photo) ? item.photo : undefined,
+        punchText: timed(item.punchText, at),
+        myBubble: timed(item.myBubble, at),
+        actors: Array.isArray(item.actors) ? item.actors.map((a: any) => ({ castId: String(a?.castId ?? ''), pose: a?.pose, bubble: timed(a?.bubble, at) })) : undefined,
       });
     }
 
@@ -307,6 +344,11 @@ export async function planStickReelWithAi(options: {
         scenes: mapped,
         words,
         notes: Array.isArray(raw.notes) ? raw.notes : [],
+        style: existing.style ?? 'cinematic',
+        tracker: Array.isArray(raw.tracker) ? raw.tracker : existing.tracker,
+        cast: Array.isArray(raw.cast) ? raw.cast : existing.cast,
+        setPrompt: typeof raw.setPrompt === 'string' ? raw.setPrompt : existing.setPrompt,
+        photoPrompts: Array.isArray(raw.photoPrompts) ? raw.photoPrompts : existing.photoPrompts,
       }, duration);
     }
     lastError = 'No scenes matched valid wordIds in the transcript.';

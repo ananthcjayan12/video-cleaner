@@ -1,6 +1,7 @@
 import React from 'react';
 import { AbsoluteFill, spring, useCurrentFrame } from 'remotion';
-import type { StickFace, StickPose, StickSceneV2, StickTheme } from '../../server/stick-reel';
+import type { StickCastMember, StickFace, StickPose, StickSceneV2, StickStyle, StickTheme } from '../../server/stick-reel';
+import { Cinematic } from './Cinematic';
 import { STICK_FONT_STACK, useStickFonts } from './fonts';
 import { Stage } from './Stage';
 import { StickRig } from './StickRig';
@@ -14,6 +15,11 @@ export type ReelProps = {
   badge?: string;
   marquee?: string;
   theme?: StickTheme;
+  style?: StickStyle;
+  tracker?: string[];
+  cast?: StickCastMember[];
+  setUrl?: string;
+  photoUrls?: string[];
 };
 
 const DEFAULT_THEME: StickTheme = {
@@ -76,8 +82,16 @@ export function Reel({
   badge = 'QUICK EXPLAINER',
   marquee = 'EXPLAIN / VISUALIZE / SHIP',
   theme = DEFAULT_THEME,
+  style = 'classic',
+  tracker = [],
+  cast = [],
+  setUrl,
+  photoUrls = [],
 }: ReelProps) {
   useStickFonts();
+  if (style === 'cinematic' && scenes.length) {
+    return <Cinematic scenes={scenes} words={transcript} duration={duration} faces={faces} badge={badge} theme={theme} tracker={tracker} cast={cast} setUrl={setUrl} photoUrls={photoUrls} />;
+  }
   const frame = useCurrentFrame();
   const time = frame / 30;
   const safeScenes = scenes.length ? scenes : demoScenes;

@@ -85,6 +85,18 @@ export function StudioSettings({ info, onSaved, onBack }: { info: StudioInfo; on
 
       <section className="pr-card pr-options st-look">
         <h2>New reels start with</h2>
+        <div className="pr-field">Video look<div className="pr-chips">
+          <button type="button" className={`pr-chip${s.look === 'cinematic' ? ' on' : ''}`} onClick={() => set({ look: 'cinematic' })}>Cinematic (set + cast)</button>
+          <button type="button" className={`pr-chip${s.look === 'classic' ? ' on' : ''}`} onClick={() => set({ look: 'classic' })}>Classic cards</button>
+        </div></div>
+        <label>Who makes the set &amp; real photos
+          <select value={s.picturesEngine} onChange={(e) => set({ picturesEngine: e.target.value as StickStudioSettings['picturesEngine'] })}>
+            <option value="chatgpt">ChatGPT in Chrome (your plan; Codex if it fails)</option>
+            <option value="codex">Codex image generation (your ChatGPT plan, no browser)</option>
+            <option value="gemini">Gemini API (paid per picture, ~₹6)</option>
+            <option value="none">No pictures (plain dark set)</option>
+          </select>
+        </label>
         <div className="pr-field">Look<div className="pr-chips">
           {info.themes.map((theme) => (
             <button key={theme.id} type="button" className={`pr-chip${s.themeId === theme.id ? ' on' : ''}`} onClick={() => set({ themeId: theme.id })}>

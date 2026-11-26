@@ -61,6 +61,10 @@ export type StickStudioSettings = {
   music: number;
   sfx: number;
   useOpenverse: boolean;
+  /** 'cinematic' = photo set, moving camera, cast, punch boxes; 'classic' = the card layout. */
+  look: 'cinematic' | 'classic';
+  /** Who makes the set + photo sheet: ChatGPT in Chrome (falls back to Codex), Codex image generation, Gemini API, or none. */
+  picturesEngine: 'chatgpt' | 'codex' | 'gemini' | 'none';
 };
 
 export const DEFAULT_STUDIO_SETTINGS: StickStudioSettings = {
@@ -79,6 +83,8 @@ export const DEFAULT_STUDIO_SETTINGS: StickStudioSettings = {
   music: 0.12,
   sfx: 0.55,
   useOpenverse: false,
+  look: 'cinematic',
+  picturesEngine: 'chatgpt',
 };
 
 const settingsFile = () => process.env.VIDEO_CLEANER_STICK_SETTINGS || path.join(os.homedir(), '.video-cleaner', 'stick-studio.json');
@@ -107,6 +113,8 @@ export function normalizeStudioSettings(input: Partial<StickStudioSettings> | nu
     music: clamp(raw.music, 0, 1, d.music),
     sfx: clamp(raw.sfx, 0, 1, d.sfx),
     useOpenverse: typeof raw.useOpenverse === 'boolean' ? raw.useOpenverse : d.useOpenverse,
+    look: raw.look === 'classic' ? 'classic' : 'cinematic',
+    picturesEngine: (['chatgpt', 'codex', 'gemini', 'none'] as const).find((e) => e === raw.picturesEngine) ?? d.picturesEngine,
   };
 }
 

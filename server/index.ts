@@ -1,5 +1,6 @@
-import { listStickFacePacks, loadStickDraft, makeStickDraft, renderStickReel, saveStickDraft, STICK_THEMES, stickMusicPath, type StickRender } from './stick-reel.js';
+import { listStickFacePacks, loadStickDraft, makeStickDraft, renderStickReel, saveStickDraft, STICK_THEMES, stickAssetsDir, stickMusicPath, type StickRender } from './stick-reel.js';
 import { planStickReelWithAi } from './stick-planner.js';
+import { makeStickPictures } from './stick-pictures.js';
 import { fetchReelSource, newSourceJob, sourceBrief, sourceFromBody, sourceJobs } from './stick-source.js';
 import { DEFAULT_SCRIPT_ENGINE, loadStudioSettings, MALE_VOICES, narrateScript, narrationJobs, newNarrationJob, previewVoice, saveStudioSettings, writeStickScript, type StickScript } from './stick-narration.js';
 import { EMOTIONS } from './emotion-sfx.js';
@@ -1959,7 +1960,7 @@ app.get('/api/stick/reels', studioRoute(async (_req, res) => {
     const saved = await fs.readFile(path.join(project.workDir, 'stick-render.json'), 'utf8').then((text) => JSON.parse(text) as StickRender).catch(() => null);
     const live = stickJobs.get(project.id);
     const render = live ?? saved;
-    const state = stickPlans.get(project.id)?.state === 'running' ? 'planning' : render?.state === 'running' ? 'rendering' : render?.state === 'ready' ? 'ready' : render?.state === 'failed' ? 'failed' : 'draft';
+    const state = stickPlans.get(project.id)?.state === 'running' ? 'planning' : stickPictureJobs.get(project.id)?.state === 'running' ? 'pictures' : render?.state === 'running' ? 'rendering' : render?.state === 'ready' ? 'ready' : render?.state === 'failed' ? 'failed' : 'draft';
     return { id: project.id, name: project.name, updatedAt: project.updatedAt, duration: project.media.duration, state, url: render?.state === 'ready' ? render.url : undefined };
   }));
   res.json({ reels: rows.filter(Boolean).sort((a, b) => Date.parse(b!.updatedAt) - Date.parse(a!.updatedAt)) });
@@ -1969,11 +1970,15 @@ const stickJobs = new Map<string, StickRender>();
 const stickRenderAborts = new Map<string, AbortController>();
 /** Stop planning and rendering for one stick reel (used by Stop and before Delete). */
 function stopStickWork(projectId: string) {
+  stickPictureJobs.get(projectId)?.abort.abort(); stickPictureJobs.delete(projectId);
   stickPlanAborts.get(projectId)?.abort(); stickPlanAborts.delete(projectId); stickPlans.delete(projectId);
   stickRenderAborts.get(projectId)?.abort(); stickRenderAborts.delete(projectId);
   const job = stickJobs.get(projectId); if (job?.state === 'running') Object.assign(job, { state: 'failed', progress: 0, error: 'Stopped.' });
 }
 const stickPlanAborts = new Map<string, AbortController>();
+type StickPictureJob = { state: 'running' | 'failed' | 'ready'; stage: string; error?: string; abort: AbortController };
+const stickPictureJobs = new Map<string, StickPictureJob>();
+const stickAssetBase = (projectId: string) => `http://127.0.0.1:${process.env.PORT || 3001}/api/projects/${projectId}/stick/asset`;
 const stickRoute = (handler: (req: express.Request, res: express.Response, project: Project) => Promise<void>) =>
   route(async (req, res) => {
     if (!isAdmin(res)) return void res.status(403).json({ error: 'Stick-figure reels are for the owner login only.' });
@@ -1997,6 +2002,8 @@ app.get('/api/projects/:id/stick', stickRoute(async (_req, res, project) => {
     facePacks: await listStickFacePacks(),
     themes: STICK_THEMES,
     plan: stickPlans.get(project.id) ?? null,
+    pictures: (() => { const job = stickPictureJobs.get(project.id); return job ? { state: job.state, stage: job.stage, error: job.error } : null; })(),
+    assetBase: `/api/projects/${project.id}/stick/asset`,
   });
 }));
 app.get('/api/projects/:id/stick/audio', stickRoute(async (_req, res, project) => {
@@ -2034,6 +2041,37 @@ app.post('/api/projects/:id/stick/transcribe', stickRoute(async (_req, res, proj
   next.useOpenverse = existing.useOpenverse;
   res.json({ draft: await saveStickDraft(project, next) });
 }));
+app.get('/api/projects/:id/stick/asset/:file', stickRoute(async (req, res, project) => {
+  const name = routeParam(req.params.file); if (!/^[\w.-]{1,80}$/.test(name)) return void res.status(404).end();
+  res.setHeader('Cache-Control', 'private, max-age=86400'); res.sendFile(path.join(stickAssetsDir(project), name));
+}));
+/** Make the set + photo sheet for a cinematic stick reel (ChatGPT first), then save them on the draft. Background job. */
+app.post('/api/projects/:id/stick/pictures', stickRoute(async (_req, res, project) => {
+  if (stickPictureJobs.get(project.id)?.state === 'running') return void res.status(202).json({ pictures: { state: 'running' } });
+  const settings = await resolvedSettings(); const studio = await loadStudioSettings();
+  if (!settings.ffmpegBin || !settings.ffprobeBin) throw new Error('FFmpeg was not found.');
+  const engine = studio.picturesEngine === 'none' ? 'chatgpt' : studio.picturesEngine;
+  const job: StickPictureJob = { state: 'running', stage: 'Starting the pictures…', abort: new AbortController() };
+  stickPictureJobs.set(project.id, job);
+  res.status(202).json({ pictures: { state: job.state, stage: job.stage } });
+  void (async () => {
+    const draft = await loadStickDraft(project);
+    const result = await makeStickPictures({
+      engine, assetsDir: stickAssetsDir(project), workDir: project.workDir, setPrompt: draft.setPrompt ?? '', photoPrompts: draft.photoPrompts ?? [],
+      config: { claudeBin: settings.claudeBin, codexBin: settings.codexBin, geminiApiKey: settings.geminiApiKey, geminiModel: settings.geminiImageModel, picturesEngine: picturesEngine(settings) } as never,
+      browser: picturesEngine(settings), ffmpeg: settings.ffmpegBin!, ffprobe: settings.ffprobeBin!, signal: job.abort.signal, progress: (stage) => { job.stage = stage; },
+    });
+    if (job.abort.signal.aborted) return;
+    const latest = await loadStickDraft(project);
+    await saveStickDraft(project, { ...latest, ...(result.set ? { set: result.set } : {}), photos: result.photos.length ? result.photos : latest.photos });
+    Object.assign(job, { state: 'ready', stage: `Pictures ready (${result.engineUsed || 'partial'})`, error: result.notes.length ? result.notes.join(' | ') : undefined });
+  })().catch((error) => {
+    if (job.abort.signal.aborted) return;
+    Object.assign(job, { state: 'failed', stage: 'Failed', error: error instanceof Error ? error.message : String(error) });
+    console.error(`[stick pictures] ${project.id}:`, job.error);
+  });
+}));
+
 /** Planning can take minutes (longer than Cloudflare's ~100 s request limit), so it runs in the background; GET .../stick reports it. */
 const stickPlans = new Map<string, { state: 'running' | 'failed'; error?: string }>();
 app.post('/api/projects/:id/stick/plan', stickRoute(async (req, res, project) => {
@@ -2094,7 +2132,7 @@ app.post('/api/projects/:id/stick/render', stickRoute(async (req, res, project) 
     void (async () => {
       try {
         const result = await renderStickReel({
-          project, draft, visual: temporary, output, creditsPath, chromeBin: await detectChromeBin(), signal: abort.signal,
+          project, draft, visual: temporary, output, creditsPath, chromeBin: await detectChromeBin(), signal: abort.signal, assetBase: stickAssetBase(project.id),
           ffmpeg: args => run(ffmpegBin, args, undefined, 600_000),
           progress: (value, stage) => { job.progress = value; if (stage) job.stage = stage; },
         });

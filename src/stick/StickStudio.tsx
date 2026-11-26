@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { api, type ReelSource, type StickPlanState, type StudioInfo } from '../api';
+import { api, type ReelSource, type StickPicturesState, type StickPlanState, type StudioInfo } from '../api';
 import { chooseFiles, uploadAll } from '../device-files';
 import type { StickDraft, StickRender, StickTheme } from '../../server/stick-reel';
 import type { NarrationJob, StickScript, StickStudioSettings } from '../../server/stick-narration';
@@ -17,7 +17,7 @@ import './stick.css';
 
 type Flow = { concept: string; seconds: number; mode?: 'idea' | 'link'; link?: string; sourceJobId?: string; source?: ReelSource; script?: StickScript; scriptJobId?: string; narrationJobId?: string; voiceUrl?: string; uploadId?: string; voiceSeconds?: number };
 type View = 'home' | 'write' | 'script' | 'voice' | 'reel' | 'settings';
-type StickData = { draft: StickDraft; render: StickRender | null; duration: number; audioUrl: string; customMusic: boolean; facePacks: string[]; themes: StickTheme[]; plan: StickPlanState };
+type StickData = { draft: StickDraft; render: StickRender | null; duration: number; audioUrl: string; customMusic: boolean; facePacks: string[]; themes: StickTheme[]; plan: StickPlanState; pictures: StickPicturesState; assetBase: string };
 
 const FLOW_KEY = 'practireel:stickFlow';
 const PROJECT_KEY = 'video-cleaner:stickProject';
@@ -145,7 +145,7 @@ export function StickStudio() {
     const project = await api.createStick(uploadId);
     const studio = info?.settings;
     const current = await api.stick(project.id);
-    const draft: StickDraft = studio ? { ...current.draft, themeId: studio.themeId, faces: studio.faces, music: studio.music, sfx: studio.sfx, useOpenverse: studio.useOpenverse, ...(studio.badge ? { badge: studio.badge } : {}) } : current.draft;
+    const draft: StickDraft = studio ? { ...current.draft, style: studio.look, themeId: studio.themeId, faces: studio.faces, music: studio.music, sfx: studio.sfx, useOpenverse: studio.useOpenverse, ...(studio.badge ? { badge: studio.badge } : {}) } : current.draft;
     await api.saveStick(project.id, draft);
     await api.planStick(project.id, { brief, themeId: draft.themeId });
     localStorage.setItem(PROJECT_KEY, project.id); localStorage.setItem(AUTO_KEY, project.id);
@@ -387,6 +387,8 @@ function ReelView({ projectId, info, onNew, onSettings, onLost, onHome }: { proj
   const audio = useRef<HTMLAudioElement>(null);
   const planning = data?.plan?.state === 'running';
   const rendering = data?.render?.state === 'running';
+  const picturing = data?.pictures?.state === 'running';
+  const cinematic = (data?.draft.style ?? 'classic') === 'cinematic';
 
   async function refresh(keepDraft = false) {
     const next = await api.stick(projectId);
@@ -400,11 +402,16 @@ function ReelView({ projectId, info, onNew, onSettings, onLost, onHome }: { proj
   // Poll while planning or rendering; after an automatic plan, start the render by itself.
   useEffect(() => {
     if (!data) return;
-    if (planning || rendering) {
-      const timer = window.setTimeout(() => void refresh(rendering && editing).catch((err) => setError(message(err))), 2000);
+    if (planning || rendering || picturing) {
+      const timer = window.setTimeout(() => void refresh((rendering || picturing) && editing).catch((err) => setError(message(err))), 2000);
       return () => clearTimeout(timer);
     }
     if (localStorage.getItem(AUTO_KEY) === projectId && !data.plan && !data.render) {
+      // Cinematic reels get their set + photo sheet first (once); if pictures fail the render still runs on a plain set.
+      if (cinematic && !data.draft.set && !data.pictures && info?.settings.picturesEngine !== 'none') {
+        void api.makeStickPictures(projectId).then(() => refresh()).catch((err) => setError(message(err)));
+        return;
+      }
       localStorage.removeItem(AUTO_KEY);
       const badge = info?.settings.badge;
       const next = badge ? { ...data.draft, badge } : data.draft;
@@ -446,10 +453,11 @@ function ReelView({ projectId, info, onNew, onSettings, onLost, onHome }: { proj
   }
 
   const ready = data.render?.state === 'ready' && data.render.url;
-  const making = planning || rendering;
+  const making = planning || rendering || picturing;
   const stepClass = (state: 'done' | 'running' | 'todo' | 'failed') => `pr-step ${state === 'todo' ? '' : state}`;
   const planState = planning ? 'running' : data.plan?.state === 'failed' ? 'failed' : 'done';
   const renderState = rendering ? 'running' : data.render?.state === 'failed' ? 'failed' : ready ? 'done' : 'todo';
+  const picturesState = picturing ? 'running' : data.pictures?.state === 'failed' ? 'failed' : data.draft.set || data.pictures?.state === 'ready' ? 'done' : 'todo';
 
   return (
     <main className="pr-page st-wide">
@@ -461,6 +469,7 @@ function ReelView({ projectId, info, onNew, onSettings, onLost, onHome }: { proj
           <ol className="pr-steps">
             <li className={stepClass('done')}><span className="ic">✓</span><span className="txt"><strong>Voice</strong><small>{data.duration.toFixed(0)} s</small></span></li>
             <li className={stepClass(planState)}><span className="ic">{planState === 'done' ? '✓' : planState === 'failed' ? '!' : ''}</span><span className="txt"><strong>Captions &amp; scene plan</strong><small>{planning ? 'The AI director is planning scenes, poses and sounds (1-3 min)…' : data.plan?.error ?? `${draft.scenes.length} scenes`}</small></span></li>
+            {cinematic && <li className={stepClass(picturesState)}><span className="ic">{picturesState === 'done' ? '✓' : picturesState === 'failed' ? '!' : ''}</span><span className="txt"><strong>Set &amp; real photos</strong><small>{picturing ? `${data.pictures?.stage ?? 'Working…'} (3-10 min)` : data.pictures?.state === 'failed' ? `Could not make pictures: ${data.pictures.error ?? ''}. The video uses a plain set.` : data.draft.set ? `Set + ${data.draft.photos?.length ?? 0} photos` : 'Waiting'}</small></span></li>}
             <li className={stepClass(renderState)}><span className="ic">{renderState === 'done' ? '✓' : renderState === 'failed' ? '!' : ''}</span><span className="txt"><strong>Drawing the video</strong><small>{rendering ? `${data.render?.stage ?? ''} ${Math.round((data.render?.progress ?? 0) * 100)}%` : data.render?.error ?? (ready ? 'Done' : 'Waiting')}</small></span></li>
           </ol>
           {rendering && <div className="pr-bar"><i style={{ width: `${Math.round((data.render?.progress ?? 0) * 100)}%` }} /></div>}
@@ -485,6 +494,23 @@ function ReelView({ projectId, info, onNew, onSettings, onLost, onHome }: { proj
       {(editing || (!ready && !making)) && (
         <>
           {!ready && <audio ref={audio} className="st-audio" src={data.audioUrl} controls preload="metadata" />}
+          <section className="pr-card">
+            <div className="pr-row" style={{ justifyContent: 'space-between' }}><h2>Look</h2>
+              <div className="pr-chips">
+                <button type="button" className={`pr-chip${(draft.style ?? 'classic') === 'cinematic' ? ' on' : ''}`} onClick={() => setDraft({ ...draft, style: 'cinematic' })}>Cinematic</button>
+                <button type="button" className={`pr-chip${(draft.style ?? 'classic') === 'classic' ? ' on' : ''}`} onClick={() => setDraft({ ...draft, style: 'classic' })}>Classic cards</button>
+              </div>
+            </div>
+            {(draft.style ?? 'classic') === 'cinematic' && (
+              <>
+                <div className="st-thumbs">
+                  {draft.set ? <img src={`${data.assetBase}/${draft.set}`} alt="Set" className="set" /> : <span className="st-thumb-empty">No set yet</span>}
+                  {(draft.photos ?? []).map((photo) => <img key={photo} src={`${data.assetBase}/${photo}`} alt="" />)}
+                </div>
+                <button type="button" className="pr-btn small" disabled={making || Boolean(busy)} onClick={() => void act('Starting…', async () => { await api.saveStick(projectId, draft); await api.makeStickPictures(projectId); await refresh(true); })}>{draft.set ? 'Make new pictures' : 'Make the set & photos'}</button>
+              </>
+            )}
+          </section>
           <SceneEditor draft={draft} setDraft={setDraft} duration={data.duration} themes={data.themes} facePacks={data.facePacks} customMusic={data.customMusic}
             onPickMusic={() => void pickMusic()} onDefaultMusic={() => void act('Restoring music…', async () => { await api.stickMusic(projectId); await refresh(true); })}
             onSeek={seek} disabled={making || Boolean(busy)} />
@@ -519,7 +545,7 @@ function MyReels({ onOpen }: { onOpen: (id: string) => void }) {
   const [reels, setReels] = useState<Awaited<ReturnType<typeof api.stickReels>>['reels'] | null>(null);
   useEffect(() => { void api.stickReels().then((r) => setReels(r.reels)).catch(() => setReels([])); }, []);
   if (!reels?.length) return null;
-  const pill = { planning: ['making', 'Planning'], rendering: ['making', 'Rendering'], ready: ['ready', 'Ready'], failed: ['failed', 'Stopped'], draft: ['posted', 'Draft'] } as const;
+  const pill = { planning: ['making', 'Planning'], pictures: ['making', 'Pictures'], rendering: ['making', 'Rendering'], ready: ['ready', 'Ready'], failed: ['failed', 'Stopped'], draft: ['posted', 'Draft'] } as const;
   return (
     <section className="pr-section">
       <span className="pr-label">My stick reels</span>

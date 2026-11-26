@@ -106,7 +106,25 @@ export type StickSceneV2 = {
   sfx?: string;
   sfxQuery?: string;
   beats?: StickBeat[];
+  /** Cinematic look. Index into draft.tracker (which of the 3 chapters this scene belongs to). */
+  chapter?: number;
+  /** Where the camera stands on the set, 0 (left edge) … 1 (right edge). */
+  camera?: number;
+  /** Other stick characters in this scene (from draft.cast), each with an optional speech bubble. */
+  actors?: StickActor[];
+  /** A speech bubble for the main figure. */
+  myBubble?: StickTimedText;
+  /** Big yellow box that slams in on a word ("60 DAYS", "NOT NORMAL"). */
+  punchText?: StickTimedText;
+  /** Index into draft.photos: a real photo shown framed in this scene. */
+  photo?: number;
 };
+
+export type StickTimedText = { text: string; at: number; wordId?: string };
+export type StickActor = { castId: string; pose: StickPose; bubble?: StickTimedText };
+export type StickCastMember = { id: string; label: string };
+export const stickStyles = ['cinematic', 'classic'] as const;
+export type StickStyle = typeof stickStyles[number];
 
 /** Legacy v1 tuple format retained for automatic migration of saved drafts & JSON imports. */
 export type LegacyStickScene = [number, string, string, number, string];
@@ -123,6 +141,17 @@ export type StickDraft = {
   sfx: number;
   useOpenverse: boolean;
   notes?: string[];
+  /** 'cinematic' = photo set + moving camera + cast (default for new reels); 'classic' = card layout. */
+  style?: StickStyle;
+  /** Three chapter labels shown as a progress tracker at the top, e.g. ["MYTH", "WHY", "FIX"]. */
+  tracker?: string[];
+  cast?: StickCastMember[];
+  /** File names inside the project's stick-assets folder. */
+  set?: string;
+  photos?: string[];
+  /** What the AI Director asked for, so the pictures can be (re)made. */
+  setPrompt?: string;
+  photoPrompts?: string[];
 };
 
 export type StickRender = {
@@ -293,7 +322,34 @@ function upgradeScene(raw: unknown, index: number, duration: number): StickScene
     sfx: typeof item.sfx === 'string' && item.sfx.trim() ? item.sfx.trim().slice(0, 80) : undefined,
     sfxQuery: typeof item.sfxQuery === 'string' && item.sfxQuery.trim() ? item.sfxQuery.trim().slice(0, 80) : undefined,
     ...(beats?.length ? { beats } : {}),
+    ...cinematicSceneFields(item, at, duration),
   };
+}
+
+function timedText(raw: unknown, sceneAt: number, duration: number, max: number): StickTimedText | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const value = raw as Record<string, unknown>;
+  const text = clampString(value.text, max);
+  const at = Number(value.at);
+  if (!text) return undefined;
+  return { text, at: Number.isFinite(at) && at >= sceneAt && at < duration ? Math.round(at * 1000) / 1000 : sceneAt, ...(typeof value.wordId === 'string' ? { wordId: value.wordId.slice(0, 64) } : {}) };
+}
+function cinematicSceneFields(item: Record<string, unknown>, at: number, duration: number): Partial<StickSceneV2> {
+  const out: Partial<StickSceneV2> = {};
+  if (Number.isInteger(item.chapter) && Number(item.chapter) >= 0 && Number(item.chapter) < 3) out.chapter = Number(item.chapter);
+  if (Number.isFinite(Number(item.camera)) && item.camera !== null && item.camera !== undefined) out.camera = Math.min(1, Math.max(0, Number(item.camera)));
+  if (Array.isArray(item.actors)) {
+    const actors = item.actors
+      .filter((a): a is Record<string, unknown> => Boolean(a && typeof a === 'object'))
+      .map((a): StickActor => ({ castId: clampString(a.castId, 24), pose: isPose(a.pose) ? a.pose : 'present_both', ...(timedText(a.bubble, at, duration, 60) ? { bubble: timedText(a.bubble, at, duration, 60) } : {}) }))
+      .filter((a) => Boolean(a.castId))
+      .slice(0, 3);
+    if (actors.length) out.actors = actors;
+  }
+  const mine = timedText(item.myBubble, at, duration, 60); if (mine) out.myBubble = mine;
+  const punch = timedText(item.punchText, at, duration, 28); if (punch) out.punchText = punch;
+  if (Number.isInteger(item.photo) && Number(item.photo) >= 0 && Number(item.photo) < 12) out.photo = Number(item.photo);
+  return out;
 }
 
 export function makeStickDraft(words: Word[]): StickDraft {
@@ -399,8 +455,18 @@ export function validateStickDraft(value: unknown, duration: number): StickDraft
     sfx,
     useOpenverse: input.useOpenverse !== false,
     ...(Array.isArray(input.notes) ? { notes: input.notes.map(n => clampString(n, 200)).filter(Boolean).slice(0, 10) } : {}),
+    style: input.style === 'classic' ? 'classic' : input.style === 'cinematic' ? 'cinematic' : undefined,
+    ...(Array.isArray(input.tracker) ? { tracker: input.tracker.map(n => clampString(n, 18).toUpperCase()).filter(Boolean).slice(0, 3) } : {}),
+    ...(Array.isArray(input.cast) ? { cast: input.cast.filter((c): c is Record<string, unknown> => Boolean(c && typeof c === 'object')).map((c) => ({ id: clampString(c.id, 24), label: clampString(c.label, 20).toUpperCase() })).filter((c) => c.id && c.label).slice(0, 4) } : {}),
+    ...(typeof input.set === 'string' && /^[\w.-]{1,80}$/.test(input.set) ? { set: input.set } : {}),
+    ...(Array.isArray(input.photos) ? { photos: input.photos.filter((p): p is string => typeof p === 'string' && /^[\w.-]{1,80}$/.test(p)).slice(0, 12) } : {}),
+    ...(typeof input.setPrompt === 'string' && input.setPrompt.trim() ? { setPrompt: input.setPrompt.trim().slice(0, 1200) } : {}),
+    ...(Array.isArray(input.photoPrompts) ? { photoPrompts: input.photoPrompts.map(p => clampString(p, 400)).filter(Boolean).slice(0, 6) } : {}),
   };
 }
+
+/** Folder for a stick reel's generated pictures (set + cut-out photos). */
+export const stickAssetsDir = (project: Project) => path.join(project.workDir, 'stick-assets');
 
 export async function loadStickDraft(project: Project) {
   const stored = await fs.readFile(draftPath(project), 'utf8').catch((error) => {
@@ -584,6 +650,8 @@ export async function renderStickReel(options: {
   ffmpeg: (args: string[]) => Promise<{ stdout: string; stderr: string }>;
   progress: (value: number, stage?: string) => void;
   signal?: AbortSignal;
+  /** URL the renderer's browser can load stick-assets files from (the app itself, on this computer). */
+  assetBase?: string;
 }) {
   const { project, draft, visual, output, progress, ffmpeg, signal } = options;
   const stopped = () => { if (signal?.aborted) throw new Error('Stopped.'); };
@@ -608,6 +676,11 @@ export async function renderStickReel(options: {
           sfxQuery: scene.sfxQuery,
           gainScale: i === 0 ? 0.85 : 0.9,
         });
+      }
+      // Cinematic accents: an impact under each punch box, a soft pop for each speech bubble.
+      if (scene.punchText) rawCues.push({ at: scene.punchText.at, sfx: 'impacts-deep-hit-2', gainScale: 1.1 });
+      for (const bubble of [scene.myBubble, ...(scene.actors ?? []).map((a) => a.bubble)]) {
+        if (bubble && bubble.at > scene.at + 0.2) rawCues.push({ at: bubble.at, sfx: 'ui-pop-sound', gainScale: 0.7 });
       }
       for (const beat of scene.beats ?? []) {
         if (beat.sfx || beat.sfxQuery) {
@@ -659,6 +732,11 @@ export async function renderStickReel(options: {
     badge: draft.badge,
     marquee: draft.marquee,
     theme,
+    style: draft.style ?? 'classic',
+    tracker: draft.tracker ?? [],
+    cast: draft.cast ?? [],
+    setUrl: draft.set && options.assetBase ? `${options.assetBase}/${draft.set}` : undefined,
+    photoUrls: (draft.photos ?? []).map((name) => (options.assetBase ? `${options.assetBase}/${name}` : '')).filter(Boolean),
   };
   const browserExecutable = options.chromeBin || undefined;
   const composition = await selectComposition({ serveUrl, id: 'ReelStudio', inputProps, browserExecutable });
