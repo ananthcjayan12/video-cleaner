@@ -979,7 +979,7 @@ app.put('/api/projects/:id/meta', route(async (req, res) => {
 }));
 
 app.delete('/api/projects/:id', route(async (req, res) => {
-  const id = routeParam(req.params.id); const project = getProject(id); projects.delete(id); brollPlans.delete(id); motionPlans.delete(id); exportJobs.delete(id); await fs.rm(project.workDir, { recursive: true, force: true }); res.json({ deleted: true, id });
+  const id = routeParam(req.params.id); const project = getProject(id); stopStickWork(id); projects.delete(id); brollPlans.delete(id); motionPlans.delete(id); exportJobs.delete(id); await fs.rm(project.workDir, { recursive: true, force: true }); res.json({ deleted: true, id });
 }));
 
 app.post('/api/projects/:id/relink', route(async (req, res) => {
@@ -1857,39 +1857,39 @@ app.get('/api/stick/studio', studioRoute(async (_req, res) => {
   });
 }));
 app.put('/api/stick/studio', studioRoute(async (req, res) => { res.json({ settings: await saveStudioSettings(req.body ?? {}) }); }));
-type ScriptJob = { id: string; state: 'running' | 'ready' | 'failed'; script?: StickScript; error?: string; startedAt: number };
+type ScriptJob = { id: string; state: 'running' | 'ready' | 'failed'; script?: StickScript; error?: string; startedAt: number; abort?: AbortController };
 const scriptJobs = new Map<string, ScriptJob>();
 app.post('/api/stick/source', studioRoute(async (req, res) => {
   const input = typeof req.body?.url === 'string' ? req.body.url.slice(0, 1000) : '';
   const settings = await resolvedSettings(); if (!settings.ffmpegBin) throw new Error('FFmpeg was not found.');
-  const job = newSourceJob(); res.status(202).json({ job });
-  void fetchReelSource({ input, workDir: path.join(studioDir(), 'sources', job.id), ffmpeg: settings.ffmpegBin, geminiApiKey: settings.geminiApiKey, model: settings.geminiSttModel || 'gemini-3.8-flash', progress: (stage) => { job.stage = stage; } })
-    .then((source) => Object.assign(job, { state: 'ready', stage: 'Done', source }), (error) => Object.assign(job, { state: 'failed', stage: 'Failed', error: error instanceof Error ? error.message : String(error) }));
+  const job = newSourceJob(); res.status(202).json({ job: { ...job, abort: undefined } });
+  void fetchReelSource({ input, workDir: path.join(studioDir(), 'sources', job.id), ffmpeg: settings.ffmpegBin, geminiApiKey: settings.geminiApiKey, model: settings.geminiSttModel || 'gemini-3.8-flash', progress: (stage) => { job.stage = stage; }, signal: job.abort!.signal })
+    .then((source) => { if (job.state === 'running') Object.assign(job, { state: 'ready', stage: 'Done', source }); }, (error) => { if (job.state === 'running') Object.assign(job, { state: 'failed', stage: 'Failed', error: error instanceof Error ? error.message : String(error) }); });
 }));
 app.get('/api/stick/source/:jobId', studioRoute(async (req, res) => {
   const job = sourceJobs.get(routeParam(req.params.jobId));
   if (!job) return void res.status(404).json({ error: 'That link job is gone (the app restarted). Fetch the link again.' });
-  res.json({ job });
+  res.json({ job: { ...job, abort: undefined } });
 }));
 app.get('/api/stick/script/:jobId', studioRoute(async (req, res) => {
   const job = scriptJobs.get(routeParam(req.params.jobId));
   if (!job) return void res.status(404).json({ error: 'That script job is gone (the app restarted). Write it again.' });
-  res.json({ job });
+  res.json({ job: { ...job, abort: undefined } });
 }));
 app.post('/api/stick/script', studioRoute(async (req, res) => {
   const settings = await resolvedSettings(); const studio = await loadStudioSettings();
   for (const [key, old] of scriptJobs) if (Date.now() - old.startedAt > 6 * 3600_000) scriptJobs.delete(key);
-  const job: ScriptJob = { id: randomUUID(), state: 'running', startedAt: Date.now() }; scriptJobs.set(job.id, job);
+  const job: ScriptJob = { id: randomUUID(), state: 'running', startedAt: Date.now(), abort: new AbortController() }; scriptJobs.set(job.id, job);
   const concept = typeof req.body?.concept === 'string' ? req.body.concept.slice(0, 3000) : '';
   const script = writeStickScript({
     concept, seconds: Number(req.body?.seconds) || undefined,
     feedback: typeof req.body?.feedback === 'string' ? req.body.feedback.slice(0, 1500) : undefined,
     previous: scriptFromBody(req.body?.previous),
     sourceText: (() => { const source = sourceFromBody(req.body?.source); return source ? sourceBrief(source) : undefined; })(),
-    settings: studio, textConfig: settings, choice: textEngines(settings).script, workDir: path.join(studioDir(), 'work'),
+    settings: studio, textConfig: settings, choice: textEngines(settings).script, workDir: path.join(studioDir(), 'work'), signal: job.abort!.signal,
   });
-  res.status(202).json({ job });
-  void script.then((value) => Object.assign(job, { state: 'ready', script: value }), (error) => Object.assign(job, { state: 'failed', error: error instanceof Error ? error.message : String(error) }));
+  res.status(202).json({ job: { ...job, abort: undefined } });
+  void script.then((value) => { if (job.state === 'running') Object.assign(job, { state: 'ready', script: value }); }, (error) => { if (job.state === 'running') Object.assign(job, { state: 'failed', error: job.abort?.signal.aborted ? 'Stopped.' : error instanceof Error ? error.message : String(error) }); });
 }));
 app.post('/api/stick/voice-preview', studioRoute(async (req, res) => {
   const settings = await resolvedSettings(); const studio = { ...await loadStudioSettings(), ...(typeof req.body?.voice === 'string' && /^[A-Za-z]{2,30}$/.test(req.body.voice) ? { voice: req.body.voice } : {}), ...(typeof req.body?.voiceStyle === 'string' && req.body.voiceStyle.trim() ? { voiceStyle: req.body.voiceStyle.trim().slice(0, 1200) } : {}) };
@@ -1908,13 +1908,13 @@ app.post('/api/stick/narrate', studioRoute(async (req, res) => {
   if (!settings.ffmpegBin) throw new Error('FFmpeg was not found.');
   const ffmpegBin = settings.ffmpegBin;
   const job = newNarrationJob();
-  res.status(202).json({ job });
+  res.status(202).json({ job: { ...job, abort: undefined } });
   void (async () => {
     const work = path.join(studioDir(), 'narration', job.id);
     try {
       const wav = path.join(work, 'voice.wav');
       job.stage = `Recording line 1 of ${script.lines.length}…`;
-      await narrateScript({ lines: script.lines, settings: studio, apiKey: settings.geminiApiKey, outWav: wav, progress: (done, total) => { job.progress = done / total * 0.9; job.stage = done < total ? `Recording line ${done + 1} of ${total}…` : 'Finishing the voice…'; } });
+      await narrateScript({ lines: script.lines, settings: studio, apiKey: settings.geminiApiKey, outWav: wav, signal: job.abort!.signal, progress: (done, total) => { job.progress = done / total * 0.9; job.stage = done < total ? `Recording line ${done + 1} of ${total}…` : 'Finishing the voice…'; } });
       const slug = (script.title || 'ai-voice').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'ai-voice';
       const m4a = path.join(work, `${slug}.m4a`);
       const tempo = Math.abs(studio.speed - 1) > 0.005 ? ['-af', `atempo=${studio.speed.toFixed(3)}`] : [];
@@ -1927,14 +1927,14 @@ app.post('/api/stick/narrate', studioRoute(async (req, res) => {
       Object.assign(job, { state: 'ready', progress: 1, stage: 'Voice ready', uploadId: meta.id, seconds: probed?.duration ?? undefined });
       await fs.rm(wav, { force: true }).catch(() => undefined);
     } catch (error) {
-      Object.assign(job, { state: 'failed', progress: 0, stage: 'Failed', error: error instanceof Error ? error.message : String(error) });
+      if (job.state === 'running') Object.assign(job, { state: 'failed', progress: 0, stage: 'Failed', error: job.abort?.signal.aborted ? 'Stopped.' : error instanceof Error ? error.message : String(error) });
     }
   })();
 }));
 app.get('/api/stick/narrate/:jobId', studioRoute(async (req, res) => {
   const job = narrationJobs.get(routeParam(req.params.jobId));
   if (!job) return void res.status(404).json({ error: 'That voice job is gone (the app restarted). Make the voice again.' });
-  res.json({ job, url: job.uploadId ? `/api/stick/narrate/${job.id}/audio` : undefined });
+  res.json({ job: { ...job, abort: undefined }, url: job.uploadId ? `/api/stick/narrate/${job.id}/audio` : undefined });
 }));
 app.get('/api/stick/narrate/:jobId/audio', studioRoute(async (req, res) => {
   const job = narrationJobs.get(routeParam(req.params.jobId));
@@ -1942,7 +1942,37 @@ app.get('/api/stick/narrate/:jobId/audio', studioRoute(async (req, res) => {
   res.setHeader('Accept-Ranges', 'bytes'); res.sendFile((await readUpload(await uploadsDir(), job.uploadId)).file);
 }));
 
+/** Stop a background step: kind = source | script | narrate. Already-finished jobs are left as they are. */
+app.post('/api/stick/:kind/:jobId/cancel', studioRoute(async (req, res) => {
+  const kind = routeParam(req.params.kind); const id = routeParam(req.params.jobId);
+  const job = (kind === 'source' ? sourceJobs : kind === 'script' ? scriptJobs : kind === 'narrate' ? narrationJobs : null)?.get(id) as { state: string; error?: string; stage?: string; abort?: AbortController } | undefined;
+  if (job?.state === 'running') { job.abort?.abort(); Object.assign(job, { state: 'failed', error: 'Stopped.', stage: 'Stopped' }); }
+  res.json({ stopped: Boolean(job) });
+}));
+/** Every stick reel on this computer, newest first, for the "My stick reels" list. */
+app.get('/api/stick/reels', studioRoute(async (_req, res) => {
+  await hydrateProjects();
+  const rows = await Promise.all([...projects.values()].map(async (project) => {
+    const hasDraft = await fs.access(path.join(project.workDir, 'stick-draft.json')).then(() => true, () => false);
+    if (!hasDraft) return null;
+    const saved = await fs.readFile(path.join(project.workDir, 'stick-render.json'), 'utf8').then((text) => JSON.parse(text) as StickRender).catch(() => null);
+    const live = stickJobs.get(project.id);
+    const render = live ?? saved;
+    const state = stickPlans.get(project.id)?.state === 'running' ? 'planning' : render?.state === 'running' ? 'rendering' : render?.state === 'ready' ? 'ready' : render?.state === 'failed' ? 'failed' : 'draft';
+    return { id: project.id, name: project.name, updatedAt: project.updatedAt, duration: project.media.duration, state, url: render?.state === 'ready' ? render.url : undefined };
+  }));
+  res.json({ reels: rows.filter(Boolean).sort((a, b) => Date.parse(b!.updatedAt) - Date.parse(a!.updatedAt)) });
+}));
+
 const stickJobs = new Map<string, StickRender>();
+const stickRenderAborts = new Map<string, AbortController>();
+/** Stop planning and rendering for one stick reel (used by Stop and before Delete). */
+function stopStickWork(projectId: string) {
+  stickPlanAborts.get(projectId)?.abort(); stickPlanAborts.delete(projectId); stickPlans.delete(projectId);
+  stickRenderAborts.get(projectId)?.abort(); stickRenderAborts.delete(projectId);
+  const job = stickJobs.get(projectId); if (job?.state === 'running') Object.assign(job, { state: 'failed', progress: 0, error: 'Stopped.' });
+}
+const stickPlanAborts = new Map<string, AbortController>();
 const stickRoute = (handler: (req: express.Request, res: express.Response, project: Project) => Promise<void>) =>
   route(async (req, res) => {
     if (!isAdmin(res)) return void res.status(403).json({ error: 'Stick-figure reels are for the owner login only.' });
@@ -2008,10 +2038,15 @@ const stickPlans = new Map<string, { state: 'running' | 'failed'; error?: string
 app.post('/api/projects/:id/stick/plan', stickRoute(async (req, res, project) => {
   if (stickPlans.get(project.id)?.state === 'running') return void res.status(202).json({ plan: stickPlans.get(project.id) });
   const plan = { state: 'running' as 'running' | 'failed', error: undefined as string | undefined }; stickPlans.set(project.id, plan);
+  const abort = new AbortController(); stickPlanAborts.set(project.id, abort);
   res.status(202).json({ plan });
-  void planStickInBackground(req, project).then(() => { stickPlans.delete(project.id); }, (error) => { plan.state = 'failed'; plan.error = error instanceof Error ? error.message : String(error); });
+  void planStickInBackground(req, project, abort.signal).then(() => { if (!abort.signal.aborted) stickPlans.delete(project.id); }, (error) => { if (abort.signal.aborted) return; plan.state = 'failed'; plan.error = error instanceof Error ? error.message : String(error); }).finally(() => { if (stickPlanAborts.get(project.id) === abort) stickPlanAborts.delete(project.id); });
 }));
-async function planStickInBackground(req: express.Request, project: Project) {
+app.post('/api/projects/:id/stick/cancel', stickRoute(async (_req, res, project) => {
+  stopStickWork(project.id);
+  res.json({ stopped: true });
+}));
+async function planStickInBackground(req: express.Request, project: Project, signal: AbortSignal) {
   const context = await projectUsageContext(project);
   const settings = await resolvedSettings();
   const existing = await loadStickDraft(project);
@@ -2031,7 +2066,9 @@ async function planStickInBackground(req: express.Request, project: Project) {
     existing,
     brief,
     themeId,
+    signal,
   }));
+  if (signal.aborted) return;
   await saveStickDraft(project, planned);
 }
 app.post('/api/projects/:id/stick/render', stickRoute(async (req, res, project) => {
@@ -2040,6 +2077,7 @@ app.post('/api/projects/:id/stick/render', stickRoute(async (req, res, project) 
   }
   const job: StickRender = { state: 'running', progress: 0, stage: 'Preparing render…' };
   stickJobs.set(project.id, job);
+  const abort = new AbortController(); stickRenderAborts.set(project.id, abort);
   try {
     await requireSource(project);
     const draft = req.body?.scenes ? await saveStickDraft(project, req.body) : await loadStickDraft(project);
@@ -2055,7 +2093,7 @@ app.post('/api/projects/:id/stick/render', stickRoute(async (req, res, project) 
     void (async () => {
       try {
         const result = await renderStickReel({
-          project, draft, visual: temporary, output, creditsPath, chromeBin: await detectChromeBin(),
+          project, draft, visual: temporary, output, creditsPath, chromeBin: await detectChromeBin(), signal: abort.signal,
           ffmpeg: args => run(ffmpegBin, args, undefined, 600_000),
           progress: (value, stage) => { job.progress = value; if (stage) job.stage = stage; },
         });
@@ -2064,15 +2102,18 @@ app.post('/api/projects/:id/stick/render', stickRoute(async (req, res, project) 
           url: downloadUrlFor(project, output),
           ...(result.wroteCredits ? { creditsUrl: downloadUrlFor(project, creditsPath) } : {}),
         };
+        if (abort.signal.aborted) throw new Error('Stopped.');
         await atomicWriteJson(path.join(project.workDir, 'stick-render.json'), finished);
         Object.assign(job, finished);
       } catch (error) {
-        const failed: StickRender = { state: 'failed', progress: 0, error: error instanceof Error ? error.message : String(error) };
-        await atomicWriteJson(path.join(project.workDir, 'stick-render.json'), failed).catch(() => undefined);
+        const failed: StickRender = { state: 'failed', progress: 0, error: abort.signal.aborted ? 'Stopped.' : error instanceof Error ? error.message : String(error) };
+        // A deleted reel's folder is gone: do not recreate it just to say it stopped.
+        if (projects.has(project.id)) await atomicWriteJson(path.join(project.workDir, 'stick-render.json'), failed).catch(() => undefined);
         Object.assign(job, failed);
         await fs.rm(output, { force: true }).catch(() => undefined);
       } finally {
         await fs.rm(temporary, { force: true }).catch(() => undefined);
+        if (stickRenderAborts.get(project.id) === abort) stickRenderAborts.delete(project.id);
       }
     })();
   } catch (error) {

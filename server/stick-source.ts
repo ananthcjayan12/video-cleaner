@@ -17,7 +17,7 @@ export type ReelSource = {
   language: string; topic: string; hook: string; summary: string; structure: string[]; keyPoints: string[];
   onScreenText: string[]; visualStyle: string; transcript: string;
 };
-export type SourceJob = { id: string; state: 'running' | 'ready' | 'failed'; stage: string; source?: ReelSource; error?: string; startedAt: number };
+export type SourceJob = { id: string; state: 'running' | 'ready' | 'failed'; stage: string; source?: ReelSource; error?: string; startedAt: number; abort?: AbortController };
 export const sourceJobs = new Map<string, SourceJob>();
 
 const HOSTS = /(^|\.)(instagram\.com|instagr\.am|youtube\.com|youtu\.be|facebook\.com|fb\.watch|tiktok\.com)$/i;
@@ -40,14 +40,15 @@ export function findYtDlp(): string | null {
   return candidates.find((file): file is string => Boolean(file) && existsSync(file!)) ?? null;
 }
 
-function run(bin: string, args: string[], timeoutMs: number): Promise<string> {
+function run(bin: string, args: string[], timeoutMs: number, currentSignal?: AbortSignal): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, args, { shell: false });
+    if (currentSignal?.aborted) return reject(new Error('Stopped.'));
+    const child = spawn(bin, args, { shell: false, signal: currentSignal });
     let out = ''; let err = '';
     const timer = setTimeout(() => child.kill('SIGTERM'), timeoutMs);
     child.stdout.on('data', (chunk) => { out += String(chunk); if (out.length > 20_000_000) child.kill('SIGTERM'); });
     child.stderr.on('data', (chunk) => { err += String(chunk); if (err.length > 200_000) err = err.slice(-100_000); });
-    child.on('error', (error) => { clearTimeout(timer); reject(error); });
+    child.on('error', (error) => { clearTimeout(timer); reject(currentSignal?.aborted ? new Error('Stopped.') : error); });
     child.on('close', (code) => {
       clearTimeout(timer);
       if (code === 0) return resolve(out);
@@ -71,7 +72,7 @@ Return JSON with:
 
 /** Download, shrink (5 min, 360p, low fps), let Gemini watch it, delete the video. */
 export async function fetchReelSource(options: {
-  input: string; workDir: string; ffmpeg: string; geminiApiKey: string; model: string; progress: (stage: string) => void;
+  input: string; workDir: string; ffmpeg: string; geminiApiKey: string; model: string; progress: (stage: string) => void; signal?: AbortSignal;
 }): Promise<ReelSource> {
   const { url, platform } = cleanReelUrl(options.input);
   const ytdlp = findYtDlp(); if (!ytdlp) throw new Error('yt-dlp is not installed on this computer.');
@@ -79,27 +80,27 @@ export async function fetchReelSource(options: {
   await fs.mkdir(options.workDir, { recursive: true });
   try {
     options.progress(`Reading the ${platform} post…`);
-    const meta = JSON.parse(await run(ytdlp, ['--no-warnings', '--no-playlist', '--dump-single-json', url], 120_000).catch((error) => {
+    const meta = JSON.parse(await run(ytdlp, ['--no-warnings', '--no-playlist', '--dump-single-json', url], 120_000, options.signal).catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
       throw new Error(/login|private|rate|not available|unavailable/i.test(message) ? `${platform} would not share this video without a login (private, age-restricted or rate-limited). Try another public link, or upload the video. (${message.slice(0, 160)})` : message);
     })) as { title?: string; description?: string; uploader?: string; channel?: string; duration?: number };
     if ((meta.duration ?? 0) > 20 * 60) throw new Error('That video is over 20 minutes. Use a reel or a short.');
 
     options.progress('Downloading the video…');
-    await run(ytdlp, ['--no-warnings', '--no-playlist', '-q', '-f', 'best[height<=720]/bv*[height<=720]+ba/best', '--max-filesize', '400M', '-o', path.join(options.workDir, 'source.%(ext)s'), url], 600_000);
+    await run(ytdlp, ['--no-warnings', '--no-playlist', '-q', '-f', 'best[height<=720]/bv*[height<=720]+ba/best', '--max-filesize', '400M', '-o', path.join(options.workDir, 'source.%(ext)s'), url], 600_000, options.signal);
     const file = (await fs.readdir(options.workDir)).find((name) => name.startsWith('source.'));
     if (!file) throw new Error('The download finished without a video file.');
 
     options.progress('Preparing it for the AI…');
     const small = path.join(options.workDir, 'small.mp4');
-    await run(options.ffmpeg, ['-hide_banner', '-loglevel', 'error', '-y', '-i', path.join(options.workDir, file), '-t', '300', '-vf', 'scale=-2:360,fps=2', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '32', '-c:a', 'aac', '-ac', '1', '-b:a', '40k', small], 300_000);
+    await run(options.ffmpeg, ['-hide_banner', '-loglevel', 'error', '-y', '-i', path.join(options.workDir, file), '-t', '300', '-vf', 'scale=-2:360,fps=2', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '32', '-c:a', 'aac', '-ac', '1', '-b:a', '40k', small], 300_000, options.signal);
     await fs.rm(path.join(options.workDir, file), { force: true });
     const bytes = await fs.readFile(small);
     if (bytes.length > 19 * 1024 * 1024) throw new Error('The video is too long to read in one go. Use a reel under 5 minutes.');
 
     options.progress('The AI is watching it…');
     const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(options.model)}:generateContent`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': options.geminiApiKey }, signal: AbortSignal.timeout(300_000),
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': options.geminiApiKey }, signal: options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(300_000)]) : AbortSignal.timeout(300_000),
       body: JSON.stringify({ contents: [{ role: 'user', parts: [{ inlineData: { mimeType: 'video/mp4', data: bytes.toString('base64') } }, { text: ASK }] }], generationConfig: { temperature: 0.2, responseMimeType: 'application/json' } }),
     });
     const body = await response.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>; usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number }; error?: { message?: string } };
@@ -113,6 +114,9 @@ export async function fetchReelSource(options: {
       language: str(raw.language, 40), topic: str(raw.topic, 300), hook: str(raw.hook, 400), summary: str(raw.summary, 1200),
       structure: list(raw.structure, 12), keyPoints: list(raw.keyPoints, 12), onScreenText: list(raw.onScreenText, 12), visualStyle: str(raw.visualStyle, 300), transcript: str(raw.transcript, 6000),
     };
+  } catch (error) {
+    if (options.signal?.aborted) throw new Error('Stopped.');
+    throw error;
   } finally {
     await fs.rm(options.workDir, { recursive: true, force: true }).catch(() => undefined);
   }
@@ -120,7 +124,7 @@ export async function fetchReelSource(options: {
 
 export function newSourceJob(): SourceJob {
   for (const [id, job] of sourceJobs) if (Date.now() - job.startedAt > 6 * 3600_000) sourceJobs.delete(id);
-  const job: SourceJob = { id: randomUUID(), state: 'running', stage: 'Starting…', startedAt: Date.now() };
+  const job: SourceJob = { id: randomUUID(), state: 'running', stage: 'Starting…', startedAt: Date.now(), abort: new AbortController() };
   sourceJobs.set(job.id, job);
   return job;
 }

@@ -220,6 +220,7 @@ export async function planStickReelWithAi(options: {
   existing: StickDraft;
   brief?: string;
   themeId?: string;
+  signal?: AbortSignal;
 }): Promise<StickDraft> {
   const { words, duration, existing } = options;
   if (!words.length) throw new Error('Transcribe the recording first so the AI Director has word timestamps.');
@@ -241,9 +242,11 @@ export async function planStickReelWithAi(options: {
         prompt: attemptPrompt,
         schema: PLANNER_SCHEMA,
         outputName: 'stick-reel-plan',
+        signal: options.signal,
       });
       raw = dropNulls(raw);
     } catch (error) {
+      if (options.signal?.aborted) throw new Error('Stopped.');
       lastError = error instanceof Error ? error.message : String(error);
       continue;
     }

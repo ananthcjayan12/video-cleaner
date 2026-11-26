@@ -53,7 +53,7 @@ export function StickStudio() {
   const [narration, setNarration] = useState<NarrationJob | null>(null);
   const [voiceChoice, setVoiceChoice] = useState('');
   const [sourceStage, setSourceStage] = useState('');
-  const autoFetch = useRef(Boolean(new URLSearchParams(window.location.search).get('link')) || Boolean(loadFlow().link && loadFlow().mode === 'link' && !loadFlow().source));
+  const autoFetch = useRef(Boolean(new URLSearchParams(window.location.search).get('link')));
 
   const setFlow = (patch: Partial<Flow>) => setFlowState((current) => { const next = { ...current, ...patch }; localStorage.setItem(FLOW_KEY, JSON.stringify(next)); return next; });
   const seconds = flow.seconds || info?.settings.scriptSeconds || 45;
@@ -158,7 +158,18 @@ export function StickStudio() {
     await act('Uploading…', async () => { const [uploadId] = await uploadAll(files, setBusy); setBusy('Setting up…'); await startVideo(uploadId); });
   };
 
+  /** Stop whatever this draft still has running on the server (reading a link, writing, voice). */
+  function stopFlowJobs() {
+    if (flow.sourceJobId) void api.cancelStudioJob('source', flow.sourceJobId).catch(() => undefined);
+    if (flow.scriptJobId) void api.cancelStudioJob('script', flow.scriptJobId).catch(() => undefined);
+    if (flow.narrationJobId && !flow.uploadId) void api.cancelStudioJob('narrate', flow.narrationJobId).catch(() => undefined);
+  }
+  const stopLink = () => { if (flow.sourceJobId) void api.cancelStudioJob('source', flow.sourceJobId).catch(() => undefined); setSourceStage(''); setFlow({ sourceJobId: undefined }); };
+  const stopScript = () => { if (flow.scriptJobId) void api.cancelStudioJob('script', flow.scriptJobId).catch(() => undefined); setFlow({ scriptJobId: undefined }); if (!flow.script) show('write'); };
+  const stopVoice = () => { if (flow.narrationJobId) void api.cancelStudioJob('narrate', flow.narrationJobId).catch(() => undefined); setNarration(null); setFlow({ narrationJobId: undefined, uploadId: undefined, voiceUrl: undefined }); show('script'); };
+
   function newReel() {
+    stopFlowJobs();
     localStorage.removeItem(PROJECT_KEY); localStorage.removeItem(AUTO_KEY);
     const keep: Flow = { concept: '', seconds: flow.seconds };
     localStorage.setItem(FLOW_KEY, JSON.stringify(keep)); setFlowState(keep);
@@ -170,7 +181,10 @@ export function StickStudio() {
     <>
       <div className="pr-top">
         {onBack ? <button type="button" className="pr-back" onClick={onBack}>‹ {backLabel}</button> : <a className="pr-back" href="/">‹ PractiReel</a>}
-        <button type="button" className="pr-btn small" onClick={openSettings} aria-label="Stick reel settings">⚙ Settings</button>
+        <div className="pr-row">
+          {view !== 'home' && <button type="button" className="pr-btn small" onClick={newReel} title="Drop this draft and start again">+ New</button>}
+          <button type="button" className="pr-btn small" onClick={openSettings} aria-label="Stick reel settings">⚙{view === 'home' ? ' Settings' : ''}</button>
+        </div>
       </div>
       <h1>{title}</h1>
     </>
@@ -181,7 +195,7 @@ export function StickStudio() {
   }
 
   if (view === 'reel' && projectId) {
-    return <div className="pr"><ReelView projectId={projectId} info={info} onNew={newReel} onSettings={openSettings} onLost={newReel} /></div>;
+    return <div className="pr"><ReelView projectId={projectId} info={info} onNew={newReel} onSettings={openSettings} onLost={newReel} onHome={() => { localStorage.removeItem(PROJECT_KEY); setProjectId(''); show('home'); }} /></div>;
   }
 
   return (
@@ -190,11 +204,14 @@ export function StickStudio() {
         <main className="pr-page">
           {header('Stick-figure reels')}
           <p className="muted">Your face on a stick figure that acts out the reel, with cards and captions.</p>
-          {(flow.script || flow.narrationJobId) && (
-            <button type="button" className="pr-inprogress" onClick={() => show(flow.narrationJobId ? 'voice' : 'script')}>
-              <span className="pr-pill making">In progress</span>
-              <span style={{ flex: 1 }}><strong>{flow.script?.title || 'Your script'}</strong><br /><small className="muted">{flow.narrationJobId ? 'Voice step' : 'Script step'} · tap to continue</small></span>›
-            </button>
+          {(flow.script || flow.narrationJobId || flow.scriptJobId || flow.sourceJobId || flow.source) && (
+            <div className="pr-inprogress">
+              <button type="button" className="st-plain" onClick={() => show(flow.narrationJobId ? 'voice' : flow.script || flow.scriptJobId ? 'script' : 'write')}>
+                <span className="pr-pill making">Draft</span>
+                <span style={{ flex: 1 }}><strong>{flow.script?.title || flow.source?.topic || flow.link || 'Your script'}</strong><br /><small className="muted">{flow.narrationJobId ? 'Voice step' : flow.script || flow.scriptJobId ? 'Script step' : 'Link step'} · tap to continue</small></span>
+              </button>
+              <button type="button" className="pr-btn small text" onClick={newReel}>Discard</button>
+            </div>
           )}
           <button type="button" className="st-choice" onClick={() => { if (flow.script || flow.narrationJobId) newReel(); setFlow({ mode: 'idea' }); show('write'); }}>
             <span className="kind">New · AI voice</span>
@@ -213,6 +230,7 @@ export function StickStudio() {
           </button>
           {busy && <p className="pr-info">{busy}</p>}
           {error && <p className="pr-error">{error}</p>}
+          <MyReels onOpen={(id) => { localStorage.setItem(PROJECT_KEY, id); setProjectId(id); show('reel'); }} />
         </main>
       )}
 
@@ -229,7 +247,7 @@ export function StickStudio() {
                 <input type="url" inputMode="url" value={flow.link ?? ''} placeholder="https://www.instagram.com/reel/…" onChange={(e) => setFlow({ link: e.target.value, source: undefined })} />
               </label>
               {!flow.source && <button type="button" className="pr-btn small" disabled={!flow.link?.trim() || Boolean(flow.sourceJobId) || Boolean(busy)} onClick={() => void fetchLink()}>{flow.sourceJobId ? 'Reading…' : 'Read this reel'}</button>}
-              {flow.sourceJobId && <><div className="pr-bar"><i style={{ width: '55%' }} /></div><small className="muted">{sourceStage || 'Working…'} Usually under a minute.</small></>}
+              {flow.sourceJobId && <><div className="pr-bar"><i style={{ width: '55%' }} /></div><div className="pr-row" style={{ justifyContent: 'space-between' }}><small className="muted">{sourceStage || 'Working…'} Usually under a minute.</small><button type="button" className="pr-btn small danger" onClick={stopLink}>Stop</button></div></>}
               {flow.source && (
                 <div className="st-source">
                   <span className="pr-pill ready">{flow.source.platform}{flow.source.uploader ? ` · ${flow.source.uploader}` : ''}{flow.source.durationSec ? ` · ${flow.source.durationSec} s` : ''}</span>
@@ -238,6 +256,7 @@ export function StickStudio() {
                   {flow.source.keyPoints.length > 0 && <ul>{flow.source.keyPoints.slice(0, 6).map((point, i) => <li key={i}>{point}</li>)}</ul>}
                   {flow.source.transcript && <details className="st-more"><summary>What they say</summary><p style={{ whiteSpace: 'pre-wrap' }}>{flow.source.transcript}</p></details>}
                   <small className="muted">We write our own version: same topic, our words. Nothing is copied.</small>
+                  <button type="button" className="pr-btn small text" style={{ alignSelf: 'flex-start' }} onClick={() => setFlow({ source: undefined, link: '' })}>Use a different link</button>
                 </div>
               )}
             </section>
@@ -266,7 +285,7 @@ export function StickStudio() {
             <section className="pr-card">
               <div className="pr-bar"><i style={{ width: '60%' }} /></div>
               <small className="muted">The AI is writing about {seconds} s of {info?.settings.scriptLanguage === 'english' ? 'English' : 'Malayalam'}. Usually under a minute.</small>
-              {!flow.scriptJobId && <button type="button" className="pr-btn small" onClick={() => void writeScript(false)}>Try again</button>}
+              {flow.scriptJobId ? <button type="button" className="pr-btn small danger" onClick={stopScript}>Stop</button> : <button type="button" className="pr-btn small" onClick={() => void writeScript(false)}>Try again</button>}
             </section>
           )}
           {flow.script && (
@@ -295,6 +314,7 @@ export function StickStudio() {
                 <button type="button" className="pr-btn small" disabled={!feedback.trim() || Boolean(flow.scriptJobId) || Boolean(busy)} onClick={() => void writeScript(true)}>
                   {flow.scriptJobId ? 'Rewriting…' : 'Rewrite with these changes'}
                 </button>
+                {flow.scriptJobId && <button type="button" className="pr-btn small danger" onClick={stopScript}>Stop rewriting</button>}
               </section>
               <div className="st-voice"><span>Voice: <strong>{voiceLabel}</strong></span><button type="button" className="pr-btn small text" onClick={openSettings}>Change</button></div>
               {error && <p className="pr-error">{error}</p>}
@@ -313,7 +333,7 @@ export function StickStudio() {
           {!flow.uploadId && narration?.state !== 'failed' && (
             <section className="pr-card">
               <div className="pr-bar" role="progressbar" aria-valuenow={Math.round((narration?.progress ?? 0) * 100)}><i style={{ width: `${Math.max(5, Math.round((narration?.progress ?? 0) * 100))}%` }} /></div>
-              <small className="muted">{narration?.stage ?? 'Starting…'} · {voiceLabel}</small>
+              <div className="pr-row" style={{ justifyContent: 'space-between' }}><small className="muted">{narration?.stage ?? 'Starting…'} · {voiceLabel}</small><button type="button" className="pr-btn small danger" onClick={stopVoice}>Stop</button></div>
             </section>
           )}
           {narration?.state === 'failed' && !flow.uploadId && (
@@ -354,7 +374,8 @@ export function StickStudio() {
 }
 
 /** One stick reel: making progress, the finished video, and editing scenes / look before rendering again. */
-function ReelView({ projectId, info, onNew, onSettings, onLost }: { projectId: string; info: StudioInfo | null; onNew: () => void; onSettings: () => void; onLost: () => void }) {
+function ReelView({ projectId, info, onNew, onSettings, onLost, onHome }: { projectId: string; info: StudioInfo | null; onNew: () => void; onSettings: () => void; onLost: () => void; onHome: () => void }) {
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const [data, setData] = useState<StickData | null>(null);
   const [draft, setDraft] = useState<StickDraft | null>(null);
   const [editing, setEditing] = useState(false);
@@ -408,7 +429,7 @@ function ReelView({ projectId, info, onNew, onSettings, onLost }: { projectId: s
 
   const top = (
     <div className="pr-top">
-      <a className="pr-back" href="/">‹ PractiReel</a>
+      <button type="button" className="pr-back" onClick={onHome}>‹ Stick reels</button>
       <div className="pr-row">
         <button type="button" className="pr-btn small" onClick={onSettings}>⚙</button>
         <button type="button" className="pr-btn small primary" onClick={onNew}>+ New</button>
@@ -443,7 +464,8 @@ function ReelView({ projectId, info, onNew, onSettings, onLost }: { projectId: s
             <li className={stepClass(renderState)}><span className="ic">{renderState === 'done' ? '✓' : renderState === 'failed' ? '!' : ''}</span><span className="txt"><strong>Drawing the video</strong><small>{rendering ? `${data.render?.stage ?? ''} ${Math.round((data.render?.progress ?? 0) * 100)}%` : data.render?.error ?? (ready ? 'Done' : 'Waiting')}</small></span></li>
           </ol>
           {rendering && <div className="pr-bar"><i style={{ width: `${Math.round((data.render?.progress ?? 0) * 100)}%` }} /></div>}
-          {making && <small className="muted">You can close this page. It keeps going and will be here when you come back.</small>}
+          {making && <div className="pr-row" style={{ justifyContent: 'space-between' }}><small className="muted">You can close this page. It keeps going and will be here when you come back.</small>
+            <button type="button" className="pr-btn small danger" disabled={Boolean(busy)} onClick={() => void act('Stopping…', async () => { localStorage.removeItem(AUTO_KEY); await api.cancelStick(projectId); await refresh(); })}>Stop</button></div>}
           {data.plan?.state === 'failed' && <button type="button" className="pr-btn small" disabled={Boolean(busy)} onClick={() => void replan()}>Plan scenes again</button>}
           {!making && !ready && data.plan?.state !== 'failed' && <button type="button" className="pr-btn primary" disabled={Boolean(busy)} onClick={() => void renderAgain()}>Make the video</button>}
         </section>
@@ -479,6 +501,36 @@ function ReelView({ projectId, info, onNew, onSettings, onLost }: { projectId: s
       )}
       {notice && <p className="pr-info">{notice}</p>}
       {error && <p className="pr-error">{error}</p>}
+      <div className="pr-row" style={{ justifyContent: 'center', marginTop: 8 }}>
+        {!confirmDelete
+          ? <button type="button" className="pr-btn small danger" disabled={Boolean(busy)} onClick={() => setConfirmDelete(true)}>Delete this reel</button>
+          : <>
+            <span className="muted" style={{ fontSize: 14 }}>Delete it for good?</span>
+            <button type="button" className="pr-btn small danger" disabled={Boolean(busy)} onClick={() => void act('Deleting…', async () => { await api.deleteProject(projectId); onNew(); })}>Yes, delete</button>
+            <button type="button" className="pr-btn small" onClick={() => setConfirmDelete(false)}>Keep</button>
+          </>}
+      </div>
     </main>
+  );
+}
+
+/** Every stick reel made on this computer, newest first. */
+function MyReels({ onOpen }: { onOpen: (id: string) => void }) {
+  const [reels, setReels] = useState<Awaited<ReturnType<typeof api.stickReels>>['reels'] | null>(null);
+  useEffect(() => { void api.stickReels().then((r) => setReels(r.reels)).catch(() => setReels([])); }, []);
+  if (!reels?.length) return null;
+  const pill = { planning: ['making', 'Planning'], rendering: ['making', 'Rendering'], ready: ['ready', 'Ready'], failed: ['failed', 'Stopped'], draft: ['posted', 'Draft'] } as const;
+  return (
+    <section className="pr-section">
+      <span className="pr-label">My stick reels</span>
+      {reels.map((reel) => (
+        <button key={reel.id} type="button" className="pr-reel" onClick={() => onOpen(reel.id)}>
+          <span className="pr-thumb" aria-hidden="true">🎬</span>
+          <span className="meta"><strong>{reel.name}</strong><small className="muted">{new Date(reel.updatedAt).toLocaleDateString([], { day: 'numeric', month: 'short' })} · {Math.round(reel.duration)} s</small>
+            <span className={`pr-pill ${pill[reel.state][0]}`} style={{ alignSelf: 'flex-start' }}>{pill[reel.state][1]}</span></span>
+          <span aria-hidden="true">›</span>
+        </button>
+      ))}
+    </section>
   );
 }

@@ -583,8 +583,10 @@ export async function renderStickReel(options: {
   chromeBin?: string | null;
   ffmpeg: (args: string[]) => Promise<{ stdout: string; stderr: string }>;
   progress: (value: number, stage?: string) => void;
+  signal?: AbortSignal;
 }) {
-  const { project, draft, visual, output, progress, ffmpeg } = options;
+  const { project, draft, visual, output, progress, ffmpeg, signal } = options;
+  const stopped = () => { if (signal?.aborted) throw new Error('Stopped.'); };
   const theme = resolveStickTheme(draft.themeId);
 
   // Pre-flight check: verify music track exists before spending time on Remotion render.
@@ -645,7 +647,9 @@ export async function renderStickReel(options: {
   }
 
   progress(0.05, 'Bundling Remotion composition…');
-  const { selectComposition, renderMedia } = await import('@remotion/renderer');
+  stopped();
+  const { selectComposition, renderMedia, makeCancelSignal } = await import('@remotion/renderer');
+  const cancel = makeCancelSignal(); signal?.addEventListener('abort', () => cancel.cancel(), { once: true });
   const serveUrl = await stickBundle(draft.faces || 'stick-demo');
   const inputProps = {
     scenes: draft.scenes,
@@ -667,9 +671,11 @@ export async function renderStickReel(options: {
     codec: 'h264',
     muted: true,
     outputLocation: visual,
+    cancelSignal: cancel.cancelSignal,
     onProgress: ({ progress: fraction }) => progress(0.08 + fraction * 0.80, `Rendering frames (${Math.round(fraction * 100)}%)…`),
   });
 
+  stopped();
   progress(0.90, 'Mastering audio & mixing SFX…');
   const duration = composition.durationInFrames / 30;
   const fade = Math.min(1.4, duration / 4);

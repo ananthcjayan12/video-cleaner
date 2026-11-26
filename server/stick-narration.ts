@@ -171,7 +171,7 @@ export function buildScriptPrompt(input: { concept: string; settings: StickStudi
 
 export async function writeStickScript(options: {
   concept: string; seconds?: number; feedback?: string; previous?: StickScript; sourceText?: string;
-  settings: StickStudioSettings; textConfig: TextModelConfig; choice: TextModelChoice; workDir: string;
+  settings: StickStudioSettings; textConfig: TextModelConfig; choice: TextModelChoice; workDir: string; signal?: AbortSignal;
 }): Promise<StickScript> {
   if (!options.concept.trim() && !options.sourceText) throw new Error('Tell me what the reel is about first.');
   await fs.mkdir(options.workDir, { recursive: true });
@@ -182,6 +182,7 @@ export async function writeStickScript(options: {
     prompt: buildScriptPrompt(options),
     schema: SCRIPT_SCHEMA,
     outputName: 'stick-script',
+    signal: options.signal,
   }) as { title?: unknown; lines?: unknown };
   return cleanScript(raw);
 }
@@ -314,12 +315,12 @@ export async function previewVoice(options: { settings: StickStudioSettings; api
 
 export type NarrationJob = {
   id: string; state: 'running' | 'ready' | 'failed'; progress: number; stage: string;
-  uploadId?: string; seconds?: number; error?: string; startedAt: number;
+  uploadId?: string; seconds?: number; error?: string; startedAt: number; abort?: AbortController;
 };
 export const narrationJobs = new Map<string, NarrationJob>();
 export const newNarrationJob = (): NarrationJob => {
   for (const [id, job] of narrationJobs) if (Date.now() - job.startedAt > 6 * 3600_000) narrationJobs.delete(id);
-  const job: NarrationJob = { id: randomUUID(), state: 'running', progress: 0, stage: 'Starting the voice…', startedAt: Date.now() };
+  const job: NarrationJob = { id: randomUUID(), state: 'running', progress: 0, stage: 'Starting the voice…', startedAt: Date.now(), abort: new AbortController() };
   narrationJobs.set(job.id, job);
   return job;
 };
