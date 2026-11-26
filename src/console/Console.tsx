@@ -89,11 +89,11 @@ export function Console({ me }: { me: Me | null }) {
         <div className="oc-side-foot">
           <a href="/?view=phone#home">📱 My reels app</a>
           <a href="/?advanced=1">🛠 Advanced editor</a>
-          <a href="/?mode=stick-reel">Stick-figure reels</a>
+          <a href="/?mode=stick-reel">🎬 Stick-figure reels</a>
           <small>Logged in as {me?.username}</small>
         </div>
       </aside>
-      <header className="oc-mobile-top"><div className="oc-brand"><img src="/icons/icon-192.png" alt="" />Console</div><a className="oc-btn small" href="/?view=phone#home">📱 My reels</a></header>
+      <header className="oc-mobile-top"><div className="oc-brand"><img src="/icons/icon-192.png" alt="" />Console</div><span className="oc-mobile-actions"><a className="oc-btn small" href="/?mode=stick-reel">🎬 Stick</a><a className="oc-btn small" href="/?view=phone#home">📱 My reels</a></span></header>
       <main className="oc-main">
         {error && <div className="oc-banner critical">Could not load: {error} <button type="button" onClick={() => void load()}>Try again</button></div>}
         {page}
@@ -116,6 +116,11 @@ function Overview({ data, status, act }: { data: ConsoleData; status: SystemStat
   return (
     <>
       <header className="oc-head"><h1>Overview · {monthName(now)}</h1></header>
+      <a className="oc-card oc-shortcut" href="/?mode=stick-reel">
+        <span className="oc-shortcut-icon" aria-hidden="true">🎬</span>
+        <span><b>Stick-figure reels</b><small className="oc-muted">Your face on a stick figure. From an idea, an Instagram/YouTube link or your recording, with AI script and Malayalam voice.</small></span>
+        <span aria-hidden="true">›</span>
+      </a>
       <section className="oc-stats">
         <Stat icon="👥" label="Active customers" value={`${activeCustomers}`} sub={`${customers.length} customer account${customers.length === 1 ? '' : 's'}`} />
         <Stat icon="▶" label="Reels made" value={`${made.length}`} sub={`this month, all accounts`} />
