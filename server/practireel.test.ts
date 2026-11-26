@@ -52,3 +52,21 @@ test('notifications go to the account\'s logins; the owner hears about own reels
   assert.deepEqual(recipients(all, 'personal').map((s) => s.username), ['owner']);
   assert.deepEqual(recipients(all, 'smile', true).map((s) => s.username), ['owner', 'drmeera']);
 });
+
+test('niche packs: every field has a full look, distinct fonts, and its own risky promises', async () => {
+  const { NICHE_PACKS, nichePack, packLook, packWriterNotes } = await import('./niche-packs.js');
+  const fonts = new Set<string>();
+  for (const { id } of NICHES) {
+    const pack = NICHE_PACKS[id];
+    assert.match(pack.font, /^VC [A-Za-z ]+$/, id); fonts.add(pack.font);
+    for (const colour of [pack.accent, pack.onAccent, pack.highlight]) assert.match(colour, /^#[0-9A-F]{6}$/i, id);
+    assert.ok(pack.artDirection.length > 100 && pack.writer && pack.hashtagHints.length >= 5, id);
+    assert.match(packWriterNotes(pack), new RegExp(pack.label));
+  }
+  assert.equal(fonts.size, 4);
+  assert.equal(nichePack(undefined).id, 'dental');
+  assert.equal(packLook(nichePack('dental')).coverHighlight, '#D7F25B'); // dental keeps its lime cover
+  assert.equal(findClaims(words('This detox tea melts belly fat.'), nichePack('nutrition').risky)[0]?.match, 'detox');
+  assert.equal(findClaims(words('You will never need glasses again.'), nichePack('optometry').risky)[0]?.match.toLowerCase(), 'never need glasses');
+  assert.deepEqual(findClaims(words('This detox tea melts belly fat.')), [], 'field words only count for that field');
+});

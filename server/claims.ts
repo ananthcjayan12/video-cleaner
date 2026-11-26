@@ -25,12 +25,15 @@ export function reviewSentences(words: Word[]) {
   return out;
 }
 
-export function findClaims(words: Word[]): ClaimFlag[] {
+/** extra: the field's own risky promises (from its niche pack), checked after the general list. */
+export function findClaims(words: Word[], extra?: RegExp): ClaimFlag[] {
   const flags: ClaimFlag[] = [];
   for (const { from, to } of reviewSentences(words)) {
     const text = words.slice(from, to + 1).map((word) => word.text).join(' ');
     const absolute = text.match(ABSOLUTE_WORDS.pattern);
     if (absolute) { flags.push({ from, to, match: absolute[0], title: ABSOLUTE_WORDS.title, fix: ABSOLUTE_WORDS.fix }); continue; }
+    const field = extra && text.match(extra);
+    if (field) { flags.push({ from, to, match: field[0], title: ABSOLUTE_WORDS.title, fix: ABSOLUTE_WORDS.fix }); continue; }
     for (const rule of META_RULES) {
       const hit = rule.text?.map((pattern) => text.match(pattern)).find(Boolean);
       if (hit) { flags.push({ from, to, match: hit[0], title: rule.title, fix: rule.fix }); break; }

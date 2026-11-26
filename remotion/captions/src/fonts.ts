@@ -10,12 +10,20 @@ const FONTS: Array<{ family: string; file: string; weight: string }> = [
   { family: 'VC Jakarta', file: 'fonts/PlusJakartaSans-VF.ttf', weight: '200 800' },
   { family: 'VC Anek', file: 'fonts/AnekMalayalam-VF.ttf', weight: '100 800' },
   { family: 'VC Mono', file: 'fonts/NotoSansMono-ExtraBold.ttf', weight: '800' },
+  // Niche packs: physio uses Montserrat (above), nutrition Poppins, optometry Sora.
+  { family: 'VC Poppins', file: 'fonts/Poppins-Bold.ttf', weight: '700' },
+  { family: 'VC Poppins', file: 'fonts/Poppins-ExtraBold.ttf', weight: '800' },
+  { family: 'VC Sora', file: 'fonts/Sora-VF.ttf', weight: '100 800' },
 ];
 
 export const HEAVY_STACK = "'VC Montserrat', 'VC Malayalam Black', sans-serif";
 export const BOLD_STACK = "'VC Montserrat', 'VC Malayalam Bold', sans-serif";
 // Modern pairing: Plus Jakarta Sans for English, Anek Malayalam for Malayalam (Jakarta has no Malayalam glyphs, so they fall through).
 export const MODERN_STACK = "'VC Jakarta', 'VC Anek', sans-serif";
+/** Font stack for a niche pack's font (Malayalam still falls through to Anek). Unknown fonts get the default. */
+export function packStack(font?: string) {
+  return font && /^VC [A-Za-z ]+$/.test(font) ? `'${font}', 'VC Anek', sans-serif` : MODERN_STACK;
+}
 export const MONO_STACK = "'VC Mono', 'VC Anek', monospace";
 
 let ready: Promise<void> | null = null;

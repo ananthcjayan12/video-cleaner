@@ -1,3 +1,4 @@
+import type { PackLook } from './niche-packs.js';
 import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
@@ -129,10 +130,10 @@ function captionServeUrl(workDir: string) {
 }
 
 /** Render the Glass Card caption band (1080x300, transparent VP9) for the whole edited video. */
-export async function renderCaptionLayer(options: { phrases: CaptionPhrase[]; duration: number; outputPath: string; chromeBin?: string | null; workDir: string; onProgress?: (fraction: number) => void; signal?: AbortSignal }) {
+export async function renderCaptionLayer(options: { look?: PackLook; phrases: CaptionPhrase[]; duration: number; outputPath: string; chromeBin?: string | null; workDir: string; onProgress?: (fraction: number) => void; signal?: AbortSignal }) {
   const serveUrl = await captionServeUrl(options.workDir);
   const { renderMedia, selectComposition, makeCancelSignal } = await import('@remotion/renderer');
-  const inputProps = { phrases: options.phrases, size: 46, duration: options.duration };
+  const inputProps = { phrases: options.phrases, size: 46, duration: options.duration, font: options.look?.font, keyColor: options.look?.highlight };
   const browserExecutable = options.chromeBin || null;
   const composition = await selectComposition({ serveUrl, id: 'GlassCard', inputProps, browserExecutable });
   const { cancelSignal, cancel } = makeCancelSignal();
@@ -146,11 +147,11 @@ export async function renderCaptionLayer(options: { phrases: CaptionPhrase[]; du
 }
 
 /** Render the reel cover (1080x1920 JPEG) from a frame of the speaker and the headline text. */
-export async function renderThumbnail(options: { framePath: string; faceX?: number; lines: string[]; label: string; badges: ThumbnailBadge[]; outputPath: string; chromeBin?: string | null; workDir: string }) {
+export async function renderThumbnail(options: { look?: PackLook; framePath: string; faceX?: number; lines: string[]; label: string; badges: ThumbnailBadge[]; outputPath: string; chromeBin?: string | null; workDir: string }) {
   const serveUrl = await captionServeUrl(options.workDir);
   const { renderStill, selectComposition } = await import('@remotion/renderer');
   const image = `data:image/jpeg;base64,${(await fs.readFile(options.framePath)).toString('base64')}`;
-  const inputProps = { image, lines: options.lines, label: options.label, badges: options.badges.slice(0, 2), faceX: options.faceX ?? 0.5 };
+  const inputProps = { image, lines: options.lines, label: options.label, badges: options.badges.slice(0, 2), faceX: options.faceX ?? 0.5, font: options.look?.font, accent: options.look?.accent, onAccent: options.look?.onAccent, highlight: options.look?.coverHighlight };
   const browserExecutable = options.chromeBin || null;
   const composition = await selectComposition({ serveUrl, id: 'Thumbnail', inputProps, browserExecutable });
   await fs.mkdir(path.dirname(options.outputPath), { recursive: true });

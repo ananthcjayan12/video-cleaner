@@ -46,7 +46,8 @@ export const PACKAGE_SCHEMA = {
   },
 } as const;
 
-export function buildPackagePrompt(transcript: string, frameFiles: string[], notes?: string) {
+/** field: the account's niche-pack notes (audience and hashtags that fit). */
+export function buildPackagePrompt(transcript: string, frameFiles: string[], notes?: string, field?: string) {
   return `You package a finished Instagram Reel / YouTube Short: pick the cover frame, write the cover text and write the post caption.
 
 WHAT THE SPEAKER SAYS IN THE REEL (already edited):
@@ -69,7 +70,7 @@ POST CAPTION:
   Then 2-5 short lines with the key point(s) from the talk, and a last line that asks a question or invites a save/share. Line breaks between lines. 0-3 emoji in total. No hashtags here.
 - hashtags: 6-10 relevant hashtags without spaces, each starting with #, mixing broad and niche (English, plus Malayalam-audience tags like #malayalam where they fit).
 
-RULES: only claims the speaker actually makes; no invented numbers; no "guaranteed", "best", "painless", "100%" or miracle promises; no clickbait that the reel does not pay off.${notes ? `\n\nTHE OWNER ASKED FOR THIS (follow it): ${notes}` : ''}`;
+RULES: only claims the speaker actually makes; no invented numbers; no "guaranteed", "best", "painless", "100%" or miracle promises; no clickbait that the reel does not pay off.${field ? `\n\n${field}` : ''}${notes ? `\n\nTHE OWNER ASKED FOR THIS (follow it): ${notes}` : ''}`;
 }
 
 export type PackageText = { frame: number; faces: number[]; lines: string[]; label: string; badges: Array<{ icon: string; label: string }>; caption: string; hashtags: string[] };

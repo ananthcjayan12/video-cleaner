@@ -1,6 +1,6 @@
 import React from 'react';
 import { AbsoluteFill, interpolate, useCurrentFrame, useVideoConfig } from 'remotion';
-import { MODERN_STACK, measure, useBrandFonts } from './fonts';
+import { measure, packStack, useBrandFonts } from './fonts';
 
 // "Glass Card": white Bold text on a frosted dark rounded card, English words in mint.
 // This layer draws the tint, hairline border and text. The real background blur is added in FFmpeg:
@@ -8,7 +8,8 @@ import { MODERN_STACK, measure, useBrandFonts } from './fonts';
 // must have no soft shadow outside its edge.
 export type GlassWord = { text: string; at: number; key?: boolean };
 export type GlassPhrase = { start: number; end: number; words: GlassWord[] };
-export type GlassCardProps = { phrases: GlassPhrase[]; size: number };
+/** font / keyColor come from the account's niche pack; the defaults are the dental look. */
+export type GlassCardProps = { phrases: GlassPhrase[]; size: number; font?: string; keyColor?: string };
 
 const MINT = '#7fe3d6';
 const TINT = 'rgba(14, 16, 22, 0.46)';
@@ -16,8 +17,8 @@ const BORDER = 'rgba(255, 255, 255, 0.22)';
 const MAX_TEXT_WIDTH = 820;
 const WEIGHT = 700;
 
-function packLines(words: GlassWord[], size: number) {
-  const font = `${WEIGHT} ${size}px ${MODERN_STACK}`;
+function packLines(words: GlassWord[], size: number, stack: string) {
+  const font = `${WEIGHT} ${size}px ${stack}`;
   const space = measure(' ', font);
   const lines: GlassWord[][] = []; let line: GlassWord[] = []; let used = 0;
   // Consecutive English words stay together on one line.
@@ -32,7 +33,8 @@ function packLines(words: GlassWord[], size: number) {
   return lines;
 }
 
-export const GlassCard: React.FC<GlassCardProps> = ({ phrases, size }) => {
+export const GlassCard: React.FC<GlassCardProps> = ({ phrases, size, font, keyColor = MINT }) => {
+  const stack = packStack(font);
   const ready = useBrandFonts();
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
@@ -40,11 +42,11 @@ export const GlassCard: React.FC<GlassCardProps> = ({ phrases, size }) => {
   const time = frame / fps;
   const phrase = phrases.find((p) => time >= p.start && time < p.end);
   if (!phrase) return null;
-  const lines = packLines(phrase.words, size).slice(0, 2);
+  const lines = packLines(phrase.words, size, stack).slice(0, 2);
   const enter = interpolate(time, [phrase.start, phrase.start + 0.14], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' });
   const exit = interpolate(time, [phrase.end - 0.1, phrase.end], [1, 0], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' });
   return (
-    <AbsoluteFill style={{ fontFamily: MODERN_STACK, alignItems: 'center', justifyContent: 'center' }}>
+    <AbsoluteFill style={{ fontFamily: stack, alignItems: 'center', justifyContent: 'center' }}>
       <div style={{
         background: TINT, border: `1.5px solid ${BORDER}`, borderRadius: 30, padding: `${size * 0.42}px ${size * 0.78}px`,
         opacity: Math.min(enter, exit), transform: `scale(${0.96 + 0.04 * enter})`, textAlign: 'center',
@@ -54,7 +56,7 @@ export const GlassCard: React.FC<GlassCardProps> = ({ phrases, size }) => {
           <div key={i} style={{ whiteSpace: 'nowrap' }}>
             {line.map((word, j) => {
               const said = interpolate(time, [word.at, word.at + 0.08], [0, 1], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' });
-              return <React.Fragment key={j}>{j > 0 ? ' ' : ''}<span style={{ color: word.key ? MINT : 'white', opacity: 0.55 + 0.45 * said }}>{word.text}</span></React.Fragment>;
+              return <React.Fragment key={j}>{j > 0 ? ' ' : ''}<span style={{ color: word.key ? keyColor : 'white', opacity: 0.55 + 0.45 * said }}>{word.text}</span></React.Fragment>;
             })}
           </div>
         ))}

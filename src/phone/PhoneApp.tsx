@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import { LookPreview } from './LookPreview';
 import { api, type Idea, type Me, type Niche, type Project } from '../api';
 import { AccountsPanel } from '../Accounts';
 import { RecordScreen } from './Record';
@@ -210,6 +211,7 @@ function ProfilePage({ me, onToast }: { me: Me | null; onToast: (text: string) =
         <strong>{limit ? `${limit} reels a month · ${Math.max(0, limit - (workspace?.reelsThisMonth ?? 0))} left` : `${workspace?.reelsThisMonth ?? 0} reels this month · no limit`}</strong>
         {limit ? <small>Need more this month? Ask your PractiReel contact for 5 more reels.</small> : null}
       </div>
+      {workspace?.look && <div className="pr-card"><span className="pr-label">Your reel look</span><LookPreview look={workspace.look} /></div>}
       <div className="pr-card">
         <span className="pr-label">Notifications</span>
         {push === 'needs-install' ? <>

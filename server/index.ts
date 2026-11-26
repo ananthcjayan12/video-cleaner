@@ -64,6 +64,7 @@ import { buildEditorRender } from './editor-render.js';
 import { formatMetaFinding, metaTextGuidelinesPrompt, scanMetaText } from './meta-guidelines.js';
 import { availableAgyModels, availableCodexModels, DEFAULT_ANTHROPIC_MODEL, generateStructuredText, TEXT_PROVIDERS, type TextModelChoice, type TextProvider } from './text-models.js';
 import { findClaims } from './claims.js';
+import { nichePack, packLook, packPreview, packWriterNotes } from './niche-packs.js';
 import { nicheValue, weeklyIdeas, IDEAS, NICHES } from './ideas.js';
 import { addSubscriber, notify, removeSubscriber, vapidKeys } from './push.js';
 import { currentProfile, readUsage, recordUsage, runWithUsage, summarizeUsage, usageContext, usageFile, withTask, type EngineProfile } from './usage.js';
@@ -188,6 +189,8 @@ async function workspaceFor(id: string | undefined): Promise<Workspace> {
   const data = await loadWorkspaces(); return data.workspaces.find((w) => w.id === (id || PERSONAL_WORKSPACE.id)) ?? { ...PERSONAL_WORKSPACE };
 }
 /** Usage file + engine profile for everything that runs for this project (AI calls check the profile themselves). */
+/** The account's field look (fonts, colours, picture style, wording) for this reel. */
+async function projectPack(project: Project) { return nichePack((await workspaceFor(projectWorkspaceId(project))).niche); }
 async function projectUsageContext(project: Project) {
   const settings = await resolvedSettings();
   return { file: usageFile(project.workDir), profile: effectiveProfile(await workspaceFor(project.workspaceId)), apiTextModel: settings.apiTextModel };
@@ -1484,7 +1487,7 @@ async function workspaceCostThisMonth(workspaceId: string) {
   const entries = (await Promise.all(owned.map((project) => readUsage(usageFile(project.workDir))))).flat().filter((entry) => Date.parse(entry.at) >= start.getTime());
   return summarizeUsage(entries);
 }
-const workspaceView = async (workspace: Workspace) => ({ ...workspace, effectiveProfile: (() => { try { return effectiveProfile(workspace); } catch { return null; } })(), reelsThisMonth: await workspaceReelsThisMonth(workspace.id) });
+const workspaceView = async (workspace: Workspace) => ({ ...workspace, effectiveProfile: (() => { try { return effectiveProfile(workspace); } catch { return null; } })(), reelsThisMonth: await workspaceReelsThisMonth(workspace.id), look: packPreview(nichePack(workspace.niche)) });
 
 // ---- Accounts: who am I, and (owner only) the accounts, their engines, logins and monthly use.
 app.get('/api/me', route(async (_req, res) => {
@@ -1586,6 +1589,7 @@ async function runAutoReel(project: Project, job: AutoJob) {
   const dir = path.join(project.workDir, 'auto'); await fs.mkdir(dir, { recursive: true });
   const portrait = (project.media.height || 1920) >= (project.media.width || 1080);
   const [W, H] = portrait ? [1080, 1920] : [1920, 1080];
+  const pack = await projectPack(project);
   // restore: how to get a finished stage's result back when a reel resumes after a restart.
   const stage = async <T>(id: AutoStageId, work: (note: (detail: string) => void) => Promise<T>, restore?: () => Promise<T>): Promise<T | undefined> => {
     const item = job.stages.find((s) => s.id === id)!; if (item.state === 'skipped') return undefined;
@@ -1611,7 +1615,7 @@ async function runAutoReel(project: Project, job: AutoJob) {
     for (;;) {
       const keepRanges = project.edl!.keepRanges;
       job.review = { words: words.map(({ id, text, start, end }) => ({ id, text, start, end })), keepRanges, keptSeconds: Math.round(keptDuration(words, keepRanges) * 10) / 10, sourceSeconds: Math.round((words.at(-1)!.end - words[0].start) * 10) / 10 };
-      job.review.flags = findClaims(job.review.words);
+      job.review.flags = findClaims(job.review.words, pack.risky);
       job.state = 'review'; note('Waiting for you to check the transcript'); void persistAutoJob(project, job);
       void notify(projectWorkspaceId(project), { title: 'Your turn: check the talk', body: `${project.name}: see what stays before the reel is made.`, url: `/#reel-${project.id}`, tag: `reel-${project.id}` });
       const decision = await new Promise<ReviewDecision>((resolve) => reviewWaiters.set(project.id, resolve));
@@ -1633,7 +1637,7 @@ async function runAutoReel(project: Project, job: AutoJob) {
   await stage('broll-plan', async (note) => {
     plan = await createBrollPlan({ textConfig: settings, workDir: project.workDir, words, keepRanges: project.edl?.keepRanges, orientation: portrait ? 'portrait' : 'landscape',
       settings: { workflowMode: 'cleaned-video', provider: job.options.imageProvider === 'chatgpt' ? 'chatgpt-browser' : 'gemini', planningProvider: textEngines(settings).planning.provider, planningModel: textEngines(settings).planning.model, planningEffort: textEngines(settings).planning.effort,
-        countMode: 'per-minute', imagesPerMinute: 6, minSceneDuration: 2, maxSceneDuration: 4, aspectRatio: portrait ? '9:16' : '16:9' } });
+        artDirection: pack.artDirection, countMode: 'per-minute', imagesPerMinute: 6, minSceneDuration: 2, maxSceneDuration: 4, aspectRatio: portrait ? '9:16' : '16:9' } });
     brollPlans.set(project.id, plan); note(`${plan.scenes.length} moments`);
   }, async () => { plan = await loadBrollPlan(project.workDir) ?? undefined; if (plan) brollPlans.set(project.id, plan); });
   await stage('broll-images', async (note) => {
@@ -1677,7 +1681,7 @@ async function runAutoReel(project: Project, job: AutoJob) {
   const captioned = await stage('captions', async (note) => {
     const editedWords = JSON.parse(await fs.readFile(path.join(dir, 'edited-words.json'), 'utf8')).words as CaptionWordIn[];
     const phrases = buildCaptionPhrases(editedWords, duration);
-    await renderCaptionLayer({ phrases, duration, outputPath: captionFile, chromeBin: await detectChromeBin(), workDir: dir, onProgress: (f) => note(`${Math.round(f * 100)}%`) });
+    await renderCaptionLayer({ look: packLook(pack), phrases, duration, outputPath: captionFile, chromeBin: await detectChromeBin(), workDir: dir, onProgress: (f) => note(`${Math.round(f * 100)}%`) });
     note(`${phrases.length} phrases`); return true;
   }, async () => fs.stat(captionFile).then(() => true, () => undefined));
   await stage('compose', async (note) => {
@@ -1713,7 +1717,7 @@ async function makeReelPackage(project: Project, job: AutoJob, notes?: string) {
   try {
     const smalls = await extractCandidateFrames(settings.ffmpegBin, path.join(dir, 'video.mp4'), edited.duration, thumbDir(project));
     const choice = textEngines(settings).planning;
-    const raw = await generateStructuredText({ choice, config: settings, workDir: project.workDir, prompt: buildPackagePrompt(edited.words.map((word) => word.text).join(' '), smalls, notes), schema: PACKAGE_SCHEMA as unknown as Record<string, unknown>, outputName: 'reel-package', images: smalls });
+    const raw = await generateStructuredText({ choice, config: settings, workDir: project.workDir, prompt: buildPackagePrompt(edited.words.map((word) => word.text).join(' '), smalls, notes, packWriterNotes(await projectPack(project))), schema: PACKAGE_SCHEMA as unknown as Record<string, unknown>, outputName: 'reel-package', images: smalls });
     Object.assign(job.package, cleanPackage(raw), { frames: smalls.map((_, n) => frameUrl(project, n)) });
     if (job.options.thumbnail !== false) await renderPackageThumbnail(project, job.package);
     job.package.state = 'ready';
@@ -1725,7 +1729,7 @@ async function makeReelPackage(project: Project, job: AutoJob, notes?: string) {
 async function renderPackageThumbnail(project: Project, pkg: ReelPackage) {
   await fs.mkdir(exportsDir(project), { recursive: true });
   const output = path.join(exportsDir(project), `${new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15)}-thumbnail.jpg`);
-  await renderThumbnail({ framePath: framePaths(thumbDir(project), pkg.frame).full, faceX: pkg.faces?.[pkg.frame], lines: pkg.lines, label: pkg.label, badges: pkg.badges, outputPath: output, chromeBin: await detectChromeBin(), workDir: project.workDir });
+  await renderThumbnail({ look: packLook(await projectPack(project)), framePath: framePaths(thumbDir(project), pkg.frame).full, faceX: pkg.faces?.[pkg.frame], lines: pkg.lines, label: pkg.label, badges: pkg.badges, outputPath: output, chromeBin: await detectChromeBin(), workDir: project.workDir });
   if (pkg.thumbnailPath && pkg.thumbnailPath !== output) await fs.rm(pkg.thumbnailPath, { force: true }).catch(() => undefined);
   pkg.thumbnailPath = output; pkg.thumbnailDownloadUrl = downloadUrlFor(project, output);
   pkg.thumbnailUrl = pkg.thumbnailDownloadUrl ? `${pkg.thumbnailDownloadUrl}?inline=1` : undefined;

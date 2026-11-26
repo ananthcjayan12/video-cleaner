@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { LookPreview } from './phone/LookPreview';
 import { api, type AdminWorkspace, type EngineProfile, type Niche, type UsageSummary } from './api';
 
 const NICHE_LABEL: Record<Niche, string> = { dental: 'Dental', physio: 'Physiotherapy', nutrition: 'Nutrition', optometry: 'Optometry' };
@@ -61,11 +62,12 @@ function AccountCard({ workspace, busy, act }: { workspace: AdminWorkspace; busy
       </header>
       <small>{workspace.reelsThisMonth}{workspace.reelsPerMonth ? ` of ${workspace.reelsPerMonth}` : ''} reels this month</small>
       <CostLine cost={workspace.costThisMonth} />
+      {workspace.look && <div className="accountLook"><LookPreview look={workspace.look} compact /><small>{workspace.look.label} look · {workspace.look.font}</small></div>}
       <div className="accountRow">
         <label>Engines<select id={`profile-${workspace.id}`} value={workspace.profile} disabled={busy} onChange={(e) => void act(() => api.updateWorkspace(workspace.id, { profile: e.target.value as EngineProfile }), `${workspace.name} now uses ${PROFILE_LABEL[e.target.value as EngineProfile]}.`)}>
           <option value="in-house">{PROFILE_LABEL['in-house']}</option><option value="api">{PROFILE_LABEL.api}</option>
         </select></label>
-        <label>Field<select id={`niche-${workspace.id}`} value={workspace.niche ?? 'dental'} disabled={busy} onChange={(e) => void act(() => api.updateWorkspace(workspace.id, { niche: e.target.value as Niche }), `${workspace.name} now gets ${NICHE_LABEL[e.target.value as Niche]} ideas.`)}>
+        <label>Field<select id={`niche-${workspace.id}`} value={workspace.niche ?? 'dental'} disabled={busy} onChange={(e) => void act(() => api.updateWorkspace(workspace.id, { niche: e.target.value as Niche }), `${workspace.name} now gets ${NICHE_LABEL[e.target.value as Niche]} ideas and reel look.`)}>
           {(Object.keys(NICHE_LABEL) as Niche[]).map((n) => <option key={n} value={n}>{NICHE_LABEL[n]}</option>)}
         </select></label>
         <label>Reels a month<input id={`limit-${workspace.id}`} inputMode="numeric" value={limit} onChange={(e) => setLimit(e.target.value)} onBlur={() => { if (limit !== String(workspace.reelsPerMonth ?? '')) void act(() => api.updateWorkspace(workspace.id, { reelsPerMonth: Number(limit) || 0 }), 'Limit saved.'); }} placeholder="No limit" /></label>

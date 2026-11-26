@@ -1,6 +1,6 @@
 import React from 'react';
 import { AbsoluteFill, Img } from 'remotion';
-import { MODERN_STACK, MONO_STACK, measure, useBrandFonts } from './fonts';
+import { MONO_STACK, measure, packStack, useBrandFonts } from './fonts';
 
 /**
  * Reel cover (1080x1920 still): a frame of the speaker, darkened at the top and bottom, with a three-line headline
@@ -13,14 +13,16 @@ export type ThumbnailProps = {
   image: string; lines: [string, string, string] | string[]; label?: string; badges?: ThumbnailBadge[]; accent?: string;
   /** Where the face is across the frame (0 = left edge, 1 = right edge); icon cards go where they do not cover it. */
   faceX?: number;
+  /** Niche pack look: headline font, text colour on the accent block, and the light tint for the label strip and badge rims. */
+  font?: string; onAccent?: string; highlight?: string;
 };
 
 const LIME = '#d7f25b';
 const MAX_WIDTH = 960;
 
-function fit(text: string, size: number, weight: number, max: number, spacing = -0.035) {
+function fit(stack: string, text: string, size: number, weight: number, max: number, spacing = -0.035) {
   if (!text) return size;
-  const width = measure(text, `${weight} ${size}px ${MODERN_STACK}`) * (1 + spacing * 0.6);
+  const width = measure(text, `${weight} ${size}px ${stack}`) * (1 + spacing * 0.6);
   return width > max ? Math.floor(size * max / width) : size;
 }
 
@@ -45,14 +47,15 @@ function badgeSpots(faceX: number, count: number): React.CSSProperties[] {
   return [{ [side]: 40, top: 800, transform: `rotate(${side === 'left' ? -6 : 6}deg)` }, { [side]: 70, top: 1130, transform: `rotate(${side === 'left' ? 5 : -5}deg)` }].slice(0, count);
 }
 
-export const Thumbnail: React.FC<ThumbnailProps> = ({ image, lines, label, badges = [], accent = LIME, faceX = 0.5 }) => {
+export const Thumbnail: React.FC<ThumbnailProps> = ({ image, lines, label, badges = [], accent = LIME, faceX = 0.5, font, onAccent = '#0b0d0c', highlight }) => {
+  const stack = packStack(font); const glow = highlight ?? accent;
   const ready = useBrandFonts();
   if (!ready) return null;
   const [top = '', middle = '', bottom = ''] = lines;
   // One size for the white lines so they read as a pair; the block line is sized on its own (it has padding).
-  const white = Math.min(fit(top, 128, 800, MAX_WIDTH), fit(bottom, 128, 800, MAX_WIDTH));
-  const block = fit(middle, 118, 800, MAX_WIDTH - 60);
-  const head: React.CSSProperties = { fontFamily: MODERN_STACK, fontWeight: 800, letterSpacing: '-0.035em', lineHeight: 1.04, textAlign: 'center' };
+  const white = Math.min(fit(stack, top, 128, 800, MAX_WIDTH), fit(stack, bottom, 128, 800, MAX_WIDTH));
+  const block = fit(stack, middle, 118, 800, MAX_WIDTH - 60);
+  const head: React.CSSProperties = { fontFamily: stack, fontWeight: 800, letterSpacing: '-0.035em', lineHeight: 1.04, textAlign: 'center' };
   return (
     <AbsoluteFill style={{ background: '#0b0d0c' }}>
       <Img src={image} style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', filter: 'contrast(1.05) saturate(0.92)' }} />
@@ -60,13 +63,13 @@ export const Thumbnail: React.FC<ThumbnailProps> = ({ image, lines, label, badge
       <AbsoluteFill style={{ background: 'radial-gradient(90% 60% at 50% 55%, transparent 55%, rgba(0,0,0,.45) 100%)' }} />
       <div style={{ position: 'absolute', top: 300, left: 0, right: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14 }}>
         {top ? <div style={{ ...head, fontSize: white, color: '#fff', textShadow: '0 4px 24px rgba(0,0,0,.6)' }}>{top}</div> : null}
-        {middle ? <div style={{ ...head, fontSize: block, color: '#0b0d0c', background: accent, padding: '6px 30px 10px', borderRadius: 22, boxShadow: `0 0 44px ${accent}55` }}>{middle}</div> : null}
+        {middle ? <div style={{ ...head, fontSize: block, color: onAccent, background: accent, padding: '6px 30px 10px', borderRadius: 22, boxShadow: `0 0 44px ${accent}55` }}>{middle}</div> : null}
         {bottom ? <div style={{ ...head, fontSize: white, color: '#fff', textShadow: '0 4px 24px rgba(0,0,0,.6)' }}>{bottom}</div> : null}
       </div>
-      {badgeSpots(faceX, badges.length).map((spot, i) => <Badge key={i} badge={badges[i]} accent={accent} style={spot} />)}
+      {badgeSpots(faceX, badges.length).map((spot, i) => <Badge key={i} badge={badges[i]} accent={glow} style={spot} />)}
       {label ? (
         <div style={{ position: 'absolute', left: 0, right: 0, top: 1480, display: 'flex', justifyContent: 'center' }}>
-          <div style={{ fontFamily: MONO_STACK, fontWeight: 800, fontSize: Math.min(60, Math.floor(56 * 22 / Math.max(22, label.length))), color: accent, letterSpacing: 4,
+          <div style={{ fontFamily: MONO_STACK, fontWeight: 800, fontSize: Math.min(60, Math.floor(56 * 22 / Math.max(22, label.length))), color: glow, letterSpacing: 4,
             background: 'rgba(10,12,11,.86)', padding: '20px 36px', borderRadius: 14, border: '1px solid rgba(255,255,255,.12)', textTransform: 'uppercase', maxWidth: 980, textAlign: 'center' }}>{label}</div>
         </div>
       ) : null}
