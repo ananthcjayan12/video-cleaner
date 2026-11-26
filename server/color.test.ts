@@ -24,3 +24,16 @@ for (const [name, input, profile] of cases) for (const hdr of [false, true]) {
     }
   });
 }
+
+test('BT.709 SDR footage skips the float round trip and looks the same as the full conversion', () => {
+  const profile: ColorProfile = { pixelFormat: 'yuv420p', colorPrimaries: 'bt709', colorTransfer: 'bt709', colorSpace: 'bt709', colorRange: 'tv' };
+  const fast = colorVideoFilter(profile, false);
+  assert.doesNotMatch(fast, /zscale|gbrpf32le/);
+  const full = 'zscale=pin=bt709:tin=bt709:min=bt709:rin=limited:p=bt709:t=linear:m=gbr:r=full:npl=100,format=gbrpf32le,zscale=pin=bt709:tin=linear:min=gbr:rin=full:p=bt709:t=bt709:m=bt709:r=limited:npl=100,format=yuv420p';
+  // Smooth, in-range picture like real footage (testsrc2's out-of-range colours get clipped by the full path).
+  const src = 'gradients=s=320x240:speed=0,format=yuv420p,setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709';
+  const result = spawnSync(process.env.FFMPEG_BIN || 'ffmpeg', ['-hide_banner', '-f', 'lavfi', '-i', src, '-filter_complex', `[0:v]split[a][b];[a]${fast}[x];[b]${full}[y];[x][y]psnr`, '-frames:v', '1', '-f', 'null', '-'], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  const psnr = Number(result.stderr.match(/average:([\d.]+|inf)/)?.[1].replace('inf', '99'));
+  assert.ok(psnr >= 45, `PSNR ${psnr} dB`);
+});

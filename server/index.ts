@@ -1764,7 +1764,7 @@ async function runAutoReel(project: Project, job: AutoJob) {
     await fs.mkdir(exportsDir(project), { recursive: true });
     const output = path.join(exportsDir(project), `${new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15)}-auto-reel.mp4`);
     note(`${broll.length} B-roll cutaways…`);
-    await runPython(python, AUTO_COMPOSITE_SCRIPT, [path.join(dir, 'base.mp4'), path.join(dir, 'broll-placed.json'), path.join(dir, 'broll-clips'), captioned ? captionFile : '-', String(Math.round(H * 0.651)), WHOOSH, output, String(W), String(H)]);
+    await runPython(python, AUTO_COMPOSITE_SCRIPT, [path.join(dir, 'base.mp4'), path.join(dir, 'broll-placed.json'), path.join(dir, 'broll-clips'), captioned ? captionFile : '-', String(Math.round(H * 0.651)), WHOOSH, output, String(W), String(H), previewPathFor(output)]); // phone preview made in the same pass
     job.outputPath = output; job.downloadUrl = downloadUrlFor(project, output); job.previewUrl = job.downloadUrl ? `${job.downloadUrl}?inline=1` : undefined;
     note('Making a phone preview…');
     await addPhonePreview(project, job, settings.ffmpegBin!).catch((error) => console.error(`Preview for ${project.id} failed:`, error));

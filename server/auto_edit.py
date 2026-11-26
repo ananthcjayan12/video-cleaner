@@ -12,7 +12,7 @@ Usage: python3 -I auto_edit.py <clips.json> <words.json> <keep.json> <out_dir> <
 clips.json: [{"path": source, "start": s, "end": e, "audio": analysis audio or "", "color": ffmpeg filter or ""}]
 Memory: audio is analysed as 16 kHz mono (~3 MB per 100 s); video is never decoded into Python.
 """
-import json, math, subprocess, sys
+import json, math, os, subprocess, sys
 from array import array
 from pathlib import Path
 
@@ -24,6 +24,17 @@ ZOOM = float(sys.argv[8]) if len(sys.argv) > 8 else 1.07  # punch-in for every o
 FOCUS = (0.5, 0.36)         # face sits a little above centre in this framing
 MIN_SHOT = 2.2              # do not punch in/out more often than this
 SEAM_FADE = 0.02
+
+# ---- Encoder: Intel Quick Sync (VAAPI) when its driver works, else x264. Probed with one tiny frame per run.
+# (Duplicated in auto_edit.py / auto_composite.py: they run with python -I, so they cannot import each other.)
+def hw_device():
+    """The VAAPI render node if hardware H.264 encoding works here; None to use x264. VIDEO_CLEANER_NO_HW_ENCODE=1 turns it off."""
+    if os.environ.get('VIDEO_CLEANER_NO_HW_ENCODE'): return None
+    dev = os.environ.get('VIDEO_CLEANER_VAAPI_DEVICE', '/dev/dri/renderD128')
+    if not os.path.exists(dev): return None
+    probe = subprocess.run(['ffmpeg', '-v', 'error', '-y', '-vaapi_device', dev, '-f', 'lavfi', '-i', 'color=black:s=256x256:d=0.1',
+                            '-vf', 'format=nv12,hwupload', '-c:v', 'h264_vaapi', '-frames:v', '1', '-f', 'null', '-'], capture_output=True)
+    return dev if probe.returncode == 0 else None
 
 def run(args, **kw):
     return subprocess.run(args, check=True, **kw)
@@ -104,19 +115,32 @@ for r in ranges:
 
 # ---- Video: one short encode per shot (fast seek into its own clip), alternating 1.00x / ZOOM punch-in.
 seg_dir = OUT / 'shots'; seg_dir.mkdir(exist_ok=True)
-listing = []
-for n, shot in enumerate(shots):
-    c = CLIPS[shot['clip']]
-    color = (c.get('color') or '') + (',' if c.get('color') else '')
-    z = ZOOM if n % 2 else 1.0
-    cw, ch = W / z, H / z
-    x = min(max(FOCUS[0] * W - cw / 2, 0), W - cw); y = min(max(FOCUS[1] * H - ch / 2, 0), H - ch)
-    vf = (f'{color}scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,crop={W}:{H},crop={cw:.0f}:{ch:.0f}:{x:.0f}:{y:.0f},scale={W}:{H}:flags=lanczos,'
-          'eq=contrast=1.04:saturation=1.06,unsharp=5:5:0.35,setsar=1,fps=30,format=yuv420p')
-    path = seg_dir / f'shot-{n:03d}.mp4'
-    run(['ffmpeg', '-v', 'error', '-y', '-ss', f"{shot['start'] - c['start']:.3f}", '-t', f"{shot['end'] - shot['start']:.3f}", '-i', c['path'],
-         '-an', '-vf', vf, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '17', '-r', '30', str(path)])
-    listing.append(f"file '{path}'")
+
+def encode_shots(hw):
+    """Encode every shot with one encoder (the shots are joined without re-encoding, so they must match)."""
+    listing = []
+    for n, shot in enumerate(shots):
+        c = CLIPS[shot['clip']]
+        color = (c.get('color') or '') + (',' if c.get('color') else '')
+        z = ZOOM if n % 2 else 1.0
+        cw, ch = W / z, H / z
+        x = min(max(FOCUS[0] * W - cw / 2, 0), W - cw); y = min(max(FOCUS[1] * H - ch / 2, 0), H - ch)
+        vf = (f'{color}scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,crop={W}:{H},crop={cw:.0f}:{ch:.0f}:{x:.0f}:{y:.0f},scale={W}:{H}:flags=lanczos,'
+              'eq=contrast=1.04:saturation=1.06,unsharp=5:5:0.35,setsar=1,fps=30,format=yuv420p')
+        path = seg_dir / f'shot-{n:03d}.mp4'
+        enc = (['-vaapi_device', hw, '-hwaccel', 'vaapi', '-hwaccel_device', hw], ['-vf', vf + ',format=nv12,hwupload', '-c:v', 'h264_vaapi', '-qp', '17']) if hw else ([], ['-vf', vf, '-c:v', 'libx264', '-preset', 'superfast', '-crf', '17'])
+        run(['ffmpeg', '-v', 'error', '-y', *enc[0], '-ss', f"{shot['start'] - c['start']:.3f}", '-t', f"{shot['end'] - shot['start']:.3f}", '-i', c['path'],
+             '-an', *enc[1], '-r', '30', str(path)])
+        listing.append(f"file '{path}'")
+    return listing
+
+HW = hw_device()  # one probe per reel
+try:
+    listing = encode_shots(HW)
+except subprocess.CalledProcessError:
+    if not HW: raise
+    print('Quick Sync encode failed; using x264', file=sys.stderr)
+    listing = encode_shots(None)
 (OUT / 'shots.txt').write_text('\n'.join(listing) + '\n')
 run(['ffmpeg', '-v', 'error', '-y', '-f', 'concat', '-safe', '0', '-i', str(OUT / 'shots.txt'), '-c', 'copy', str(OUT / 'video.mp4')])
 

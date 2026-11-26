@@ -17,6 +17,11 @@ export function colorVideoFilter(media: ColorProfile = {}, hdr = false) {
   const targetP = hdr ? 'bt2020' : 'bt709';
   const targetT = hdr ? 'arib-std-b67' : 'bt709';
   const targetM = hdr ? 'bt2020nc' : 'bt709';
+  // Already standard-range BT.709 SDR and that is the target: the linear round trip below changes nothing but costs a
+  // 32-bit float conversion of every frame (very slow on 4K phone footage), so only fix the pixel format and tags.
+  if (!rgb && !hdr && !inputHdr && transfer === 'bt709' && primaries === 'bt709' && matrix === 'bt709' && (range === 'limited' || range === 'tv')) {
+    return ['format=yuv420p', 'setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709'].join(',');
+  }
   const filters = rgb ? ['format=gbrpf32le'] : [];
   filters.push(`zscale=pin=${primaries}:tin=${transfer}:min=${matrix}:rin=${range}:p=${targetP}:t=linear:m=gbr:r=full:npl=100`, 'format=gbrpf32le');
   if (inputHdr && !hdr) filters.push('tonemap=hable:desat=0');
