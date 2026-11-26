@@ -1,4 +1,3 @@
-import { isRemote } from '../api';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { api, type AdminWorkspace, type ConsoleData, type ConsoleReel, type EngineProfile, type KeyCheck, type Me, type Niche, type SystemStatus } from '../api';
 import { LookPreview } from '../phone/LookPreview';
@@ -89,7 +88,7 @@ export function Console({ me }: { me: Me | null }) {
         <div className="oc-side-foot">
           <a href="/?view=phone#home">📱 My reels app</a>
           <a href="/?advanced=1">🛠 Advanced editor</a>
-          {!isRemote() && <a href="/?mode=stick-reel">Stick-figure reels</a>}
+          <a href="/?mode=stick-reel">Stick-figure reels</a>
           <small>Logged in as {me?.username}</small>
         </div>
       </aside>

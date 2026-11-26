@@ -3,7 +3,6 @@ import { Console } from './console/Console';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   api,
-  isRemote,
 
   type BrollAssetAspectRatio,
   type BrollDisplayTemplate,
@@ -730,7 +729,7 @@ function App() {
   // Everyone gets the PractiReel phone app; the owner's old step-by-step editor opens with ?advanced=1.
   // The owner on a computer gets the console; phones (and ?phone=1 links from the console) get the phone app.
   const showConsole = me?.role === 'admin' && !phoneForced && (ownerView ? ownerView === 'console' : wide);
-  if (!isRemote() && new URLSearchParams(window.location.search).get('mode') === 'stick-reel') return <StickReel />;
+  if (me?.role === 'admin' && new URLSearchParams(window.location.search).get('mode') === 'stick-reel') return <StickReel />;
   if (!advanced || isMember) return showConsole ? <Console me={me} /> : <PhoneApp me={me} onMe={setMe} />;
   return (
     <main className="shell">
@@ -739,7 +738,7 @@ function App() {
         {isMember ? <div className="headerActions"><button className="ghost" onClick={() => void fetch('/api/logout', { method: 'POST' }).then(() => window.location.replace('/login'))}>Log out</button></div> : <div className="headerActions">
           <span className={`readyBadge ${ready ? 'ready' : ''}`}>{ready ? 'Core ready' : 'Setup required'}</span>
           <a className="ghost" href="/?advanced=0" style={{ color: 'inherit', padding: '11px 14px', textDecoration: 'none' }}>Owner console</a>
-          {!isRemote() && <a className="ghost" href="/?mode=stick-reel">Stick-figure reels</a>}
+          {me?.role === 'admin' && <a className="ghost" href="/?mode=stick-reel">Stick-figure reels</a>}
           <button className="ghost" onClick={() => setAccountsOpen((value) => !value)}>Accounts</button>
           {project && <button className="ghost" onClick={() => void closeProject()} disabled={busy || exportRunning || generatingAll}>Projects</button>}
           <button className="ghost" onClick={() => setSettingsOpen((value) => !value)}>Settings</button>

@@ -937,7 +937,7 @@ app.get('/api/projects', route(async (_req, res) => {
 
 app.post('/api/projects/select', route(async (req, res) => {
   // Auto reels re-render every clip to 1080x1920 with its own colour handling, so clips only need audio there.
-  const stick = req.body?.stick === true && !isRemoteRequest(req);
+  const stick = req.body?.stick === true && isAdmin(res);
   const relaxed = req.body?.auto === true || stick;
   const stickUpload = stick && Array.isArray(req.body?.uploadIds) && req.body.uploadIds.length === 1
     ? await readUpload(await uploadsDir(), String(req.body.uploadIds[0])) : undefined;
@@ -1825,7 +1825,7 @@ async function loadAutoJob(project: Project) {
 const stickJobs = new Map<string, StickRender>();
 const stickRoute = (handler: (req: express.Request, res: express.Response, project: Project) => Promise<void>) =>
   route(async (req, res) => {
-    if (isRemoteRequest(req) || !isAdmin(res)) return void res.status(403).json({ error: 'Stick-figure reels are available on this Mac.' });
+    if (!isAdmin(res)) return void res.status(403).json({ error: 'Stick-figure reels are for the owner login only.' });
     const project = getProject(routeParam(req.params.id));
     if (projectClips(project).length !== 1 || !Number.isFinite(project.media.duration) || project.media.duration <= 0 || project.media.duration > 300) {
       throw new Error('Use one recording, up to five minutes long.');

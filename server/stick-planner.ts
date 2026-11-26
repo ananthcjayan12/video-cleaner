@@ -33,7 +33,34 @@ const CURATED_SFX_IDS = [
   'risers-riser-1',
 ].filter(id => MOTION_SOUNDS.some(s => s.id === id));
 
-const PLANNER_SCHEMA = {
+/**
+ * Codex (OpenAI strict structured output) demands that every object lists all of its properties in `required`.
+ * Keep the readable schema above with optional fields, and derive the strict one: every key becomes required and
+ * the formerly optional ones accept null. `dropNulls` turns those nulls back into missing fields.
+ */
+function strictSchema(node: any): any {
+  if (Array.isArray(node)) return node.map(strictSchema);
+  if (!node || typeof node !== 'object') return node;
+  const out: any = Object.fromEntries(Object.entries(node).map(([key, value]) => [key, strictSchema(value)]));
+  if (out.type === 'object' && out.properties) {
+    const required = new Set<string>(Array.isArray(node.required) ? node.required : []);
+    for (const [key, value] of Object.entries<any>(out.properties)) {
+      if (required.has(key)) continue;
+      const nullable: any = { ...value, type: [value.type, 'null'] };
+      if (Array.isArray(value.enum)) nullable.enum = [...value.enum, null];
+      out.properties[key] = nullable;
+    }
+    out.required = Object.keys(out.properties);
+  }
+  return out;
+}
+export function dropNulls(value: any): any {
+  if (Array.isArray(value)) return value.map(dropNulls);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== null).map(([key, item]) => [key, dropNulls(item)]));
+}
+
+const LOOSE_PLANNER_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   required: ['badge', 'marquee', 'themeId', 'scenes', 'notes'],
@@ -117,6 +144,7 @@ const PLANNER_SCHEMA = {
     },
   },
 };
+export const PLANNER_SCHEMA = strictSchema(LOOSE_PLANNER_SCHEMA);
 
 function formatTranscript(words: Word[]) {
   const lines: string[] = [];
@@ -213,6 +241,7 @@ export async function planStickReelWithAi(options: {
         schema: PLANNER_SCHEMA,
         outputName: 'stick-reel-plan',
       });
+      raw = dropNulls(raw);
     } catch (error) {
       lastError = error instanceof Error ? error.message : String(error);
       continue;
