@@ -29,3 +29,7 @@
 .st-sticky { position: sticky; bottom: calc(10px + env(safe-area-inset-bottom, 0px)); z-index: 5; }
 .pr-page.st-wide { max-width: 720px; }
 .pr a.pr-back { text-decoration: none; }
+.st-source { display: flex; flex-direction: column; gap: 8px; border-top: 1px solid var(--sunk); padding-top: 12px; }
+.st-source p, .st-source ul { margin: 0; font-size: 15px; color: var(--ink); }
+.st-source ul { padding-left: 20px; display: flex; flex-direction: column; gap: 4px; }
+.st-source .pr-pill { align-self: flex-start; }

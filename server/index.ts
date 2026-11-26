@@ -1,5 +1,6 @@
 import { listStickFacePacks, loadStickDraft, makeStickDraft, renderStickReel, saveStickDraft, STICK_THEMES, stickMusicPath, type StickRender } from './stick-reel.js';
 import { planStickReelWithAi } from './stick-planner.js';
+import { fetchReelSource, newSourceJob, sourceBrief, sourceFromBody, sourceJobs } from './stick-source.js';
 import { DEFAULT_SCRIPT_ENGINE, loadStudioSettings, MALE_VOICES, narrateScript, narrationJobs, newNarrationJob, previewVoice, saveStudioSettings, writeStickScript, type StickScript } from './stick-narration.js';
 import { EMOTIONS } from './emotion-sfx.js';
 import { MOTION_SOUNDS, motionSoundPath } from './motion-sfx.js';
@@ -1858,6 +1859,18 @@ app.get('/api/stick/studio', studioRoute(async (_req, res) => {
 app.put('/api/stick/studio', studioRoute(async (req, res) => { res.json({ settings: await saveStudioSettings(req.body ?? {}) }); }));
 type ScriptJob = { id: string; state: 'running' | 'ready' | 'failed'; script?: StickScript; error?: string; startedAt: number };
 const scriptJobs = new Map<string, ScriptJob>();
+app.post('/api/stick/source', studioRoute(async (req, res) => {
+  const input = typeof req.body?.url === 'string' ? req.body.url.slice(0, 1000) : '';
+  const settings = await resolvedSettings(); if (!settings.ffmpegBin) throw new Error('FFmpeg was not found.');
+  const job = newSourceJob(); res.status(202).json({ job });
+  void fetchReelSource({ input, workDir: path.join(studioDir(), 'sources', job.id), ffmpeg: settings.ffmpegBin, geminiApiKey: settings.geminiApiKey, model: settings.geminiSttModel || 'gemini-3.8-flash', progress: (stage) => { job.stage = stage; } })
+    .then((source) => Object.assign(job, { state: 'ready', stage: 'Done', source }), (error) => Object.assign(job, { state: 'failed', stage: 'Failed', error: error instanceof Error ? error.message : String(error) }));
+}));
+app.get('/api/stick/source/:jobId', studioRoute(async (req, res) => {
+  const job = sourceJobs.get(routeParam(req.params.jobId));
+  if (!job) return void res.status(404).json({ error: 'That link job is gone (the app restarted). Fetch the link again.' });
+  res.json({ job });
+}));
 app.get('/api/stick/script/:jobId', studioRoute(async (req, res) => {
   const job = scriptJobs.get(routeParam(req.params.jobId));
   if (!job) return void res.status(404).json({ error: 'That script job is gone (the app restarted). Write it again.' });
@@ -1872,6 +1885,7 @@ app.post('/api/stick/script', studioRoute(async (req, res) => {
     concept, seconds: Number(req.body?.seconds) || undefined,
     feedback: typeof req.body?.feedback === 'string' ? req.body.feedback.slice(0, 1500) : undefined,
     previous: scriptFromBody(req.body?.previous),
+    sourceText: (() => { const source = sourceFromBody(req.body?.source); return source ? sourceBrief(source) : undefined; })(),
     settings: studio, textConfig: settings, choice: textEngines(settings).script, workDir: path.join(studioDir(), 'work'),
   });
   res.status(202).json({ job });

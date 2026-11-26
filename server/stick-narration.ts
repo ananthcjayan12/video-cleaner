@@ -141,7 +141,7 @@ const SCRIPT_SCHEMA = {
 /** Measured with Gemini TTS (2026-11-26): Malayalam about 2.4 words a second, minus line gaps; English about 2.6. */
 export const wordsPerSecond = (language: StickStudioSettings['scriptLanguage']) => (language === 'english' ? 2.5 : 2.2);
 
-export function buildScriptPrompt(input: { concept: string; settings: StickStudioSettings; seconds?: number; feedback?: string; previous?: StickScript }) {
+export function buildScriptPrompt(input: { concept: string; settings: StickStudioSettings; seconds?: number; feedback?: string; previous?: StickScript; sourceText?: string }) {
   const { settings } = input;
   const seconds = Math.round(clamp(input.seconds, 15, 120, settings.scriptSeconds));
   const words = Math.round(seconds * wordsPerSecond(settings.scriptLanguage));
@@ -154,7 +154,8 @@ export function buildScriptPrompt(input: { concept: string; settings: StickStudi
     ].join(' ');
   return [
     'You write the voiceover for a short vertical reel (Instagram Reels / YouTube Shorts). A stick-figure version of the creator acts it out with on-screen cards, so the words must carry the whole story.',
-    `CONCEPT FROM THE CREATOR:\n${input.concept.trim()}`,
+    input.concept.trim() ? `CONCEPT FROM THE CREATOR:\n${input.concept.trim()}` : 'CONCEPT FROM THE CREATOR: make our own version of the reference reel below.',
+    input.sourceText ?? '',
     `LENGTH: about ${seconds} seconds spoken, roughly ${words} words in total.`,
     language,
     'SHAPE: one continuous story, not a list of facts. Line 1 is the hook: a surprising fact, a question or a relatable moment that stops the scroll in under 3 seconds. Then the problem or common belief, the twist or the real reason (why), what to do instead, and a short payoff. End with one clear call to action.',
@@ -169,10 +170,10 @@ export function buildScriptPrompt(input: { concept: string; settings: StickStudi
 }
 
 export async function writeStickScript(options: {
-  concept: string; seconds?: number; feedback?: string; previous?: StickScript;
+  concept: string; seconds?: number; feedback?: string; previous?: StickScript; sourceText?: string;
   settings: StickStudioSettings; textConfig: TextModelConfig; choice: TextModelChoice; workDir: string;
 }): Promise<StickScript> {
-  if (!options.concept.trim()) throw new Error('Tell me what the reel is about first.');
+  if (!options.concept.trim() && !options.sourceText) throw new Error('Tell me what the reel is about first.');
   await fs.mkdir(options.workDir, { recursive: true });
   const raw = await generateStructuredText({
     config: options.textConfig,

@@ -1,5 +1,7 @@
 import type { StickDraft, StickRender, StickTheme } from '../server/stick-reel';
 import type { NarrationJob, StickScript, StickStudioSettings } from '../server/stick-narration';
+import type { ReelSource, SourceJob } from '../server/stick-source';
+export type { ReelSource };
 export type StickPlanState = { state: 'running' | 'failed'; error?: string } | null;
 export type StudioInfo = { settings: StickStudioSettings; voices: Array<{ id: string; label: string }>; themes: StickTheme[]; facePacks: string[]; scriptEngine: { provider: string; model: string; effort: string }; geminiReady: boolean };
 export type ScriptJob = { id: string; state: 'running' | 'ready' | 'failed'; script?: StickScript; error?: string };
@@ -289,7 +291,9 @@ export const api = {
   planStick: (id: string, body?: { brief?: string; themeId?: string }) => request<{ plan: StickPlanState }>(`/api/projects/${id}/stick/plan`, { method: 'POST', body: JSON.stringify(body ?? {}) }),
   studio: () => request<StudioInfo>('/api/stick/studio'),
   saveStudio: (settings: Partial<StickStudioSettings>) => request<{ settings: StickStudioSettings }>('/api/stick/studio', { method: 'PUT', body: JSON.stringify(settings) }),
-  writeScript: (body: { concept: string; seconds?: number; feedback?: string; previous?: StickScript }) => request<{ job: ScriptJob }>('/api/stick/script', { method: 'POST', body: JSON.stringify(body) }),
+  fetchSource: (url: string) => request<{ job: SourceJob }>('/api/stick/source', { method: 'POST', body: JSON.stringify({ url }) }),
+  sourceJob: (jobId: string) => request<{ job: SourceJob }>(`/api/stick/source/${jobId}`),
+  writeScript: (body: { concept: string; seconds?: number; feedback?: string; previous?: StickScript; source?: ReelSource }) => request<{ job: ScriptJob }>('/api/stick/script', { method: 'POST', body: JSON.stringify(body) }),
   scriptJob: (jobId: string) => request<{ job: ScriptJob }>(`/api/stick/script/${jobId}`),
   previewVoice: (body: { voice?: string; voiceStyle?: string; line?: string }) => request<{ url: string }>('/api/stick/voice-preview', { method: 'POST', body: JSON.stringify(body) }),
   narrate: (script: StickScript) => request<{ job: NarrationJob }>('/api/stick/narrate', { method: 'POST', body: JSON.stringify({ script }) }),

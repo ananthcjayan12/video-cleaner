@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { api, type StickPlanState, type StudioInfo } from '../api';
+import { api, type ReelSource, type StickPlanState, type StudioInfo } from '../api';
 import { chooseFiles, uploadAll } from '../device-files';
 import type { StickDraft, StickRender, StickTheme } from '../../server/stick-reel';
 import type { NarrationJob, StickScript, StickStudioSettings } from '../../server/stick-narration';
@@ -15,7 +15,7 @@ import './stick.css';
  * Both end in the same pipeline: captions + AI scene plan (background) -> render -> edit & render again.
  */
 
-type Flow = { concept: string; seconds: number; script?: StickScript; scriptJobId?: string; narrationJobId?: string; voiceUrl?: string; uploadId?: string; voiceSeconds?: number };
+type Flow = { concept: string; seconds: number; mode?: 'idea' | 'link'; link?: string; sourceJobId?: string; source?: ReelSource; script?: StickScript; scriptJobId?: string; narrationJobId?: string; voiceUrl?: string; uploadId?: string; voiceSeconds?: number };
 type View = 'home' | 'write' | 'script' | 'voice' | 'reel' | 'settings';
 type StickData = { draft: StickDraft; render: StickRender | null; duration: number; audioUrl: string; customMusic: boolean; facePacks: string[]; themes: StickTheme[]; plan: StickPlanState };
 
@@ -29,9 +29,17 @@ const wordsOf = (lines: string[]) => lines.join(' ').split(/\s+/).filter(Boolean
 
 export function StickStudio() {
   const [info, setInfo] = useState<StudioInfo | null>(null);
-  const [flow, setFlowState] = useState<Flow>(loadFlow);
+  const [flow, setFlowState] = useState<Flow>(() => { const shared = new URLSearchParams(window.location.search).get('link'); return shared ? { concept: '', seconds: loadFlow().seconds, mode: 'link', link: shared } : loadFlow(); });
   const [projectId, setProjectId] = useState(() => localStorage.getItem(PROJECT_KEY) || '');
   const [view, setView] = useState<View>(() => {
+    const shared = new URLSearchParams(window.location.search).get('link');
+    if (shared) {
+      // Opened with ?link=… (e.g. from a phone shortcut): start a fresh "from a link" reel.
+      localStorage.removeItem(PROJECT_KEY); localStorage.removeItem(AUTO_KEY);
+      localStorage.setItem(FLOW_KEY, JSON.stringify({ concept: '', seconds: loadFlow().seconds, mode: 'link', link: shared }));
+      window.history.replaceState(null, '', '/?mode=stick-reel');
+      return 'write';
+    }
     const f = loadFlow();
     if (localStorage.getItem(PROJECT_KEY)) return 'reel';
     if (f.narrationJobId) return 'voice';
@@ -44,6 +52,8 @@ export function StickStudio() {
   const [feedback, setFeedback] = useState('');
   const [narration, setNarration] = useState<NarrationJob | null>(null);
   const [voiceChoice, setVoiceChoice] = useState('');
+  const [sourceStage, setSourceStage] = useState('');
+  const autoFetch = useRef(Boolean(new URLSearchParams(window.location.search).get('link')) || Boolean(loadFlow().link && loadFlow().mode === 'link' && !loadFlow().source));
 
   const setFlow = (patch: Partial<Flow>) => setFlowState((current) => { const next = { ...current, ...patch }; localStorage.setItem(FLOW_KEY, JSON.stringify(next)); return next; });
   const seconds = flow.seconds || info?.settings.scriptSeconds || 45;
@@ -68,6 +78,26 @@ export function StickStudio() {
     return () => { stop = true; clearTimeout(timer); };
   }, [flow.scriptJobId]);
 
+  // Link job (download + Gemini watching it); poll it.
+  useEffect(() => {
+    const jobId = flow.sourceJobId; if (!jobId) return;
+    let stop = false; let timer = 0;
+    const tick = async () => {
+      try {
+        const { job } = await api.sourceJob(jobId); if (stop) return;
+        setSourceStage(job.stage);
+        if (job.state === 'ready' && job.source) setFlow({ source: job.source, sourceJobId: undefined });
+        else if (job.state === 'failed') { setError(job.error || 'The link could not be read.'); setFlow({ sourceJobId: undefined }); }
+        else timer = window.setTimeout(tick, 1500);
+      } catch (err) { if (!stop) { setError(message(err)); setFlow({ sourceJobId: undefined }); } }
+    };
+    void tick();
+    return () => { stop = true; clearTimeout(timer); };
+  }, [flow.sourceJobId]);
+
+  // Opened from a shared link: fetch it straight away.
+  useEffect(() => { if (flow.mode === 'link' && flow.link && !flow.source && !flow.sourceJobId && view === 'write' && new URLSearchParams(window.location.search).get('mode') === 'stick-reel' && autoFetch.current) { autoFetch.current = false; void fetchLink(); } }, []);
+
   // Narration job; poll until the voice is ready.
   useEffect(() => {
     const jobId = flow.narrationJobId; if (!jobId || flow.uploadId) return;
@@ -89,8 +119,15 @@ export function StickStudio() {
     try { await action(); } catch (err) { setError(message(err)); } finally { setBusy(''); }
   }
 
+  const fetchLink = () => act('Starting…', async () => {
+    setSourceStage('Starting…');
+    const { job } = await api.fetchSource(flow.link ?? '');
+    setFlow({ sourceJobId: job.id, source: undefined });
+  });
+
+  const useSource = flow.mode === 'link' && flow.source;
   const writeScript = (withFeedback?: boolean) => act('Starting…', async () => {
-    const { job } = await api.writeScript({ concept: flow.concept, seconds, ...(withFeedback && flow.script ? { feedback, previous: flow.script } : {}) });
+    const { job } = await api.writeScript({ concept: flow.concept, seconds, ...(useSource ? { source: flow.source } : {}), ...(withFeedback && flow.script ? { feedback, previous: flow.script } : {}) });
     setFlow({ scriptJobId: job.id, ...(withFeedback ? {} : { script: undefined }) });
     show('script');
   });
@@ -159,10 +196,15 @@ export function StickStudio() {
               <span style={{ flex: 1 }}><strong>{flow.script?.title || 'Your script'}</strong><br /><small className="muted">{flow.narrationJobId ? 'Voice step' : 'Script step'} · tap to continue</small></span>›
             </button>
           )}
-          <button type="button" className="st-choice" onClick={() => { if (flow.script || flow.narrationJobId) newReel(); show('write'); }}>
+          <button type="button" className="st-choice" onClick={() => { if (flow.script || flow.narrationJobId) newReel(); setFlow({ mode: 'idea' }); show('write'); }}>
             <span className="kind">New · AI voice</span>
             <strong>Write it for me</strong>
             <span>Tell the idea. AI writes the script, you approve it, a Malayalam male voice reads it, and the video is made.</span>
+          </button>
+          <button type="button" className="st-choice" onClick={() => { const seconds_ = flow.seconds; newReel(); setFlow({ seconds: seconds_, mode: 'link' }); show('write'); }}>
+            <span className="kind">New · from a reel you liked</span>
+            <strong>From an Instagram or YouTube link</strong>
+            <span>Paste a link. The AI watches it, then writes your own version for you to approve.</span>
           </button>
           <button type="button" className="st-choice" disabled={Boolean(busy)} onClick={() => void fromRecording()}>
             <span className="kind">Your voice</span>
@@ -176,13 +218,36 @@ export function StickStudio() {
 
       {view === 'write' && (
         <main className="pr-page">
-          {header('What is the reel about?', () => show('home'))}
-          <section className="pr-card pr-options">
-            <label className="pr-field">Idea
-              <textarea rows={6} value={flow.concept} maxLength={3000} autoFocus
-                placeholder="e.g. Why clinics should show the doctor's face, not the logo. Patients book faster when they already know you. End: follow for day 4."
+          {header(flow.mode === 'link' ? 'Make it from a reel' : 'What is the reel about?', () => show('home'))}
+          <div className="pr-chips">
+            <button type="button" className={`pr-chip${flow.mode !== 'link' ? ' on' : ''}`} onClick={() => setFlow({ mode: 'idea' })}>Type an idea</button>
+            <button type="button" className={`pr-chip${flow.mode === 'link' ? ' on' : ''}`} onClick={() => setFlow({ mode: 'link' })}>From a link</button>
+          </div>
+          {flow.mode === 'link' && (
+            <section className="pr-card pr-options">
+              <label className="pr-field">Instagram or YouTube link
+                <input type="url" inputMode="url" value={flow.link ?? ''} placeholder="https://www.instagram.com/reel/…" onChange={(e) => setFlow({ link: e.target.value, source: undefined })} />
+              </label>
+              {!flow.source && <button type="button" className="pr-btn small" disabled={!flow.link?.trim() || Boolean(flow.sourceJobId) || Boolean(busy)} onClick={() => void fetchLink()}>{flow.sourceJobId ? 'Reading…' : 'Read this reel'}</button>}
+              {flow.sourceJobId && <><div className="pr-bar"><i style={{ width: '55%' }} /></div><small className="muted">{sourceStage || 'Working…'} Usually under a minute.</small></>}
+              {flow.source && (
+                <div className="st-source">
+                  <span className="pr-pill ready">{flow.source.platform}{flow.source.uploader ? ` · ${flow.source.uploader}` : ''}{flow.source.durationSec ? ` · ${flow.source.durationSec} s` : ''}</span>
+                  <strong>{flow.source.topic || flow.source.title}</strong>
+                  {flow.source.summary && <p>{flow.source.summary}</p>}
+                  {flow.source.keyPoints.length > 0 && <ul>{flow.source.keyPoints.slice(0, 6).map((point, i) => <li key={i}>{point}</li>)}</ul>}
+                  {flow.source.transcript && <details className="st-more"><summary>What they say</summary><p style={{ whiteSpace: 'pre-wrap' }}>{flow.source.transcript}</p></details>}
+                  <small className="muted">We write our own version: same topic, our words. Nothing is copied.</small>
+                </div>
+              )}
+            </section>
+          )}
+          <section className="pr-card pr-options" style={flow.mode === 'link' && !flow.source ? { display: 'none' } : undefined}>
+            <label className="pr-field">{flow.mode === 'link' ? 'Anything to change or add? (optional)' : 'Idea'}
+              <textarea rows={flow.mode === 'link' ? 3 : 6} value={flow.concept} maxLength={3000} autoFocus={flow.mode !== 'link'}
+                placeholder={flow.mode === 'link' ? 'e.g. Make it for kids’ parents, add our clinic’s free check-up offer' : "e.g. Why clinics should show the doctor's face, not the logo. Patients book faster when they already know you. End: follow for day 4."}
                 onChange={(e) => setFlow({ concept: e.target.value })} />
-              <small>A line is enough. Add facts, a story or the call to action if you have them.</small>
+              {flow.mode !== 'link' && <small>A line is enough. Add facts, a story or the call to action if you have them.</small>}
             </label>
             <div className="pr-field">Length<div className="pr-chips">
               {LENGTHS.map((value) => <button key={value} type="button" className={`pr-chip${seconds === value ? ' on' : ''}`} onClick={() => setFlow({ seconds: value })}>{value} s</button>)}
@@ -190,7 +255,7 @@ export function StickStudio() {
           </section>
           {info && !info.geminiReady && <p className="pr-error">No Gemini API key is set, so the AI voice step will fail. You can still write the script.</p>}
           {error && <p className="pr-error">{error}</p>}
-          <button type="button" className="pr-btn primary block" disabled={!flow.concept.trim() || Boolean(busy)} onClick={() => void writeScript(false)}>{busy || 'Write the script'}</button>
+          {(flow.mode !== 'link' || flow.source) && <button type="button" className="pr-btn primary block" disabled={(flow.mode === 'link' ? !flow.source : !flow.concept.trim()) || Boolean(busy)} onClick={() => void writeScript(false)}>{busy || (flow.mode === 'link' ? 'Write my version' : 'Write the script')}</button>}
         </main>
       )}
 

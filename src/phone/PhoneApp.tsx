@@ -116,6 +116,13 @@ function HomePage({ me, workspaceName, credits, ideas, projects, onUpload }: { m
         {(ideas?.week ?? []).map((idea) => <IdeaCard key={idea.id} idea={idea} />)}
         {!ideas && <div className="pr-card"><small>Loading ideas…</small></div>}
       </section>
+      {me?.role === 'admin' && (
+        <a className="pr-inprogress" href="/?mode=stick-reel" style={{ textDecoration: 'none', color: 'inherit' }}>
+          <span className="pr-pill review">Owner</span>
+          <span style={{ flex: 1, minWidth: 0 }}><strong style={{ display: 'block' }}>Stick-figure reels</strong><small>AI script + voice, from an idea, a link or your recording</small></span>
+          <span aria-hidden="true">›</span>
+        </a>
+      )}
       <div className="pr-actions">
         <button type="button" className="pr-btn primary" disabled={left === 0} onClick={() => go('record')}><span className="pr-dot" />Record</button>
         <button type="button" className="pr-btn" disabled={left === 0} onClick={onUpload}>Upload video</button>
