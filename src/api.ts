@@ -16,7 +16,7 @@ export type KeepRange = { startWordId: string; endWordId: string; reason?: strin
 export type Edl = { keepRanges: KeepRange[]; notes?: string[]; keptSeconds?: number; sourceSeconds?: number; intensity?: CleanIntensity; targetDurationSec?: number };
 export type CleanIntensity = 'light' | 'balanced' | 'aggressive';
 export type ImageProvider = 'openai' | 'gemini' | 'grok-cli' | 'codex-cli' | 'chatgpt-browser';
-export type TextProvider = 'codex-cli' | 'claude-cli' | 'agy-cli' | 'gemini' | 'openai';
+export type TextProvider = 'codex-cli' | 'claude-cli' | 'agy-cli' | 'gemini' | 'openai' | 'anthropic';
 export type ModelOption = { id: string; label: string };
 export type VideoProvider = 'grok-cli' | 'google-flow' | 'magnific';
 export type StillEffect = 'hold' | 'zoom-in' | 'zoom-out' | 'pan-left' | 'pan-right';
@@ -42,6 +42,9 @@ export type ProjectState = {
 
 export type Project = {
   id: string;
+  workspaceId?: string;
+  postedAt?: string;
+  reel?: ReelStatus | null;
   name: string;
   sourceName: string;
   clipCount?: number;
@@ -64,6 +67,7 @@ export type SystemStatus = {
   ffmpeg: { installed: boolean; path: string | null; capabilities?: { videoToolboxDecode: boolean; h264VideoToolbox: boolean; hevcVideoToolbox: boolean } };
   ffprobe: { installed: boolean; path: string | null };
   elevenLabs: { configured: boolean };
+  apiEngines?: { anthropic: { configured: boolean; model: string; effort: string }; gemini: { configured: boolean; imageModel: string }; allowedProfiles: EngineProfile[] };
   transcription?: { provider: 'gemini' | 'elevenlabs'; model: string; configured: boolean };
   imageProvider: ImageProvider;
   imageProviders: {
@@ -77,7 +81,7 @@ export type SystemStatus = {
   motionGraphics?: { browserPath: string | null; renderer: string };
   matting?: { configured: boolean; pythonInstalled: boolean; dependenciesInstalled: boolean; pythonPath: string | null; detail: string };
   projectsDir: string;
-  overrides?: { cleanEffort?: string; planningEffort?: string; picturesProvider?: string; picturesModel?: string; picturesEffort?: string; sttProvider?: string; geminiSttModel?: string;
+  overrides?: { apiTextModel?: string; apiEffort?: string; cleanEffort?: string; planningEffort?: string; picturesProvider?: string; picturesModel?: string; picturesEffort?: string; sttProvider?: string; geminiSttModel?: string;
     cleanProvider?: string; cleanModel?: string; planningProvider?: string; planningModel?: string; codexModel?: string; agyBin?: string; claudeBin?: string;
     codexBin: string; grokBin: string; gflowBin: string; ffmpegBin: string; ffprobeBin: string; projectsDir: string;
     imageProvider: string; openAiImageModel: string; geminiImageModel: string; grokModel: string; grokVideoModel?: string; gflowProfile?: string; gflowVideoModel?: string; magnificVideoModel?: string; magnificVideoEndpoint?: string;
@@ -238,10 +242,30 @@ export type ThumbnailBadge = { icon: string; label?: string };
 export type ReelPackage = { state: 'running' | 'ready' | 'failed'; error?: string; frames: string[]; frame: number; lines: string[]; label: string; badges: ThumbnailBadge[]; caption: string; hashtags: string[]; thumbnailUrl?: string; thumbnailDownloadUrl?: string };
 export type PackageEdit = Partial<Pick<ReelPackage, 'frame' | 'lines' | 'label' | 'badges' | 'caption' | 'hashtags'>>;
 export type ReviewWord = { id: string; text: string; start: number; end: number };
-export type AutoReview = { words: ReviewWord[]; keepRanges: KeepRange[]; keptSeconds: number; sourceSeconds: number; notes?: string; redoing?: boolean };
-export type AutoJob = { state: 'idle' | 'running' | 'review' | 'completed' | 'failed' | 'stopped'; review?: AutoReview; stages?: AutoStage[]; startedAt?: number; finishedAt?: number; error?: string; previewUrl?: string; downloadUrl?: string; sourceSeconds?: number; finalSeconds?: number; options?: AutoOptions; package?: ReelPackage };
+export type AutoReview = { words: ReviewWord[]; keepRanges: KeepRange[]; keptSeconds: number; sourceSeconds: number; notes?: string; redoing?: boolean; flags?: ClaimFlag[] };
+export type EngineProfile = 'in-house' | 'api';
+export type UsageSummary = { costUsd: number; apiUsd: number; estimated: boolean; tokens: { input: number; output: number }; images: number; renderSeconds: number; audioSeconds: number; byTask: Record<string, { costUsd: number; apiUsd: number }> };
+export type Niche = 'dental' | 'physio' | 'nutrition' | 'optometry';
+export type Workspace = { id: string; name: string; profile: EngineProfile; niche?: Niche; effectiveProfile: EngineProfile | null; reelsPerMonth?: number; reelsThisMonth: number; createdAt: string };
+export type AdminWorkspace = Workspace & { members: Array<{ username: string; createdAt: string }>; costThisMonth: UsageSummary };
+export type Me = { username: string; role: 'admin' | 'member'; workspace?: Workspace; workspaces?: Workspace[]; allowedProfiles: EngineProfile[] };
+export type Idea = { id: string; kind: string; title: string; hook: string; points: string[]; seconds: number };
+export type ClaimFlag = { from: number; to: number; match: string; title: string; fix: string };
+export type ReelStatus = { state: AutoJob['state']; step?: string; queuePosition?: number; finishedAt?: number; coverUrl?: string; previewUrl?: string };
+export type AutoJob = { queuePosition?: number; resumed?: boolean; profile?: EngineProfile; cost?: UsageSummary; state: 'idle' | 'running' | 'review' | 'completed' | 'failed' | 'stopped'; review?: AutoReview; stages?: AutoStage[]; startedAt?: number; finishedAt?: number; error?: string; previewUrl?: string; downloadUrl?: string; sourceSeconds?: number; finalSeconds?: number; options?: AutoOptions; package?: ReelPackage };
 
 export const api = {
+  me: () => request<Me>('/api/me'),
+  ideas: () => request<{ niche: Niche; label: string; week: Idea[]; all: Idea[] }>('/api/ideas'),
+  markPosted: (id: string, posted: boolean) => request<{ postedAt: string | null }>(`/api/projects/${id}/posted`, { method: 'POST', body: JSON.stringify({ posted }) }),
+  pushKey: () => request<{ publicKey: string }>('/api/push/key'),
+  pushSubscribe: (subscription: PushSubscriptionJSON) => request<{ ok: true }>('/api/push/subscribe', { method: 'POST', body: JSON.stringify({ subscription }) }),
+  pushUnsubscribe: (endpoint: string) => request<{ ok: true }>('/api/push/unsubscribe', { method: 'POST', body: JSON.stringify({ endpoint }) }),
+  adminWorkspaces: () => request<{ allowedProfiles: EngineProfile[]; workspaces: AdminWorkspace[] }>('/api/admin/workspaces'),
+  createWorkspace: (body: { name: string; profile: EngineProfile; niche?: Niche; reelsPerMonth?: number }) => request<Workspace>('/api/admin/workspaces', { method: 'POST', body: JSON.stringify(body) }),
+  updateWorkspace: (id: string, body: { name?: string; profile?: EngineProfile; niche?: Niche; reelsPerMonth?: number }) => request<Workspace>(`/api/admin/workspaces/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(body) }),
+  addMember: (workspaceId: string, username: string, password: string) => request<{ username: string }>(`/api/admin/workspaces/${encodeURIComponent(workspaceId)}/members`, { method: 'POST', body: JSON.stringify({ username, password }) }),
+  removeMember: (username: string) => request<{ ok: true }>(`/api/admin/members/${encodeURIComponent(username)}`, { method: 'DELETE' }),
   startAuto: (id: string, options: AutoOptions) => request<AutoJob>(`/api/projects/${id}/auto`, { method: 'POST', body: JSON.stringify(options) }),
   autoStatus: (id: string) => request<AutoJob>(`/api/projects/${id}/auto`),
   reviewAuto: (id: string, body: { action: 'continue' | 'redo'; keepRanges?: KeepRange[]; notes?: string }) => request<{ ok: boolean }>(`/api/projects/${id}/auto/review`, { method: 'POST', body: JSON.stringify(body) }),
@@ -255,7 +279,7 @@ export const api = {
   saveSettings: (body: Record<string, string>) => request<SystemStatus>('/api/settings', { method: 'PUT', body: JSON.stringify(body) }),
 
   listProjects: () => request<Project[]>('/api/projects'),
-  selectProject: (uploadIds?: string[], auto?: boolean) => request<Project>('/api/projects/select', { method: 'POST', body: JSON.stringify({ uploadIds, auto }) }),
+  selectProject: (uploadIds?: string[], auto?: boolean, workspaceId?: string) => request<Project>('/api/projects/select', { method: 'POST', body: JSON.stringify({ uploadIds, auto, workspaceId }) }),
   openProject: (id: string) => request<ProjectSnapshot>(`/api/projects/${id}/open`, { method: 'POST' }),
   renameProject: (id: string, name: string) => request<Project>(`/api/projects/${id}/meta`, { method: 'PUT', body: JSON.stringify({ name }) }),
   deleteProject: (id: string) => request<{ deleted: boolean; id: string }>(`/api/projects/${id}`, { method: 'DELETE' }),

@@ -13,14 +13,17 @@
     "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^1.14.0",
     "@cjcut/editor": "git+https://github.com/ananthcjayan12/cjcut.git#21c61d6d8f7f59e844e8896d8e8c7e1e1e688abf",
     "@remotion/bundler": "^4.0.530",
     "@remotion/renderer": "^4.0.530",
+    "@types/web-push": "^3.6.4",
     "dotenv": "^16.4.7",
     "express": "^5.1.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
-    "remotion": "^4.0.530"
+    "remotion": "^4.0.530",
+    "web-push": "^3.6.7"
   },
   "devDependencies": {
     "@types/express": "^5.0.3",

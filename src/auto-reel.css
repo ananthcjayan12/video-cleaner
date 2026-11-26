@@ -73,3 +73,16 @@
 .pkgFrames button.on { border-color: #7fe3d6; }
 .pkgFrames img { display: block; width: 100%; aspect-ratio: 9 / 16; object-fit: cover; }
 .pkgMessage { color: #86efac; margin: 0; }
+
+/* Accounts (owner) and costs */
+.costLine { display: block; color: #9aa3b2; font-size: 13px; margin: 6px 0; }
+.autoCredits { margin: 4px 0 10px; color: #7fe3d6; font-weight: 600; }
+.accounts { display: grid; gap: 14px; }
+.accountNew, .accountRow { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; }
+.accountNew label, .accountRow label { display: grid; gap: 4px; flex: 1 1 180px; font-size: 13px; }
+.accountCard { border: 1px solid #262b36; border-radius: 14px; padding: 14px; display: grid; gap: 8px; }
+.accountCard header { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; align-items: center; }
+.accountProfile { font-size: 12px; padding: 3px 9px; border-radius: 999px; border: 1px solid #2f3542; }
+.accountProfile.api { border-color: #7fe3d6; color: #7fe3d6; }
+.accountMembers { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.accountMembers li { display: flex; justify-content: space-between; align-items: center; gap: 8px; }

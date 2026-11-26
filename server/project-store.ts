@@ -35,6 +35,10 @@ export type ProjectClip = {
 
 export type Project = {
   id: string;
+  /** The account this reel belongs to (workspaces.json); missing means the owner's Personal account. */
+  workspaceId?: string;
+  /** When the owner marked the reel as posted on Instagram (My reels → Posted). */
+  postedAt?: string;
   name: string;
   createdAt: string;
   updatedAt: string;
@@ -259,6 +263,8 @@ export async function loadProjectDirectory(workDir: string): Promise<Project | n
     transcript: raw.transcript,
     edl: raw.edl,
     media: raw.media,
+    workspaceId: typeof raw.workspaceId === 'string' && raw.workspaceId ? raw.workspaceId : undefined,
+    postedAt: typeof raw.postedAt === 'string' ? raw.postedAt : undefined,
   };
   syncProjectTimeline(project);
 

@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { ImageProvider, ImageProviderConfig } from './broll.js';
+import { recordUsage } from './usage.js';
 import { metaVisualGuidelinesPrompt } from './meta-guidelines.js';
 
 export type ThumbnailReference = { id: string; name: string; file: string; bytes: number };
@@ -180,13 +181,14 @@ async function generateWithGemini(prompt: string, references: ThumbnailReference
     body: JSON.stringify({
       model,
       input: [{ type: 'text', text: prompt }, ...images],
-      response_format: { type: 'image', mime_type: 'image/png', aspect_ratio: '9:16', image_size: '2K' },
+      response_format: { type: 'image', mime_type: 'image/jpeg', aspect_ratio: '9:16', image_size: '2K' }, // the image API only accepts JPEG
     }),
   });
   if (!response.ok) throw new Error(`Gemini thumbnail generation failed: ${response.status} ${await response.text()}`);
   const encoded = findBase64Image(await response.json());
   if (!encoded) throw new Error('Gemini thumbnail generation returned no image data');
   await fs.writeFile(outputPath, Buffer.from(encoded, 'base64'));
+  await recordUsage({ kind: 'image', provider: 'gemini', model, images: 1, task: 'thumbnail' });
   return model;
 }
 

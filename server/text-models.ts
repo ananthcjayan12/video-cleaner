@@ -1,12 +1,15 @@
 import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import Anthropic from '@anthropic-ai/sdk';
+import { assertTextEngineAllowed, estimateTokens, recordUsage } from './usage.js';
 
-export type TextProvider = 'codex-cli' | 'claude-cli' | 'agy-cli' | 'gemini' | 'openai';
+export type TextProvider = 'codex-cli' | 'claude-cli' | 'agy-cli' | 'gemini' | 'openai' | 'anthropic';
+export const TEXT_PROVIDERS: TextProvider[] = ['codex-cli', 'claude-cli', 'agy-cli', 'gemini', 'openai', 'anthropic'];
 /** effort: reasoning effort passed to the Claude CLI (--effort) or Codex (model_reasoning_effort), like story-reels. */
 export type TextModelChoice = { provider: TextProvider; model: string; effort?: string };
 export type TextModelConfig = {
-  codexBin?: string; claudeBin?: string; agyBin?: string; openAiApiKey?: string; geminiApiKey?: string;
+  codexBin?: string; claudeBin?: string; agyBin?: string; openAiApiKey?: string; geminiApiKey?: string; anthropicApiKey?: string;
 };
 export type ModelOption = { id: string; label: string };
 
@@ -146,6 +149,7 @@ export async function generateStructuredText(options: {
   signal?: AbortSignal;
 }): Promise<unknown> {
   const { choice, config, workDir, schema, prompt } = options;
+  assertTextEngineAllowed(choice.provider);
   const model = choice.model.trim();
   const images = options.images ?? [];
   const imageNote = images.length ? '\n\nREFERENCE IMAGE FILES (look at every one before answering):\n' + images.map(file => '- ' + file).join('\n') : '';
@@ -161,7 +165,9 @@ export async function generateStructuredText(options: {
     for (const image of images) args.push('--image', image);
     args.push('--output-schema', schemaFile, '--output-last-message', outputFile, '-');
     await command(config.codexBin, args, jsonPrompt, workDir, undefined, options.signal);
-    return parseModelJson(await fs.readFile(outputFile, 'utf8'));
+    const output = await fs.readFile(outputFile, 'utf8');
+    await recordUsage({ kind: 'text', provider: choice.provider, model: model || 'codex default', inputTokens: estimateTokens(jsonPrompt) + images.length * 1600, outputTokens: estimateTokens(output), estimated: true });
+    return parseModelJson(output);
   }
   if (choice.provider === 'claude-cli') {
     if (!config.claudeBin) throw new Error('Claude CLI was not found.');
@@ -170,7 +176,11 @@ export async function generateStructuredText(options: {
     if (choice.effort) args.push('--effort', choice.effort);
     const envelope = parseModelJson(await command(config.claudeBin, args, jsonPrompt, workDir, undefined, options.signal)) as {
       is_error?: boolean; result?: string; structured_output?: unknown;
+      usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number };
     };
+    const reported = envelope?.usage;
+    await recordUsage(reported ? { kind: 'text', provider: choice.provider, model: model || 'claude default', inputTokens: reported.input_tokens, outputTokens: reported.output_tokens, cacheReadTokens: reported.cache_read_input_tokens, cacheWriteTokens: reported.cache_creation_input_tokens }
+      : { kind: 'text', provider: choice.provider, model: model || 'claude default', inputTokens: estimateTokens(jsonPrompt), outputTokens: estimateTokens(JSON.stringify(envelope?.structured_output ?? envelope?.result ?? '')), estimated: true });
     if (envelope?.is_error) throw new Error('Claude CLI: ' + (envelope.result || 'Generation failed.'));
     const parsed = envelope?.structured_output != null ? envelope.structured_output : parseModelJson(envelope?.result || '');
     await fs.writeFile(path.join(workDir, options.outputName + '.json'), JSON.stringify(parsed, null, 2));
@@ -204,6 +214,7 @@ export async function generateStructuredText(options: {
         ? result.structured_output
         : parseModelJson(result.response || '');
       await fs.writeFile(path.join(workDir, options.outputName + '.json'), JSON.stringify(parsed, null, 2));
+      await recordUsage({ kind: 'text', provider: choice.provider, model: model || 'agy default', inputTokens: estimateTokens(agyPrompt), outputTokens: estimateTokens(JSON.stringify(parsed)), estimated: true });
       await writeGenerationLog(workDir, options.outputName, {
         timestamp: new Date().toISOString(), provider: choice.provider, model: model || '(AGY default)', status: 'success',
         durationMs: Date.now() - startedAt.getTime(), conversationId: result.conversation_id, promptCharacters: agyPrompt.length,
@@ -222,6 +233,7 @@ export async function generateStructuredText(options: {
       throw new Error(`${message}${logPath ? ` Diagnostic log: ${logPath}` : ''}`);
     }
   }
+  if (choice.provider === 'anthropic') return generateWithAnthropic({ ...options, model: model || DEFAULT_ANTHROPIC_MODEL, jsonPrompt, images });
   if (!model) throw new Error('Choose a model for ' + choice.provider + ' text generation.');
   if (choice.provider === 'openai') {
     if (!config.openAiApiKey) throw new Error('OpenAI API key is missing.');
@@ -232,6 +244,7 @@ export async function generateStructuredText(options: {
     });
     const body = await response.json() as any;
     if (!response.ok) throw new Error('OpenAI: ' + (body.error?.message || response.status));
+    await recordUsage({ kind: 'text', provider: 'openai', model, inputTokens: body.usage?.prompt_tokens, outputTokens: body.usage?.completion_tokens });
     return parseModelJson(body.choices?.[0]?.message?.content || '');
   }
   if (!config.geminiApiKey) throw new Error('Gemini API key is missing.');
@@ -242,5 +255,52 @@ export async function generateStructuredText(options: {
   });
   const body = await response.json() as any;
   if (!response.ok) throw new Error('Gemini: ' + (body.error?.message || response.status));
+  await recordUsage({ kind: 'text', provider: 'gemini', model, inputTokens: body.usageMetadata?.promptTokenCount, outputTokens: (body.usageMetadata?.candidatesTokenCount ?? 0) + (body.usageMetadata?.thoughtsTokenCount ?? 0) });
   return parseModelJson((body.candidates?.[0]?.content?.parts ?? []).map((part: { text?: string }) => part.text || '').join(''));
+}
+
+export const DEFAULT_ANTHROPIC_MODEL = 'claude-opus-5-5';
+const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+const CLAUDE_IMAGE_TYPES: Record<string, 'image/png' | 'image/jpeg' | 'image/webp'> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp' };
+
+/**
+ * Claude API (paid key, for "api" accounts). Structured output through output_config.format with the task's JSON
+ * schema; if the API refuses a schema feature, the request is repeated with the schema only in the prompt.
+ * Server-side fallbacks keep a reel going if the main model declines a request.
+ */
+async function generateWithAnthropic(options: {
+  choice: TextModelChoice; config: TextModelConfig; workDir: string; schema: Record<string, unknown>; outputName: string;
+  model: string; jsonPrompt: string; images: string[]; signal?: AbortSignal;
+}): Promise<unknown> {
+  if (!options.config.anthropicApiKey) throw new Error('Claude API key is missing (Settings → Claude API key).');
+  const client = new Anthropic({ apiKey: options.config.anthropicApiKey });
+  const effort = EFFORTS.find((value) => value === options.choice.effort) ?? 'medium';
+  const content: Anthropic.Beta.BetaContentBlockParam[] = [
+    ...await Promise.all(options.images.map(async (file) => ({
+      type: 'image' as const,
+      source: { type: 'base64' as const, media_type: CLAUDE_IMAGE_TYPES[path.extname(file).toLowerCase()] ?? 'image/jpeg', data: (await fs.readFile(file)).toString('base64') },
+    }))),
+    { type: 'text', text: options.jsonPrompt },
+  ];
+  const request = (withSchema: boolean) => client.beta.messages.stream({
+    model: options.model, max_tokens: 32000,
+    betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default',
+    output_config: withSchema ? { effort, format: { type: 'json_schema', schema: options.schema } } : { effort },
+    messages: [{ role: 'user', content }],
+  }, { signal: options.signal }).finalMessage();
+  let message: Anthropic.Beta.BetaMessage;
+  try { message = await request(true); }
+  catch (error) {
+    // Some task schemas use JSON-schema features structured outputs does not accept; the prompt already carries the schema.
+    if (!(error instanceof Anthropic.BadRequestError) || !/schema|format/i.test(error.message)) throw error;
+    message = await request(false);
+  }
+  const usage = message.usage;
+  await recordUsage({ kind: 'text', provider: 'anthropic', model: message.model || options.model, inputTokens: usage.input_tokens, outputTokens: usage.output_tokens, cacheReadTokens: usage.cache_read_input_tokens ?? 0, cacheWriteTokens: usage.cache_creation_input_tokens ?? 0 });
+  if (message.stop_reason === 'refusal') throw new Error('Claude declined this request. Edit the transcript or notes and try again.');
+  if (message.stop_reason === 'max_tokens') throw new Error('Claude ran out of room before finishing the answer.');
+  const text = message.content.flatMap((block) => block.type === 'text' ? [block.text] : []).join('');
+  const parsed = parseModelJson(text);
+  await fs.writeFile(path.join(options.workDir, options.outputName + '.json'), JSON.stringify(parsed, null, 2));
+  return parsed;
 }

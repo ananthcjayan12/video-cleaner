@@ -77,19 +77,24 @@ export class LoginLimiter {
 
 export const LOGIN_PAGE = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#0f1115"><title>Video Cleaner · Log in</title>
+<meta name="theme-color" content="#F5F7F6"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="PractiReel">
+<link rel="manifest" href="/manifest.webmanifest"><link rel="apple-touch-icon" href="/apple-touch-icon.png"><link rel="icon" type="image/png" href="/icons/icon-192.png">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;800&display=swap">
+<title>PractiReel · Log in</title>
 <style>
-:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;min-height:100dvh;display:grid;place-items:center;padding:24px 16px;
-background:#0f1115;color:#f3f4f6;font:16px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
-form{width:100%;max-width:380px;background:#171a21;border:1px solid #262b36;border-radius:20px;padding:28px 22px;box-shadow:0 20px 60px rgba(0,0,0,.35)}
-h1{margin:0 0 4px;font-size:22px}p{margin:0 0 22px;color:#9aa3b2;font-size:14px}
-label{display:block;font-size:13px;color:#c4cad4;margin:14px 0 6px}
-input{width:100%;font-size:17px;padding:14px 14px;border-radius:12px;border:1px solid #2f3542;background:#0f1115;color:#fff;outline:none}
-input:focus{border-color:#7fe3d6;box-shadow:0 0 0 3px rgba(127,227,214,.18)}
-button{margin-top:22px;width:100%;font-size:17px;font-weight:600;padding:15px;border:0;border-radius:12px;background:#7fe3d6;color:#0b1312}
-button:disabled{opacity:.6}.error{color:#ff8a80;font-size:14px;min-height:20px;margin-top:12px}
+:root{color-scheme:light}*{box-sizing:border-box}body{margin:0;min-height:100dvh;display:grid;place-items:center;padding:24px 16px;
+background:#F5F7F6;color:#0F2A2E;font:16px/1.5 "Plus Jakarta Sans",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+form{width:100%;max-width:400px;background:#fff;border-radius:24px;padding:32px 24px;box-shadow:0 18px 50px -20px rgba(15,42,46,.25)}
+.brand{display:flex;align-items:center;gap:10px;font-weight:800;font-size:20px;margin-bottom:22px}.brand img{width:40px;height:40px;border-radius:11px}
+h1{margin:0 0 6px;font-size:26px;line-height:1.2;font-weight:800;letter-spacing:-.01em}p{margin:0 0 22px;color:#5B7175;font-size:15px}
+label{display:block;font-size:14px;font-weight:600;margin:16px 0 6px}
+input{width:100%;font:inherit;font-size:17px;padding:14px;border-radius:14px;border:1.5px solid #D6E0DE;background:#fff;color:#0F2A2E;outline:none}
+input:focus{border-color:#0E8A7D;box-shadow:0 0 0 4px rgba(14,138,125,.15)}
+button{margin-top:24px;width:100%;font:inherit;font-size:17px;font-weight:700;min-height:54px;border:0;border-radius:14px;background:#0E8A7D;color:#fff}
+button:disabled{opacity:.6}.error{color:#B42318;font-size:14px;min-height:20px;margin-top:12px}
 </style></head><body>
-<form id="f" autocomplete="on"><h1>Video Cleaner</h1><p>Log in to continue.</p>
+<form id="f" autocomplete="on"><div class="brand"><img src="/icons/icon-192.png" alt="">PractiReel</div>
+<h1>Your reels, made in minutes</h1><p>Record on your phone. We cut, caption and design it.</p>
 <label for="u">Username</label><input id="u" name="username" autocomplete="username" autocapitalize="none" autocorrect="off" required>
 <label for="p">Password</label><input id="p" name="password" type="password" autocomplete="current-password" required>
 <button id="b" type="submit">Log in</button><div class="error" id="e" role="alert"></div></form>
@@ -97,6 +102,6 @@ button:disabled{opacity:.6}.error{color:#ff8a80;font-size:14px;min-height:20px;m
 const f=document.getElementById('f'),b=document.getElementById('b'),e=document.getElementById('e');
 f.addEventListener('submit',async(ev)=>{ev.preventDefault();b.disabled=true;e.textContent='';
 try{const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:f.username.value,password:f.password.value})});
-const d=await r.json().catch(()=>({}));if(r.ok){location.replace(new URLSearchParams(location.search).get('next')||'/');return}e.textContent=d.error||'Login failed';}
+const d=await r.json().catch(()=>({}));if(r.ok){const n=new URLSearchParams(location.search).get('next')||'/';location.replace(n.startsWith('/')&&!n.startsWith('//')?n:'/');return}e.textContent=d.error||'Login failed';}
 catch{e.textContent='Network problem, try again';}b.disabled=false;});
 </script></body></html>`;

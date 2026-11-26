@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { api, isRemote, type AutoJob, type AutoOptions, type Project, type ReelPackage } from './api';
+import { api, isRemote, type AutoJob, type AutoOptions, type Me, type Project, type ReelPackage } from './api';
+import { CostLine } from './Accounts';
 import { startDeviceUpload, VIDEO_ACCEPT } from './device-files';
 import { TranscriptReview } from './TranscriptReview';
 import './auto-reel.css';
@@ -8,9 +9,14 @@ const LENGTHS: Array<{ label: string; value?: number }> = [{ label: 'Auto' }, { 
 const STORE = 'video-cleaner:autoProjectId';
 
 /** The simple path: pick a video, everything else runs on its own until the preview. */
-export function AutoReelLauncher({ busy, onStarted, onError }: { busy: boolean; onStarted: (projectId: string) => void; onError: (message: string) => void }) {
+export function AutoReelLauncher({ me, busy, onStarted, onError }: { me?: Me | null; busy: boolean; onStarted: (projectId: string) => void; onError: (message: string) => void }) {
   const [target, setTarget] = useState<number | undefined>(undefined);
   const [images, setImages] = useState<AutoOptions['imageProvider']>('gemini');
+  // The owner can make a reel for any account (to test a customer's API setup); a customer always uses their own.
+  const [workspaceId, setWorkspaceId] = useState('personal');
+  const account = me?.role === 'member' ? me.workspace : me?.workspaces?.find((w) => w.id === workspaceId);
+  const apiOnly = account?.effectiveProfile === 'api';
+  const left = account?.reelsPerMonth ? Math.max(0, account.reelsPerMonth - account.reelsThisMonth) : undefined;
   const [upload, setUpload] = useState('');
   const [review, setReview] = useState(true);
   const [thumbnail, setThumbnail] = useState(true);
@@ -22,8 +28,8 @@ export function AutoReelLauncher({ busy, onStarted, onError }: { busy: boolean; 
       const uploadIds = deviceUpload ? await deviceUpload(setUpload) : undefined;
       if (deviceUpload && !uploadIds) { setUpload(''); return; }
       setUpload('Creating project…');
-      const project = await api.selectProject(uploadIds ?? undefined, true);
-      await api.startAuto(project.id, { targetDurationSec: target, imageProvider: images, review, thumbnail, postCaption });
+      const project = await api.selectProject(uploadIds ?? undefined, true, me?.role === 'admin' ? workspaceId : undefined);
+      await api.startAuto(project.id, { targetDurationSec: target, imageProvider: apiOnly ? 'gemini' : images, review, thumbnail, postCaption });
       try { window.localStorage.setItem(STORE, project.id); } catch { /* private mode */ }
       setUpload(''); onStarted(project.id);
     } catch (error) { setUpload(''); onError(error instanceof Error ? error.message : String(error)); }
@@ -33,11 +39,15 @@ export function AutoReelLauncher({ busy, onStarted, onError }: { busy: boolean; 
       <span className="autoKicker">One tap</span>
       <h2>Make my reel</h2>
       <p>Upload a talking video, or several clips of the same reel (they play in recording order). It is cleaned, cut, captioned and given B-roll automatically. You check the cleaned talk, then get a preview to download.</p>
+      {me?.role === 'admin' && (me.workspaces?.length ?? 0) > 1 && <div className="autoChoice"><span>For account</span><div>{me.workspaces!.map((w) => (
+        <button key={w.id} type="button" className={workspaceId === w.id ? 'on' : ''} onClick={() => setWorkspaceId(w.id)}>{w.name}</button>
+      ))}</div></div>}
+      {left !== undefined && <p className="autoCredits">{left} of {account!.reelsPerMonth} reels left this month</p>}
       <div className="autoChoice"><span>Length</span><div>{LENGTHS.map((option) => <button key={option.label} type="button" className={target === option.value ? 'on' : ''} onClick={() => setTarget(option.value)}>{option.label}</button>)}</div></div>
-      <div className="autoChoice"><span>B-roll images</span><div>
+      {!apiOnly && <div className="autoChoice"><span>B-roll images</span><div>
         <button type="button" className={images === 'gemini' ? 'on' : ''} onClick={() => setImages('gemini')}>Gemini</button>
         <button type="button" className={images === 'chatgpt' ? 'on' : ''} onClick={() => setImages('chatgpt')}>ChatGPT</button>
-      </div></div>
+      </div></div>}
       <div className="autoChoice"><span>Check the transcript before the reel is made</span><div>
         <button type="button" className={review ? 'on' : ''} onClick={() => setReview(true)}>Yes, let me check</button>
         <button type="button" className={!review ? 'on' : ''} onClick={() => setReview(false)}>No, fully automatic</button>
@@ -46,7 +56,7 @@ export function AutoReelLauncher({ busy, onStarted, onError }: { busy: boolean; 
         <button type="button" className={thumbnail ? 'on' : ''} aria-pressed={thumbnail} onClick={() => setThumbnail(!thumbnail)}>Thumbnail</button>
         <button type="button" className={postCaption ? 'on' : ''} aria-pressed={postCaption} onClick={() => setPostCaption(!postCaption)}>Post caption</button>
       </div></div>
-      <button className="primary autoStart" type="button" disabled={busy || !!upload} onClick={() => void start()}>{upload || 'Choose video(s) & start'}</button>
+      <button className="primary autoStart" type="button" disabled={busy || !!upload || left === 0} onClick={() => void start()}>{upload || (left === 0 ? 'No reels left this month' : 'Choose video(s) & start')}</button>
     </section>
   );
 }
@@ -103,6 +113,7 @@ export function AutoReelProgress({ projectId, onOpenEditor, onClose }: { project
           </li>
         ))}
       </ol>
+      <CostLine cost={job?.cost} />
       {job?.error && <p className="autoError">{job.error}</p>}
       {error && <p className="autoError">{error}</p>}
       <div className="autoActions">

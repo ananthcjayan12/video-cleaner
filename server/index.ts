@@ -62,7 +62,12 @@ import { ensurePresenterMatte, mattingSystemStatus, presenterMatteStatus, resolv
 import { exportProjectZip, normalizeProjectExportOptions } from './project-export.js';
 import { buildEditorRender } from './editor-render.js';
 import { formatMetaFinding, metaTextGuidelinesPrompt, scanMetaText } from './meta-guidelines.js';
-import { availableAgyModels, availableCodexModels, generateStructuredText, type TextModelChoice, type TextProvider } from './text-models.js';
+import { availableAgyModels, availableCodexModels, DEFAULT_ANTHROPIC_MODEL, generateStructuredText, TEXT_PROVIDERS, type TextModelChoice, type TextProvider } from './text-models.js';
+import { findClaims } from './claims.js';
+import { nicheValue, weeklyIdeas, IDEAS, NICHES } from './ideas.js';
+import { addSubscriber, notify, removeSubscriber, vapidKeys } from './push.js';
+import { currentProfile, readUsage, recordUsage, runWithUsage, summarizeUsage, usageContext, usageFile, withTask, type EngineProfile } from './usage.js';
+import { addMember, allowedProfiles, createWorkspace, effectiveProfile, loadWorkspaces, memberAuth, memberRoute, normalizeUsername, PERSONAL_WORKSPACE, reelsThisMonth, removeMember, saveWorkspaces, sessionUsername, updateWorkspace, type SessionUser, type Workspace } from './workspaces.js';
 import { verifyAccessJwt } from './access.js';
 import { DEFAULT_PICTURES_ENGINE } from './chatgpt-images.js';
 import { checkCredentials, issueSession, loadAuth, LOGIN_PAGE, LoginLimiter, readCookie, SESSION_COOKIE, SESSION_DAYS, verifySession } from './auth.js';
@@ -99,6 +104,8 @@ dotenv.config({ path: path.resolve('.env') });
 
 type LocalSettings = {
   elevenLabsApiKey?: string; openAiApiKey?: string; geminiApiKey?: string; imageProvider?: ImageProvider;
+  // API engines for customer ("api") accounts.
+  anthropicApiKey?: string; apiTextModel?: string; apiEffort?: string;
   sttProvider?: SttProvider; geminiSttModel?: string;
   // Per-task AI engine like story-reels: provider + model + effort. Pictures = ChatGPT in Chrome.
   cleanEffort?: string; planningEffort?: string; picturesProvider?: 'claude' | 'codex'; picturesModel?: string; picturesEffort?: string;
@@ -129,24 +136,68 @@ let localSettings: LocalSettings = {};
 // Requests from outside this computer (the Cloudflare tunnel) need a login: the app's own username + password session,
 // or (optional) a valid Cloudflare Access token. Local requests are not affected.
 const loginLimiter = new LoginLimiter();
+/**
+ * Who is calling. Requests on this computer are the owner. Remote requests need a session: the owner's login
+ * (auth.json), a customer login (workspaces.json, limited to their own reels), or an optional Cloudflare Access token.
+ */
+async function sessionUser(req: express.Request): Promise<SessionUser | null> {
+  if (!isRemoteRequest(req)) return { username: 'local', role: 'admin' };
+  const token = readCookie(req.headers.cookie, SESSION_COOKIE); const name = sessionUsername(token);
+  const auth = await loadAuth();
+  if (auth && name === auth.username && verifySession(auth, token)) return { username: auth.username, role: 'admin' };
+  if (name) {
+    const member = (await loadWorkspaces()).members.find((candidate) => candidate.username === name);
+    if (member && verifySession(memberAuth(member), token)) return { username: member.username, role: 'member', workspaceId: member.workspaceId };
+  }
+  const teamDomain = localSettings.accessTeamDomain || process.env.CF_ACCESS_TEAM_DOMAIN || '';
+  const aud = localSettings.accessAud || process.env.CF_ACCESS_AUD || '';
+  const jwt = req.header('Cf-Access-Jwt-Assertion');
+  if (jwt && teamDomain && aud) {
+    const allowedEmails = (localSettings.accessAllowedEmails || process.env.CF_ACCESS_ALLOWED_EMAILS || '').split(',').map((e) => e.trim()).filter(Boolean);
+    if (await verifyAccessJwt(jwt, { teamDomain, aud, allowedEmails }).then(() => true, () => false)) return { username: 'cloudflare-access', role: 'admin' };
+  }
+  return null;
+}
+/** Home-screen app files (icon, manifest, service worker) must load before login. */
+const PUBLIC_FILES = /^\/(manifest\.webmanifest|sw\.js|icons\/[a-z0-9._-]+\.png|apple-touch-icon\.png)$/;
+const userOf = (res: express.Response) => res.locals.user as SessionUser;
+const isAdmin = (res: express.Response) => userOf(res)?.role === 'admin';
 app.use((req, res, next) => {
-  if (!isRemoteRequest(req) || req.path === '/login' || req.path === '/api/login') return next();
+  if (req.path === '/login' || req.path === '/api/login' || PUBLIC_FILES.test(req.path)) return next();
   void (async () => {
-    const auth = await loadAuth();
-    if (auth && verifySession(auth, readCookie(req.headers.cookie, SESSION_COOKIE))) return next();
-    const teamDomain = localSettings.accessTeamDomain || process.env.CF_ACCESS_TEAM_DOMAIN || '';
-    const aud = localSettings.accessAud || process.env.CF_ACCESS_AUD || '';
-    const jwt = req.header('Cf-Access-Jwt-Assertion');
-    if (jwt && teamDomain && aud) {
-      const allowedEmails = (localSettings.accessAllowedEmails || process.env.CF_ACCESS_ALLOWED_EMAILS || '').split(',').map((e) => e.trim()).filter(Boolean);
-      if (await verifyAccessJwt(jwt, { teamDomain, aud, allowedEmails }).then(() => true, () => false)) return next();
+    const user = await sessionUser(req);
+    if (!user) {
+      if (!await loadAuth()) return void res.status(403).json({ error: 'Remote login is not set up yet. On the computer, run: node scripts/set-login.mjs' });
+      if (req.path.startsWith('/api/')) return void res.status(401).json({ error: 'Please log in again.', login: true });
+      return void res.redirect(302, `/login?next=${encodeURIComponent(req.originalUrl)}`);
     }
-    if (!auth) return void res.status(403).json({ error: 'Remote login is not set up yet. On the computer, run: node scripts/set-login.mjs' });
-    if (req.path.startsWith('/api/')) return void res.status(401).json({ error: 'Please log in again.', login: true });
-    res.redirect(302, `/login?next=${encodeURIComponent(req.originalUrl)}`);
+    res.locals.user = user;
+    if (user.role === 'member' && req.path.startsWith('/api/')) {
+      const access = memberRoute(req.method, req.path);
+      if (!access.allowed) return void res.status(403).json({ error: 'This is not available for your account.' });
+      if (access.projectId) {
+        const project = projects.get(access.projectId);
+        if (!project || projectWorkspaceId(project) !== user.workspaceId) return void res.status(404).json({ error: 'Reel not found.' });
+      }
+    }
+    next();
   })().catch((error) => res.status(500).json({ error: String(error) }));
 });
+const projectWorkspaceId = (project: Project) => project.workspaceId || PERSONAL_WORKSPACE.id;
+async function workspaceFor(id: string | undefined): Promise<Workspace> {
+  const data = await loadWorkspaces(); return data.workspaces.find((w) => w.id === (id || PERSONAL_WORKSPACE.id)) ?? { ...PERSONAL_WORKSPACE };
+}
+/** Usage file + engine profile for everything that runs for this project (AI calls check the profile themselves). */
+async function projectUsageContext(project: Project) {
+  const settings = await resolvedSettings();
+  return { file: usageFile(project.workDir), profile: effectiveProfile(await workspaceFor(project.workspaceId)), apiTextModel: settings.apiTextModel };
+}
 app.use(express.json({ limit: '1mb' }));
+// Everything that runs for a project (AI calls, pictures, renders) is metered into that project and runs with its account's engines.
+app.use('/api/projects/:id', (req, res, next) => {
+  const project = projects.get(String(req.params.id)); if (!project) return next();
+  projectUsageContext(project).then((context) => runWithUsage(context, next), (error) => res.status(500).json({ error: error instanceof Error ? error.message : String(error) }));
+});
 app.get('/login', (_req, res) => { res.set('Cache-Control', 'no-store').type('html').send(LOGIN_PAGE); });
 app.post('/api/login', (req, res) => {
   void (async () => {
@@ -154,11 +205,13 @@ app.post('/api/login', (req, res) => {
     if (loginLimiter.blocked(client)) return void res.status(429).json({ error: 'Too many attempts. Wait 15 minutes and try again.' });
     const auth = await loadAuth();
     if (!auth) return void res.status(403).json({ error: 'Login is not set up yet. On the computer, run: node scripts/set-login.mjs' });
-    if (!await checkCredentials(auth, String(req.body?.username ?? ''), String(req.body?.password ?? ''))) {
-      loginLimiter.fail(client); return void res.status(401).json({ error: 'Wrong username or password.' });
-    }
+    const username = String(req.body?.username ?? ''); const password = String(req.body?.password ?? '');
+    // The owner first; otherwise a customer login with that username.
+    const member = (await loadWorkspaces()).members.find((candidate) => candidate.username === normalizeUsername(username));
+    const signer = await checkCredentials(auth, username, password) ? auth : member && await checkCredentials(memberAuth(member), username, password) ? memberAuth(member) : null;
+    if (!signer) { loginLimiter.fail(client); return void res.status(401).json({ error: 'Wrong username or password.' }); }
     loginLimiter.clear(client);
-    res.setHeader('Set-Cookie', `${SESSION_COOKIE}=${issueSession(auth)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${SESSION_DAYS * 86400}`);
+    res.setHeader('Set-Cookie', `${SESSION_COOKIE}=${issueSession(signer)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${SESSION_DAYS * 86400}`);
     res.json({ ok: true });
   })().catch((error) => res.status(500).json({ error: String(error) }));
 });
@@ -213,7 +266,7 @@ async function detectBinary(name: string) {
   return '';
 }
 function providerValue(value: unknown): ImageProvider { return ['openai', 'gemini', 'grok-cli', 'codex-cli', 'chatgpt-browser'].includes(String(value)) ? value as ImageProvider : 'gemini'; }
-function textProviderValue(value: unknown): TextProvider { return ['codex-cli', 'claude-cli', 'agy-cli', 'gemini', 'openai'].includes(String(value)) ? value as TextProvider : 'claude-cli'; }
+function textProviderValue(value: unknown): TextProvider { return TEXT_PROVIDERS.includes(value as TextProvider) ? value as TextProvider : 'claude-cli'; }
 function videoProviderValue(value: unknown): VideoProvider { return ['grok-cli', 'google-flow', 'magnific'].includes(String(value)) ? value as VideoProvider : 'grok-cli'; }
 function displayTemplateValue(value: unknown): BrollDisplayTemplate {
   const candidate = String(value || 'full-frame') as BrollDisplayTemplate;
@@ -248,6 +301,9 @@ async function resolvedSettings() {
     elevenLabsApiKey: localSettings.elevenLabsApiKey || process.env.ELEVENLABS_API_KEY || '',
     openAiApiKey: localSettings.openAiApiKey || process.env.OPENAI_API_KEY || '',
     geminiApiKey: localSettings.geminiApiKey || process.env.GEMINI_API_KEY || '',
+    anthropicApiKey: localSettings.anthropicApiKey || process.env.ANTHROPIC_API_KEY || '',
+    apiTextModel: localSettings.apiTextModel || process.env.API_TEXT_MODEL || DEFAULT_ANTHROPIC_MODEL,
+    apiEffort: localSettings.apiEffort || 'medium',
     // Gemini is the default transcriber when a Gemini key exists; ElevenLabs Scribe stays available.
     sttProvider: sttProviderValue(localSettings.sttProvider || process.env.STT_PROVIDER, (localSettings.geminiApiKey || process.env.GEMINI_API_KEY) ? 'gemini' : 'elevenlabs'),
     geminiSttModel: localSettings.geminiSttModel || process.env.GEMINI_STT_MODEL || DEFAULT_GEMINI_STT_MODEL,
@@ -273,6 +329,15 @@ async function resolvedSettings() {
   };
 }
 
+type Settings = Awaited<ReturnType<typeof resolvedSettings>>;
+/**
+ * Text engines for the current account. In-house accounts use the engines chosen in Settings (CLIs on this
+ * computer's subscriptions); API accounts always use the Claude API, whatever Settings say.
+ */
+function textEngines(settings: Settings, profile: EngineProfile = currentProfile()): { clean: TextModelChoice; planning: TextModelChoice } {
+  if (profile === 'api') { const api: TextModelChoice = { provider: 'anthropic', model: settings.apiTextModel, effort: settings.apiEffort }; return { clean: api, planning: api }; }
+  return { clean: { provider: settings.cleanProvider, model: settings.cleanModel, effort: settings.cleanEffort }, planning: { provider: settings.planningProvider, model: settings.planningModel, effort: settings.planningEffort } };
+}
 function picturesEngine(settings: Awaited<ReturnType<typeof resolvedSettings>>) {
   return { provider: settings.picturesProvider, model: settings.picturesModel || undefined, effort: settings.picturesEffort || undefined, claudeBin: settings.claudeBin, codexBin: settings.codexBin };
 }
@@ -328,6 +393,7 @@ async function systemStatus() {
     gflow: { installed: gflowInstalled, authenticated: gflowAuthenticated, path: settings.gflowBin || null, model: settings.gflowVideoModel, profile: settings.gflowProfile || 'default' },
     ffmpeg: { installed: ffmpegInstalled, path: settings.ffmpegBin || null, capabilities }, ffprobe: { installed: ffprobeInstalled, path: settings.ffprobeBin || null },
     elevenLabs: { configured: Boolean(settings.elevenLabsApiKey) }, imageProvider: settings.imageProvider,
+    apiEngines: { anthropic: { configured: Boolean(settings.anthropicApiKey), model: settings.apiTextModel, effort: settings.apiEffort }, gemini: { configured: Boolean(settings.geminiApiKey), imageModel: settings.geminiImageModel }, allowedProfiles: allowedProfiles() },
     transcription: { provider: settings.sttProvider, model: settings.sttProvider === 'gemini' ? settings.geminiSttModel : 'scribe_v2', configured: Boolean(settings.sttProvider === 'gemini' ? settings.geminiApiKey : settings.elevenLabsApiKey) },
     imageProviders: {
       openai: { configured: Boolean(settings.openAiApiKey), model: settings.openAiImageModel }, gemini: { configured: Boolean(settings.geminiApiKey), model: settings.geminiImageModel },
@@ -415,6 +481,13 @@ async function probe(sourcePath: string): Promise<MediaProfile> {
   return { duration: Number(data.format?.duration ?? video.duration ?? 0), size: Number(data.format?.size ?? 0), width: swap ? height : width, height: swap ? width : height, frameRate: parseRate(video.avg_frame_rate || video.r_frame_rate), bitRate: Number(video.bit_rate ?? 0) || undefined, videoCodec: video.codec_name, audioCodec: audio.codec_name, pixelFormat: video.pix_fmt, colorTransfer: video.color_transfer, colorPrimaries: video.color_primaries, colorSpace: video.color_space, colorRange: video.color_range, rotation, hdr: ['smpte2084', 'arib-std-b67'].includes(transfer) || primaries === 'bt2020' };
 }
 configureVideoDurationProbe(async (file) => (await probe(file)).duration);
+/** Browser recordings (Chrome's WebM) carry no length; a lossless remux writes it so every later step knows the duration. */
+async function withDuration(sourcePath: string, media: MediaProfile) {
+  if (media.duration > 0) return { sourcePath, media };
+  const settings = await resolvedSettings(); const fixed = sourcePath.replace(/(\.[a-z0-9]+)?$/i, '.timed.mkv');
+  await run(settings.ffmpegBin, ['-v', 'error', '-y', '-i', sourcePath, '-c', 'copy', fixed]);
+  return { sourcePath: fixed, media: await probe(fixed) };
+}
 
 function rotationFilter(rotation?: number) {
   const degrees = ((Math.round(rotation || 0) % 360) + 360) % 360;
@@ -746,7 +819,7 @@ function launchCheckpointExport(options: { projectId: string; command: string; s
     }
   })();
 }
-function route(handler: (req: express.Request, res: express.Response) => Promise<void>) { return (req: express.Request, res: express.Response) => { handler(req, res).catch((error) => res.status(500).json({ error: error instanceof Error ? error.message : String(error) })); }; }
+function route(handler: (req: express.Request, res: express.Response) => Promise<void>) { return (req: express.Request, res: express.Response) => { handler(req, res).catch((error) => res.status(Number(error?.status) || 500).json({ error: error instanceof Error ? error.message : String(error) })); }; }
 
 function clipForRange(project: Project, range: { start: number; end: number }) { const clip = clipAtTimelineTime(project, Math.min(range.end - 0.0001, range.start + 0.0001)); if (!clip || range.end > clip.timelineEnd + 0.001) throw new Error('Render range crosses a source clip boundary'); return clip; }
 function timelineAudioArgs(project: Project, segments: Array<{ start: number; end: number }>, outputPath: string) {
@@ -833,23 +906,25 @@ app.get('/api/projects/:id/exports/:file', route(async (req, res) => {
 app.get('/api/system/status', route(async (_req, res) => { res.json(await systemStatus()); }));
 app.get('/api/models/agy', route(async (_req, res) => { const settings = await resolvedSettings(); res.json({ models: await availableAgyModels(settings.agyBin) }); }));
 app.get('/api/models/codex', route(async (_req, res) => { const settings = await resolvedSettings(); res.json({ models: await availableCodexModels(settings.codexBin) }); }));
-app.get('/api/settings', route(async (_req, res) => { const status = await systemStatus(); res.json({ ...status, overrides: { codexBin: localSettings.codexBin ?? '', claudeBin: localSettings.claudeBin ?? '', agyBin: localSettings.agyBin ?? '', sttProvider: localSettings.sttProvider ?? '', geminiSttModel: localSettings.geminiSttModel ?? '', cleanEffort: localSettings.cleanEffort ?? '', planningEffort: localSettings.planningEffort ?? '', picturesProvider: localSettings.picturesProvider ?? '', picturesModel: localSettings.picturesModel ?? '', picturesEffort: localSettings.picturesEffort ?? '', cleanProvider: localSettings.cleanProvider ?? '', cleanModel: localSettings.cleanModel ?? '', planningProvider: localSettings.planningProvider ?? '', planningModel: localSettings.planningModel ?? '', codexModel: localSettings.codexModel ?? '', grokBin: localSettings.grokBin ?? '', gflowBin: localSettings.gflowBin ?? '', ffmpegBin: localSettings.ffmpegBin ?? '', ffprobeBin: localSettings.ffprobeBin ?? '', projectsDir: localSettings.projectsDir ?? '', imageProvider: localSettings.imageProvider ?? '', openAiImageModel: localSettings.openAiImageModel ?? '', geminiImageModel: localSettings.geminiImageModel ?? '', grokModel: localSettings.grokModel ?? '', grokVideoModel: localSettings.grokVideoModel ?? '', gflowProfile: localSettings.gflowProfile ?? '', gflowVideoModel: localSettings.gflowVideoModel ?? '', magnificVideoModel: localSettings.magnificVideoModel ?? '', magnificVideoEndpoint: localSettings.magnificVideoEndpoint ?? '' } }); }));
+app.get('/api/settings', route(async (_req, res) => { const status = await systemStatus(); res.json({ ...status, overrides: { apiTextModel: localSettings.apiTextModel ?? '', apiEffort: localSettings.apiEffort ?? '', codexBin: localSettings.codexBin ?? '', claudeBin: localSettings.claudeBin ?? '', agyBin: localSettings.agyBin ?? '', sttProvider: localSettings.sttProvider ?? '', geminiSttModel: localSettings.geminiSttModel ?? '', cleanEffort: localSettings.cleanEffort ?? '', planningEffort: localSettings.planningEffort ?? '', picturesProvider: localSettings.picturesProvider ?? '', picturesModel: localSettings.picturesModel ?? '', picturesEffort: localSettings.picturesEffort ?? '', cleanProvider: localSettings.cleanProvider ?? '', cleanModel: localSettings.cleanModel ?? '', planningProvider: localSettings.planningProvider ?? '', planningModel: localSettings.planningModel ?? '', codexModel: localSettings.codexModel ?? '', grokBin: localSettings.grokBin ?? '', gflowBin: localSettings.gflowBin ?? '', ffmpegBin: localSettings.ffmpegBin ?? '', ffprobeBin: localSettings.ffprobeBin ?? '', projectsDir: localSettings.projectsDir ?? '', imageProvider: localSettings.imageProvider ?? '', openAiImageModel: localSettings.openAiImageModel ?? '', geminiImageModel: localSettings.geminiImageModel ?? '', grokModel: localSettings.grokModel ?? '', grokVideoModel: localSettings.grokVideoModel ?? '', gflowProfile: localSettings.gflowProfile ?? '', gflowVideoModel: localSettings.gflowVideoModel ?? '', magnificVideoModel: localSettings.magnificVideoModel ?? '', magnificVideoEndpoint: localSettings.magnificVideoEndpoint ?? '' } }); }));
 app.put('/api/settings', route(async (req, res) => {
   const body = req.body ?? {}; const previousProjectsDir = (await resolvedSettings()).projectsDir;
-  if (typeof body.elevenLabsApiKey === 'string' && body.elevenLabsApiKey.trim()) localSettings.elevenLabsApiKey = body.elevenLabsApiKey.trim(); if (typeof body.openAiApiKey === 'string' && body.openAiApiKey.trim()) localSettings.openAiApiKey = body.openAiApiKey.trim(); if (typeof body.geminiApiKey === 'string' && body.geminiApiKey.trim()) localSettings.geminiApiKey = body.geminiApiKey.trim(); if (typeof body.magnificApiKey === 'string' && body.magnificApiKey.trim()) localSettings.magnificApiKey = body.magnificApiKey.trim(); if (typeof body.imageProvider === 'string') localSettings.imageProvider = providerValue(body.imageProvider);
+  if (typeof body.elevenLabsApiKey === 'string' && body.elevenLabsApiKey.trim()) localSettings.elevenLabsApiKey = body.elevenLabsApiKey.trim(); if (typeof body.openAiApiKey === 'string' && body.openAiApiKey.trim()) localSettings.openAiApiKey = body.openAiApiKey.trim(); if (typeof body.geminiApiKey === 'string' && body.geminiApiKey.trim()) localSettings.geminiApiKey = body.geminiApiKey.trim(); if (typeof body.magnificApiKey === 'string' && body.magnificApiKey.trim()) localSettings.magnificApiKey = body.magnificApiKey.trim(); if (typeof body.anthropicApiKey === 'string' && body.anthropicApiKey.trim()) localSettings.anthropicApiKey = body.anthropicApiKey.trim();
+  if (typeof body.apiEffort === 'string') localSettings.apiEffort = ['low', 'medium', 'high', 'xhigh', 'max'].includes(body.apiEffort) ? body.apiEffort : undefined; if (typeof body.imageProvider === 'string') localSettings.imageProvider = providerValue(body.imageProvider);
   if (typeof body.sttProvider === 'string') localSettings.sttProvider = body.sttProvider ? sttProviderValue(body.sttProvider, 'gemini') : undefined;
   if (typeof body.picturesProvider === 'string') localSettings.picturesProvider = body.picturesProvider === 'codex' ? 'codex' : body.picturesProvider === 'claude' ? 'claude' : undefined;
   if (typeof body.picturesModel === 'string') localSettings.picturesModel = body.picturesModel.trim();
   for (const key of ['cleanEffort', 'planningEffort', 'picturesEffort'] as const) if (typeof body[key] === 'string') localSettings[key] = ['low', 'medium', 'high', 'xhigh', 'max'].includes(body[key]) ? body[key] : undefined;
   if (typeof body.cleanProvider === 'string') localSettings.cleanProvider = textProviderValue(body.cleanProvider);
   if (typeof body.planningProvider === 'string') localSettings.planningProvider = textProviderValue(body.planningProvider);
-  for (const key of ['geminiSttModel', 'cleanModel', 'planningModel', 'codexModel', 'agyBin', 'codexBin', 'claudeBin', 'grokBin', 'gflowBin', 'ffmpegBin', 'ffprobeBin', 'projectsDir', 'openAiImageModel', 'geminiImageModel', 'grokModel', 'grokVideoModel', 'gflowProfile', 'gflowVideoModel', 'magnificVideoModel', 'magnificVideoEndpoint'] as const) if (typeof body[key] === 'string') localSettings[key] = body[key].trim() || undefined;
+  for (const key of ['apiTextModel', 'geminiSttModel', 'cleanModel', 'planningModel', 'codexModel', 'agyBin', 'codexBin', 'claudeBin', 'grokBin', 'gflowBin', 'ffmpegBin', 'ffprobeBin', 'projectsDir', 'openAiImageModel', 'geminiImageModel', 'grokModel', 'grokVideoModel', 'gflowProfile', 'gflowVideoModel', 'magnificVideoModel', 'magnificVideoEndpoint'] as const) if (typeof body[key] === 'string') localSettings[key] = body[key].trim() || undefined;
   capabilityCache.clear(); await saveSettings(); const nextProjectsDir = (await resolvedSettings()).projectsDir; if (nextProjectsDir !== previousProjectsDir) await hydrateProjects(true); res.json(await systemStatus());
 }));
 
 app.get('/api/projects', route(async (_req, res) => {
-  await hydrateProjects(true);
-  const summaries = await Promise.all([...projects.values()].map(async (project) => summarizeProject(project, brollPlans.get(project.id))));
+  await hydrateProjects(true); const user = userOf(res);
+  const visible = [...projects.values()].filter((project) => user.role === 'admin' || projectWorkspaceId(project) === user.workspaceId);
+  const summaries = await Promise.all(visible.map(async (project) => ({ ...await summarizeProject(project, brollPlans.get(project.id)), workspaceId: projectWorkspaceId(project), postedAt: project.postedAt, reel: await reelStatus(project) })));
   summaries.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
   res.json(summaries);
 }));
@@ -857,10 +932,13 @@ app.get('/api/projects', route(async (_req, res) => {
 app.post('/api/projects/select', route(async (req, res) => {
   // Auto reels re-render every clip to 1080x1920 with its own colour handling, so clips only need audio there.
   const relaxed = req.body?.auto === true;
-  const sourcePaths = await uploadedOr(req, 'video', () => pickNativeFiles()); if (!sourcePaths.length) return void res.status(400).json({ error: 'No video clips selected' }); const probed = await Promise.all(sourcePaths.map(async (sourcePath) => ({ sourcePath, media: await probe(sourcePath) }))); if (relaxed) { const silent = probed.find((item) => !item.media.audioCodec); if (silent) throw new Error(`${path.basename(silent.sourcePath)} has no audio track.`); } else assertCompatibleClips(probed);
+  const sourcePaths = await uploadedOr(req, 'video', () => pickNativeFiles()); if (!sourcePaths.length) return void res.status(400).json({ error: 'No video clips selected' }); const probed = await Promise.all(sourcePaths.map(async (sourcePath) => withDuration(sourcePath, await probe(sourcePath)))); if (relaxed) { const silent = probed.find((item) => !item.media.audioCodec); if (silent) throw new Error(`${path.basename(silent.sourcePath)} has no audio track.`); } else assertCompatibleClips(probed);
   const settings = await resolvedSettings(); const id = randomUUID(); const workDir = path.join(settings.projectsDir, id); await fs.mkdir(workDir, { recursive: true }); const now = new Date().toISOString(); const firstName = path.basename(sourcePaths[0]);
   const clips: ProjectClip[] = probed.map((item, index) => ({ id: `clip-${String(index + 1).padStart(3, '0')}`, sourcePath: item.sourcePath, sourceName: path.basename(item.sourcePath), media: item.media, timelineStart: 0, timelineEnd: 0 }));
-  const project: Project = { id, name: firstName.replace(/\.[^.]+$/, ''), createdAt: now, updatedAt: now, sourcePath: sourcePaths[0], sourceName: firstName, clips, workDir, media: { ...probed[0].media } }; syncProjectTimeline(project);
+  // A customer's reels always go to their own account; the owner can make one for any account (default: Personal).
+  const user = userOf(res); const requestedWorkspace = typeof req.body?.workspaceId === 'string' ? req.body.workspaceId : '';
+  const workspaceId = user.role === 'member' ? user.workspaceId! : (await loadWorkspaces()).workspaces.some((w) => w.id === requestedWorkspace) ? requestedWorkspace : PERSONAL_WORKSPACE.id;
+  const project: Project = { id, name: firstName.replace(/\.[^.]+$/, ''), createdAt: now, updatedAt: now, sourcePath: sourcePaths[0], sourceName: firstName, clips, workDir, media: { ...probed[0].media }, workspaceId }; syncProjectTimeline(project);
   projects.set(id, project); await saveProject(project, false); res.json(await summarizeProject(project, null));
 }));
 
@@ -983,7 +1061,7 @@ async function cleanProject(project: Project, intensity: ReturnType<typeof clean
   const settings = await resolvedSettings();
   if (!project.transcript) await transcribeProject(project);
   const words = project.transcript!.words;
-  const choice: TextModelChoice = { provider: settings.cleanProvider, model: settings.cleanModel, effort: settings.cleanEffort };
+  const choice = textEngines(settings).clean;
   await atomicWriteJson(path.join(project.workDir, 'edl.schema.json'), EDL_SCHEMA);
   let edl = validateEdl(words, await generateStructuredText({ choice, config: settings, workDir: project.workDir, prompt: buildCleanPrompt(words, intensity, target, undefined, owner), schema: EDL_SCHEMA, outputName: 'clean-edl' }));
   const feedback = targetFeedback(keptDuration(words, edl.keepRanges), target);
@@ -1382,6 +1460,125 @@ async function persistAutoJob(project: Project, job: AutoJob) {
   await fs.mkdir(path.dirname(autoJobFile(project)), { recursive: true });
   await atomicWriteJson(autoJobFile(project), { ...rest, hadReview: Boolean(review) }).catch(() => undefined);
 }
+/** What the reel list shows for each reel: state, the step it is on, and the cover once it exists. */
+async function reelStatus(project: Project) {
+  const job = autoJobs.get(project.id) ?? await fs.readFile(autoJobFile(project), 'utf8').then((text) => JSON.parse(text) as AutoJob).catch(() => null);
+  if (!job) return null;
+  const current = job.stages?.find((item) => item.state === 'running');
+  const interrupted = !autoJobs.has(project.id) && (job.state === 'running' || job.state === 'review');
+  return { state: interrupted ? 'failed' : job.state, step: current?.label, queuePosition: job.queuePosition, finishedAt: job.finishedAt, coverUrl: job.package?.thumbnailUrl, previewUrl: job.previewUrl };
+}
+/** Customers do not see costs. */
+function jobView(res: express.Response, job: AutoJob): AutoJob { if (isAdmin(res)) return job; const { cost: _cost, ...rest } = job; return rest; }
+async function finishedAtFor(project: Project) {
+  const job = autoJobs.get(project.id) ?? await fs.readFile(autoJobFile(project), 'utf8').then((text) => JSON.parse(text) as AutoJob).catch(() => null);
+  return job?.state === 'completed' ? job.finishedAt : undefined;
+}
+async function workspaceReelsThisMonth(workspaceId: string) {
+  const owned = [...projects.values()].filter((project) => projectWorkspaceId(project) === workspaceId);
+  return reelsThisMonth(await Promise.all(owned.map(finishedAtFor)));
+}
+async function workspaceCostThisMonth(workspaceId: string) {
+  const start = new Date(); start.setDate(1); start.setHours(0, 0, 0, 0);
+  const owned = [...projects.values()].filter((project) => projectWorkspaceId(project) === workspaceId);
+  const entries = (await Promise.all(owned.map((project) => readUsage(usageFile(project.workDir))))).flat().filter((entry) => Date.parse(entry.at) >= start.getTime());
+  return summarizeUsage(entries);
+}
+const workspaceView = async (workspace: Workspace) => ({ ...workspace, effectiveProfile: (() => { try { return effectiveProfile(workspace); } catch { return null; } })(), reelsThisMonth: await workspaceReelsThisMonth(workspace.id) });
+
+// ---- Accounts: who am I, and (owner only) the accounts, their engines, logins and monthly use.
+app.get('/api/me', route(async (_req, res) => {
+  const user = userOf(res); const data = await loadWorkspaces();
+  const workspace = user.role === 'member' ? data.workspaces.find((w) => w.id === user.workspaceId) : undefined;
+  res.json({ username: user.username, role: user.role, workspace: workspace ? await workspaceView(workspace) : undefined,
+    workspaces: user.role === 'admin' ? await Promise.all(data.workspaces.map(workspaceView)) : undefined, allowedProfiles: allowedProfiles() });
+}));
+const requireAdmin = (res: express.Response) => { if (!isAdmin(res)) throw Object.assign(new Error('Only the owner can do this.'), { status: 403 }); };
+app.get('/api/admin/workspaces', route(async (_req, res) => {
+  requireAdmin(res); await hydrateProjects(); const data = await loadWorkspaces();
+  res.json({ allowedProfiles: allowedProfiles(), workspaces: await Promise.all(data.workspaces.map(async (workspace) => ({
+    ...await workspaceView(workspace), members: data.members.filter((m) => m.workspaceId === workspace.id).map((m) => ({ username: m.username, createdAt: m.createdAt })),
+    costThisMonth: await workspaceCostThisMonth(workspace.id),
+  }))) });
+}));
+app.post('/api/admin/workspaces', route(async (req, res) => {
+  requireAdmin(res); const data = await loadWorkspaces(); const workspace = createWorkspace(data, req.body ?? {}); await saveWorkspaces(data); res.status(201).json(await workspaceView(workspace));
+}));
+app.put('/api/admin/workspaces/:workspaceId', route(async (req, res) => {
+  requireAdmin(res); const data = await loadWorkspaces(); const workspace = updateWorkspace(data, routeParam(req.params.workspaceId), req.body ?? {}); await saveWorkspaces(data); res.json(await workspaceView(workspace));
+}));
+app.post('/api/admin/workspaces/:workspaceId/members', route(async (req, res) => {
+  requireAdmin(res); const data = await loadWorkspaces();
+  const member = await addMember(data, { username: req.body?.username, password: req.body?.password, workspaceId: routeParam(req.params.workspaceId) }, (await loadAuth())?.username);
+  await saveWorkspaces(data); res.status(201).json({ username: member.username, workspaceId: member.workspaceId });
+}));
+app.delete('/api/admin/members/:username', route(async (req, res) => {
+  requireAdmin(res); const data = await loadWorkspaces(); removeMember(data, routeParam(req.params.username)); await saveWorkspaces(data); res.json({ ok: true });
+}));
+// ---- Ideas for the account's field, phone notifications, "posted" marks.
+app.get('/api/ideas', route(async (_req, res) => {
+  const user = userOf(res); const workspace = await workspaceFor(user.role === 'member' ? user.workspaceId : PERSONAL_WORKSPACE.id);
+  const niche = nicheValue(workspace.niche);
+  res.json({ niche, label: NICHES.find((n) => n.id === niche)!.label, week: weeklyIdeas(niche, workspace.id), all: IDEAS[niche] });
+}));
+app.get('/api/push/key', route(async (_req, res) => { res.json({ publicKey: (await vapidKeys()).publicKey }); }));
+app.post('/api/push/subscribe', route(async (req, res) => {
+  const user = userOf(res); await addSubscriber({ username: user.username, role: user.role, workspaceId: user.workspaceId, subscription: req.body?.subscription }); res.json({ ok: true });
+}));
+app.post('/api/push/unsubscribe', route(async (req, res) => { await removeSubscriber(String(req.body?.endpoint ?? '')); res.json({ ok: true }); }));
+app.post('/api/projects/:id/posted', route(async (req, res) => {
+  const project = getProject(routeParam(req.params.id)); project.postedAt = req.body?.posted === false ? undefined : new Date().toISOString();
+  await saveProject(project, false); res.json({ postedAt: project.postedAt ?? null });
+}));
+app.get('/api/projects/:id/usage', route(async (req, res) => {
+  requireAdmin(res); const project = getProject(routeParam(req.params.id)); const entries = await readUsage(usageFile(project.workDir));
+  res.json({ summary: summarizeUsage(entries), entries });
+}));
+
+/** One render at a time on this machine (4 cores); the rest wait in order and see their place in line. */
+class RenderQueue {
+  private busy = false; private waiting: Array<{ go: () => void; onPosition: (ahead: number) => void }> = [];
+  async acquire(onPosition: (ahead: number) => void, stopped: () => boolean): Promise<() => void> {
+    if (this.busy) {
+      await new Promise<void>((resolve, reject) => {
+        const entry = { go: resolve, onPosition }; this.waiting.push(entry); this.update();
+        const timer = setInterval(() => { if (stopped()) { clearInterval(timer); this.waiting = this.waiting.filter((w) => w !== entry); this.update(); reject(new Error('Stopped')); } }, 1000);
+        entry.go = () => { clearInterval(timer); resolve(); };
+      });
+    }
+    this.busy = true; onPosition(0);
+    let released = false;
+    return () => { if (released) return; released = true; this.busy = false; const next = this.waiting.shift(); this.update(); next?.go(); };
+  }
+  private update() { this.waiting.forEach((entry, index) => entry.onPosition(index + 1)); }
+}
+const renderQueue = new RenderQueue();
+
+/** Run (or resume) a reel in its account's context, and tell the phone how it ended. */
+function startAutoRun(project: Project, job: AutoJob, context: Awaited<ReturnType<typeof projectUsageContext>>) {
+  autoJobs.set(project.id, job);
+  void runWithUsage(context, () => runAutoReel(project, job)).then(() => { job.state = 'completed'; }).catch((error) => { job.state = job.stopRequested ? 'stopped' : 'failed'; job.error = error instanceof Error ? error.message : String(error); })
+    .finally(async () => {
+      job.finishedAt = Date.now(); job.queuePosition = undefined; job.cost = await reelCost(project).catch(() => undefined); void persistAutoJob(project, job);
+      const workspaceId = projectWorkspaceId(project); const url = `/#reel-${project.id}`;
+      if (job.state === 'completed') void notify(workspaceId, { title: 'Your reel is ready', body: `${project.name}: save it and post.`, url, tag: `reel-${project.id}` });
+      else if (job.state === 'failed') void notify(workspaceId, { title: 'Your reel stopped', body: `${project.name}: tap to see what happened. No reel was used.`, url, tag: `reel-${project.id}` }, true);
+    });
+}
+/** After a restart: carry on with reels that were mid-way (finished steps are not redone). */
+async function resumeAutoJobs() {
+  for (const project of projects.values()) {
+    const saved = await fs.readFile(autoJobFile(project), 'utf8').then((text) => JSON.parse(text) as AutoJob & { hadReview?: boolean }).catch(() => null);
+    if (!saved || (saved.state !== 'running' && saved.state !== 'review') || saved.stopRequested) continue;
+    for (const item of saved.stages) if (item.state === 'running' || item.state === 'failed') { item.state = 'pending'; item.detail = undefined; }
+    saved.state = 'running'; saved.resumed = true; saved.error = undefined;
+    try { startAutoRun(project, saved, await projectUsageContext(project)); console.log(`Resumed reel ${project.id} (${project.name})`); }
+    catch (error) { console.error(`Could not resume ${project.id}:`, error); }
+  }
+}
+
+const RENDER_STAGES = new Set<AutoStageId>(['edit', 'captions', 'compose']);
+async function reelCost(project: Project) { return summarizeUsage(await readUsage(usageFile(project.workDir))); }
 async function runAutoReel(project: Project, job: AutoJob) {
   const settings = await resolvedSettings();
   if (!settings.ffmpegBin) throw new Error('FFmpeg was not found');
@@ -1389,11 +1586,20 @@ async function runAutoReel(project: Project, job: AutoJob) {
   const dir = path.join(project.workDir, 'auto'); await fs.mkdir(dir, { recursive: true });
   const portrait = (project.media.height || 1920) >= (project.media.width || 1080);
   const [W, H] = portrait ? [1080, 1920] : [1920, 1080];
-  const stage = async <T>(id: AutoStageId, work: (note: (detail: string) => void) => Promise<T>): Promise<T | undefined> => {
+  // restore: how to get a finished stage's result back when a reel resumes after a restart.
+  const stage = async <T>(id: AutoStageId, work: (note: (detail: string) => void) => Promise<T>, restore?: () => Promise<T>): Promise<T | undefined> => {
     const item = job.stages.find((s) => s.id === id)!; if (item.state === 'skipped') return undefined;
+    if (item.state === 'done') return restore ? restore() : undefined;
     if (job.stopRequested) throw new Error('Stopped');
+    // This machine renders one reel at a time; others wait in line.
+    const release = RENDER_STAGES.has(id) ? await renderQueue.acquire((ahead) => { job.queuePosition = ahead || undefined; item.detail = ahead ? `Waiting for ${ahead} reel${ahead === 1 ? '' : 's'} ahead to finish…` : undefined; void persistAutoJob(project, job); }, () => Boolean(job.stopRequested)) : () => undefined;
     item.state = 'running'; const started = Date.now(); void persistAutoJob(project, job);
-    try { const result = await work((detail) => { item.detail = detail; }); item.state = 'done'; item.seconds = Math.round((Date.now() - started) / 1000); void persistAutoJob(project, job); return result; }
+    try {
+      const result = await withTask(id, () => work((detail) => { item.detail = detail; })).finally(release);
+      item.state = 'done'; item.seconds = Math.round((Date.now() - started) / 1000);
+      if (RENDER_STAGES.has(id)) await withTask(id, () => recordUsage({ kind: 'render', provider: 'this computer', renderSeconds: (Date.now() - started) / 1000 }));
+      void persistAutoJob(project, job); return result;
+    }
     catch (error) { item.state = 'failed'; item.detail = error instanceof Error ? error.message : String(error); void persistAutoJob(project, job); throw error; }
   };
   await stage('audio', async (note) => { await ensureAnalysisAudio(project); note(`${Math.round(project.media.duration)} s of audio`); });
@@ -1405,7 +1611,9 @@ async function runAutoReel(project: Project, job: AutoJob) {
     for (;;) {
       const keepRanges = project.edl!.keepRanges;
       job.review = { words: words.map(({ id, text, start, end }) => ({ id, text, start, end })), keepRanges, keptSeconds: Math.round(keptDuration(words, keepRanges) * 10) / 10, sourceSeconds: Math.round((words.at(-1)!.end - words[0].start) * 10) / 10 };
+      job.review.flags = findClaims(job.review.words);
       job.state = 'review'; note('Waiting for you to check the transcript'); void persistAutoJob(project, job);
+      void notify(projectWorkspaceId(project), { title: 'Your turn: check the talk', body: `${project.name}: see what stays before the reel is made.`, url: `/#reel-${project.id}`, tag: `reel-${project.id}` });
       const decision = await new Promise<ReviewDecision>((resolve) => reviewWaiters.set(project.id, resolve));
       reviewWaiters.delete(project.id); job.state = 'running';
       if (decision.action === 'stop') { job.review = undefined; throw new Error('Stopped'); }
@@ -1424,22 +1632,23 @@ async function runAutoReel(project: Project, job: AutoJob) {
   let plan: BrollPlan | undefined;
   await stage('broll-plan', async (note) => {
     plan = await createBrollPlan({ textConfig: settings, workDir: project.workDir, words, keepRanges: project.edl?.keepRanges, orientation: portrait ? 'portrait' : 'landscape',
-      settings: { workflowMode: 'cleaned-video', provider: job.options.imageProvider === 'chatgpt' ? 'chatgpt-browser' : 'gemini', planningProvider: settings.planningProvider, planningModel: settings.planningModel, planningEffort: settings.planningEffort,
+      settings: { workflowMode: 'cleaned-video', provider: job.options.imageProvider === 'chatgpt' ? 'chatgpt-browser' : 'gemini', planningProvider: textEngines(settings).planning.provider, planningModel: textEngines(settings).planning.model, planningEffort: textEngines(settings).planning.effort,
         countMode: 'per-minute', imagesPerMinute: 6, minSceneDuration: 2, maxSceneDuration: 4, aspectRatio: portrait ? '9:16' : '16:9' } });
     brollPlans.set(project.id, plan); note(`${plan.scenes.length} moments`);
-  });
+  }, async () => { plan = await loadBrollPlan(project.workDir) ?? undefined; if (plan) brollPlans.set(project.id, plan); });
   await stage('broll-images', async (note) => {
     if (!plan) return;
     const config = { openAiApiKey: settings.openAiApiKey, openAiModel: settings.openAiImageModel, geminiApiKey: settings.geminiApiKey, geminiModel: settings.geminiImageModel, grokBin: settings.grokBin, grokModel: settings.grokModel, grokVideoModel: settings.grokVideoModel, codexBin: settings.codexBin, codexModel: settings.codexModel, claudeBin: settings.claudeBin, ffmpegBin: settings.ffmpegBin, picturesEngine: picturesEngine(settings) };
     if (job.options.imageProvider === 'chatgpt') {
       note(`ChatGPT in Chrome · ${plan.scenes.length} pictures in one chat…`);
       // A failed picture step should not throw away the whole reel: keep going without B-roll and say why.
-      const made = await generateBrollImagesWithChatGpt({ config, workDir: project.workDir, plan, sceneIds: plan.scenes.map((scene) => scene.id), onLine: (text) => note(text) })
+      const made = await generateBrollImagesWithChatGpt({ config, workDir: project.workDir, plan, sceneIds: plan.scenes.filter((scene) => scene.imageStatus !== 'ready').map((scene) => scene.id), onLine: (text) => note(text) })
         .catch((error) => { note(`ChatGPT pictures failed: ${error instanceof Error ? error.message : String(error)}`.slice(0, 400)); return null; });
       if (!made) { brollPlans.set(project.id, plan); return; }
       brollPlans.set(project.id, plan); note(`${made.length} / ${plan.scenes.length} from ChatGPT`); return;
     }
-    let done = 0; let failed = 0; const queue = [...plan.scenes];
+    // After a restart, pictures that were already made are kept.
+    let done = plan.scenes.filter((scene) => scene.imageStatus === 'ready').length; let failed = 0; const queue = plan.scenes.filter((scene) => scene.imageStatus !== 'ready');
     const workers = 3; // Gemini images in parallel (ChatGPT returned above)
     note(`0 / ${queue.length}`);
     await Promise.all(Array.from({ length: Math.min(workers, queue.length) }, async () => {
@@ -1461,7 +1670,7 @@ async function runAutoReel(project: Project, job: AutoJob) {
     const result = await runPython(python, AUTO_EDIT_SCRIPT, [path.join(dir, 'clips.json'), path.join(dir, 'words.json'), path.join(dir, 'keep.json'), dir, String(W), String(H), '-', '1.07']);
     job.finalSeconds = result.duration; note(`${result.clips > 1 ? `${result.clips} clips · ` : ''}${result.cuts} cuts · ${result.shots} shots · ${Math.round(result.duration)} s`);
     return result as { duration: number };
-  });
+  }, async () => ({ duration: job.finalSeconds! }));
   const duration = edited!.duration;
   await run(settings.ffmpegBin, ['-hide_banner', '-v', 'error', '-y', '-i', path.join(dir, 'video.mp4'), '-i', path.join(dir, 'speech-master.wav'), '-map', '0:v', '-map', '1:a', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-shortest', path.join(dir, 'base.mp4')]);
   const captionFile = path.join(dir, 'captions-glass.webm');
@@ -1470,7 +1679,7 @@ async function runAutoReel(project: Project, job: AutoJob) {
     const phrases = buildCaptionPhrases(editedWords, duration);
     await renderCaptionLayer({ phrases, duration, outputPath: captionFile, chromeBin: await detectChromeBin(), workDir: dir, onProgress: (f) => note(`${Math.round(f * 100)}%`) });
     note(`${phrases.length} phrases`); return true;
-  });
+  }, async () => fs.stat(captionFile).then(() => true, () => undefined));
   await stage('compose', async (note) => {
     const editRanges = JSON.parse(await fs.readFile(path.join(dir, 'edit.json'), 'utf8')).ranges as EditRange[];
     const scenes = (plan?.scenes ?? []).map((scene) => ({ id: scene.id, startWordId: scene.startWordId, sourceStart: scene.sourceStart, sourceEnd: scene.sourceEnd, image: scene.imageStatus === 'ready' ? scene.imageFile : undefined }));
@@ -1503,7 +1712,7 @@ async function makeReelPackage(project: Project, job: AutoJob, notes?: string) {
   void persistAutoJob(project, job);
   try {
     const smalls = await extractCandidateFrames(settings.ffmpegBin, path.join(dir, 'video.mp4'), edited.duration, thumbDir(project));
-    const choice: TextModelChoice = { provider: settings.planningProvider, model: settings.planningModel, effort: settings.planningEffort };
+    const choice = textEngines(settings).planning;
     const raw = await generateStructuredText({ choice, config: settings, workDir: project.workDir, prompt: buildPackagePrompt(edited.words.map((word) => word.text).join(' '), smalls, notes), schema: PACKAGE_SCHEMA as unknown as Record<string, unknown>, outputName: 'reel-package', images: smalls });
     Object.assign(job.package, cleanPackage(raw), { frames: smalls.map((_, n) => frameUrl(project, n)) });
     if (job.options.thumbnail !== false) await renderPackageThumbnail(project, job.package);
@@ -1532,23 +1741,30 @@ async function loadAutoJob(project: Project) {
 app.post('/api/projects/:id/auto', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id));
   if (['running', 'review'].includes(autoJobs.get(project.id)?.state ?? '')) return void res.status(409).json({ error: 'Auto reel is already running for this project' });
+  const workspace = await workspaceFor(project.workspaceId); const context = await projectUsageContext(project);
+  if (workspace.reelsPerMonth) {
+    const used = await workspaceReelsThisMonth(workspace.id);
+    if (used >= workspace.reelsPerMonth) return void res.status(409).json({ error: `You have made all ${workspace.reelsPerMonth} reels for this month. New reels open on the 1st.` });
+  }
   const options: AutoOptions = {
-    targetDurationSec: targetDurationValue(req.body?.targetDurationSec), imageProvider: req.body?.imageProvider === 'chatgpt' ? 'chatgpt' : 'gemini',
+    // API accounts make pictures with the Gemini API; ChatGPT in Chrome runs on this computer's subscription.
+    targetDurationSec: targetDurationValue(req.body?.targetDurationSec), imageProvider: req.body?.imageProvider === 'chatgpt' && context.profile === 'in-house' ? 'chatgpt' : 'gemini',
     broll: req.body?.broll !== false, captions: req.body?.captions !== false, review: req.body?.review !== false,
     thumbnail: req.body?.thumbnail !== false, postCaption: req.body?.postCaption !== false,
   };
-  const job = newAutoJob(options); autoJobs.set(project.id, job);
-  void runAutoReel(project, job).then(() => { job.state = 'completed'; }).catch((error) => { job.state = job.stopRequested ? 'stopped' : 'failed'; job.error = error instanceof Error ? error.message : String(error); }).finally(() => { job.finishedAt = Date.now(); void persistAutoJob(project, job); });
-  res.status(202).json(job);
+  const job = newAutoJob(options); job.profile = context.profile;
+  startAutoRun(project, job, context);
+  res.status(202).json(jobView(res, job));
 }));
 app.get('/api/projects/:id/auto', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id)); const live = autoJobs.get(project.id);
-  if (live) return void res.json(live);
+  if (live) { if (isAdmin(res)) live.cost = await reelCost(project); return void res.json(jobView(res, live)); }
   // After a restart the job is read back from disk; one that was mid-way cannot continue.
   const saved = await fs.readFile(autoJobFile(project), 'utf8').then((text) => JSON.parse(text) as AutoJob).catch(() => null);
   if (!saved) return void res.json({ state: 'idle' });
   if (saved.state === 'running' || saved.state === 'review') { saved.state = 'failed'; saved.error = 'Interrupted by a restart of the app. Start the reel again.'; }
-  res.json(saved);
+  if (isAdmin(res)) saved.cost = await reelCost(project);
+  res.json(jobView(res, saved));
 }));
 app.post('/api/projects/:id/auto/review', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id)); const job = autoJobs.get(project.id); const resolve = reviewWaiters.get(project.id);
@@ -1573,8 +1789,9 @@ app.post('/api/projects/:id/auto/package', route(async (req, res) => {
   if (job.package?.state === 'running') return void res.status(409).json({ error: 'Already making the thumbnail.' });
   const notes = typeof req.body?.notes === 'string' ? req.body.notes.trim().slice(0, 2000) : '';
   job.options.thumbnail = true; job.options.postCaption = true;
-  void makeReelPackage(project, job, notes || undefined).catch(() => undefined);
-  res.status(202).json(job);
+  const context = await projectUsageContext(project);
+  void runWithUsage({ ...context, task: 'package' }, () => makeReelPackage(project, job, notes || undefined)).catch(() => undefined);
+  res.status(202).json(jobView(res, job));
 }));
 // Owner edits: new text / another frame -> re-render the cover (no AI).
 app.put('/api/projects/:id/auto/package', route(async (req, res) => {
@@ -1585,12 +1802,12 @@ app.put('/api/projects/:id/auto/package', route(async (req, res) => {
   const coverChanged = edited.frame !== pkg.frame || JSON.stringify([edited.lines, edited.label, edited.badges]) !== JSON.stringify([pkg.lines, pkg.label, pkg.badges]);
   Object.assign(pkg, edited);
   if (coverChanged || !pkg.thumbnailPath) { job.options.thumbnail = true; await renderPackageThumbnail(project, pkg); pkg.state = 'ready'; pkg.error = undefined; }
-  await persistAutoJob(project, job); res.json(job);
+  await persistAutoJob(project, job); res.json(jobView(res, job));
 }));
 app.post('/api/projects/:id/auto/stop', route(async (req, res) => {
   const id = routeParam(req.params.id); const job = autoJobs.get(id);
   if (job && (job.state === 'running' || job.state === 'review')) { job.stopRequested = true; reviewWaiters.get(id)?.({ action: 'stop' }); }
-  res.json(job ?? { state: 'idle' });
+  res.json(job ? jobView(res, job) : { state: 'idle' });
 }));
 
 app.get('/api/projects/:id/export-status', route(async (req, res) => { const id = routeParam(req.params.id); const job = exportJobs.get(id); if (!job) return void res.json({ state: 'idle', progress: 0, outTime: '00:00:00.000000', speed: '', frame: 0 }); const project = projects.get(id); res.json({ ...job, downloadUrl: job.state === 'completed' && project ? downloadUrlFor(project, job.outputPath) : undefined }); }));
@@ -1608,5 +1825,7 @@ for (const project of projects.values()) {
     if (changed) await saveBrollPlan(project.workDir, plan);
   } catch { /* leave the project as-is */ }
 }
+// A second copy of the app (a test on another port) shares the projects folder and must not pick up the live app's reels.
+if (!process.env.VIDEO_CLEANER_NO_RESUME) await resumeAutoJobs();
 if (process.env.NODE_ENV === 'production') { const distDir = path.resolve('dist'); app.use(express.static(distDir)); app.use((_req, res) => res.sendFile(path.join(distDir, 'index.html'))); }
 app.listen(PORT, '127.0.0.1', () => { console.log(`Video Cleaner local server: http://127.0.0.1:${PORT} · ${projects.size} local project${projects.size === 1 ? '' : 's'} restored`); });

@@ -22,6 +22,8 @@ import {
 } from './api';
 import ProjectLibrary from './ProjectLibrary';
 import { AutoReelLauncher, AutoReelProgress, ReelList, savedAutoProjectId } from './AutoReel';
+import { AccountsPanel } from './Accounts';
+import { PhoneApp } from './phone/PhoneApp';
 import { IMAGE_ACCEPT, startDeviceUpload, VIDEO_ACCEPT } from './device-files';
 import LiveEditor from './LiveEditor';
 import MotionGraphics from './MotionGraphics';
@@ -98,12 +100,16 @@ function App() {
   // Only the simple flow is shown. The old step-by-step editor opens with ?advanced=1 (or ?advanced=0 to hide it again).
   const [advanced] = useState(() => { try { const flag = new URLSearchParams(window.location.search).get('advanced'); if (flag !== null) window.localStorage.setItem('video-cleaner:advanced', flag === '1' ? '1' : ''); return window.localStorage.getItem('video-cleaner:advanced') === '1'; } catch { return false; } });
   const [system, setSystem] = useState<SystemStatus | null>(null);
+  // Who is logged in: the owner (everything) or a customer login (only their own reels).
+  const [me, setMe] = useState<import('./api').Me | null>(null);
+  const [accountsOpen, setAccountsOpen] = useState(false);
+  const isMember = me?.role === 'member';
   const [agyModels, setAgyModels] = useState<import('./api').ModelOption[]>([]);
   const [metaBlocked, setMetaBlocked] = useState<string[]>([]);
   const [codexModels, setCodexModels] = useState<import('./api').ModelOption[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsForm, setSettingsForm] = useState({
-    elevenLabsApiKey: '', openAiApiKey: '', geminiApiKey: '', magnificApiKey: '', imageProvider: 'gemini', sttProvider: '', geminiSttModel: '', cleanEffort: '', planningEffort: '', picturesProvider: '', picturesModel: '', picturesEffort: '',
+    elevenLabsApiKey: '', openAiApiKey: '', geminiApiKey: '', magnificApiKey: '', anthropicApiKey: '', apiTextModel: '', apiEffort: '', imageProvider: 'gemini', sttProvider: '', geminiSttModel: '', cleanEffort: '', planningEffort: '', picturesProvider: '', picturesModel: '', picturesEffort: '',
     openAiImageModel: '', geminiImageModel: '', grokModel: '', grokVideoModel: '', gflowProfile: '', gflowVideoModel: '', magnificVideoModel: '', magnificVideoEndpoint: '',
     codexBin: '', claudeBin: '', agyBin: '', cleanProvider: 'claude-cli', cleanModel: '', planningProvider: 'claude-cli', planningModel: '', codexModel: '', grokBin: '', gflowBin: '', ffmpegBin: '', ffprobeBin: '', projectsDir: '',
   });
@@ -118,7 +124,11 @@ function App() {
   const draftRef = useRef<Record<string, SceneDraft>>({});
   const autosaveTimers = useRef<Record<string, number>>({});
 
-  useEffect(() => { void refreshSystem(); void refreshProjects(); return () => clearAllAutosaves(); }, []);
+  useEffect(() => {
+    // Customers never load Settings (the server refuses it for them).
+    void api.me().then((who) => { setMe(who); if (who.role === 'admin' && advanced) void refreshSystem(); }).catch(() => { if (advanced) void refreshSystem(); });
+    void refreshProjects(); return () => clearAllAutosaves();
+  }, []);
   const projectId = project?.id;
   const exportRunning = exportJob?.state === 'running';
 
@@ -199,7 +209,7 @@ function App() {
       void refreshCodexModels();
       const provider = result.overrides?.imageProvider || result.imageProvider || 'gemini';
       setSettingsForm((current) => ({
-        ...current, imageProvider: provider, sttProvider: result.overrides?.sttProvider ?? '', geminiSttModel: result.overrides?.geminiSttModel ?? '',
+        ...current, imageProvider: provider, apiTextModel: result.overrides?.apiTextModel ?? '', apiEffort: result.overrides?.apiEffort ?? '', sttProvider: result.overrides?.sttProvider ?? '', geminiSttModel: result.overrides?.geminiSttModel ?? '',
         cleanEffort: result.overrides?.cleanEffort ?? '', planningEffort: result.overrides?.planningEffort ?? '', picturesProvider: result.overrides?.picturesProvider ?? '', picturesModel: result.overrides?.picturesModel ?? '', picturesEffort: result.overrides?.picturesEffort ?? '',
         cleanProvider: result.overrides?.cleanProvider || result.textModels.clean.provider, cleanModel: result.overrides?.cleanModel ?? result.textModels.clean.model,
         planningProvider: result.overrides?.planningProvider || result.textModels.planning.provider, planningModel: result.overrides?.planningModel ?? result.textModels.planning.model,
@@ -223,7 +233,7 @@ function App() {
   async function saveSettings() {
     await action('Saving local settings…', async () => {
       const result = await api.saveSettings(settingsForm); setSystem(result);
-      setSettingsForm((current) => ({ ...current, elevenLabsApiKey: '', openAiApiKey: '', geminiApiKey: '', magnificApiKey: '' }));
+      setSettingsForm((current) => ({ ...current, elevenLabsApiKey: '', openAiApiKey: '', geminiApiKey: '', magnificApiKey: '', anthropicApiKey: '' }));
       setBrollSettings((current) => ({ ...current, provider: result.imageProvider }));
       await refreshAgyModels();
       await refreshCodexModels();
@@ -708,21 +718,26 @@ function App() {
     onStopExport: stopExport, exportBusy: busy || exportRunning,
   } : null;
 
+  // Everyone gets the PractiReel phone app; the owner's old step-by-step editor opens with ?advanced=1.
+  if (!advanced || isMember) return <PhoneApp me={me} onMe={setMe} />;
   return (
     <main className="shell">
       <header className="topbar">
-        <div><span className="eyebrow">LOCAL AI VIDEO PIPELINE</span><h1>Video Cleaner</h1></div>
-        <div className="headerActions">
+        <div><span className="eyebrow">{isMember ? me?.workspace?.name ?? 'YOUR REELS' : 'LOCAL AI VIDEO PIPELINE'}</span><h1>Video Cleaner</h1></div>
+        {isMember ? <div className="headerActions"><button className="ghost" onClick={() => void fetch('/api/logout', { method: 'POST' }).then(() => window.location.replace('/login'))}>Log out</button></div> : <div className="headerActions">
           <span className={`readyBadge ${ready ? 'ready' : ''}`}>{ready ? 'Core ready' : 'Setup required'}</span>
+          <a className="ghost" href="/?advanced=0" style={{ color: 'inherit', padding: '11px 14px', textDecoration: 'none' }}>Phone app</a>
+          <button className="ghost" onClick={() => setAccountsOpen((value) => !value)}>Accounts</button>
           {project && <button className="ghost" onClick={() => void closeProject()} disabled={busy || exportRunning || generatingAll}>Projects</button>}
           <button className="ghost" onClick={() => setSettingsOpen((value) => !value)}>Settings</button>
           {project && <button className="ghost" onClick={pick} disabled={busy || exportRunning || generatingAll || !system?.ffprobe.installed}>New project</button>}
-        </div>
+        </div>}
       </header>
+      {accountsOpen && !isMember && <AccountsPanel onClose={() => { setAccountsOpen(false); void api.me().then(setMe).catch(() => undefined); }} />}
 
-      {settingsOpen && <SettingsPanel agyModels={agyModels} codexModels={codexModels} refreshAgyModels={refreshAgyModels} refreshCodexModels={refreshCodexModels} system={system} form={settingsForm} setForm={setSettingsForm} save={saveSettings} refresh={refreshSystem} disabled={busy || exportRunning || generatingAll} ffmpegDetail={ffmpegDetail} />}
+      {settingsOpen && !isMember && <SettingsPanel agyModels={agyModels} codexModels={codexModels} refreshAgyModels={refreshAgyModels} refreshCodexModels={refreshCodexModels} system={system} form={settingsForm} setForm={setSettingsForm} save={saveSettings} refresh={refreshSystem} disabled={busy || exportRunning || generatingAll} ffmpegDetail={ffmpegDetail} />}
 
-      {!advanced ? (autoProjectId ? <AutoReelProgress projectId={autoProjectId} onClose={() => { setAutoProjectId(''); void refreshProjects(); }} /> : <><AutoReelLauncher busy={busy} onStarted={(id) => setAutoProjectId(id)} onError={(text) => setError(text)} /><ReelList projects={recentProjects} onOpen={(id) => setAutoProjectId(id)} /></>) : !project && autoProjectId ? <AutoReelProgress projectId={autoProjectId} onOpenEditor={(saved) => { setAutoProjectId(''); void openProject(saved); }} onClose={() => { setAutoProjectId(''); void refreshProjects(); }} /> : !project ? <><AutoReelLauncher busy={busy} onStarted={(id) => setAutoProjectId(id)} onError={(text) => setError(text)} /><ProjectLibrary projects={recentProjects} busy={busy} onNew={pick} onOpen={(saved) => void openProject(saved)} onRename={(saved) => void renameProject(saved)} onDelete={(saved) => void deleteProject(saved)} onRelink={(saved) => void relinkProject(saved)} onExport={(saved) => void exportEditableProject(saved)} onRefresh={() => void refreshProjects()} /></> : <>
+      {!(advanced && !isMember) ? (autoProjectId ? <AutoReelProgress projectId={autoProjectId} onClose={() => { setAutoProjectId(''); void refreshProjects(); }} /> : <><AutoReelLauncher me={me} busy={busy} onStarted={(id) => setAutoProjectId(id)} onError={(text) => setError(text)} /><ReelList projects={recentProjects} onOpen={(id) => setAutoProjectId(id)} /></>) : !project && autoProjectId ? <AutoReelProgress projectId={autoProjectId} onOpenEditor={(saved) => { setAutoProjectId(''); void openProject(saved); }} onClose={() => { setAutoProjectId(''); void refreshProjects(); }} /> : !project ? <><AutoReelLauncher me={me} busy={busy} onStarted={(id) => setAutoProjectId(id)} onError={(text) => setError(text)} /><ProjectLibrary projects={recentProjects} busy={busy} onNew={pick} onOpen={(saved) => void openProject(saved)} onRename={(saved) => void renameProject(saved)} onDelete={(saved) => void deleteProject(saved)} onRelink={(saved) => void relinkProject(saved)} onExport={(saved) => void exportEditableProject(saved)} onRefresh={() => void refreshProjects()} /></> : <>
         {activeStage === 'upload' ? <>
         <section className={`source panel ${project.sourceAvailable ? '' : 'missingSourcePanel'}`}>
           <div className="sourceSummary"><div><span className="label">{project.sourceAvailable ? 'BASE VIDEO TIMELINE' : 'BASE CLIP MISSING'}</span><strong>{project.name}</strong><small>{sourceClips.length > 1 ? `${sourceClips.length} clips play continuously in the order below.` : `${project.sourceName} · Add more clips at any time.`} Original media stays untouched.</small></div><div className="sourceRight"><div className="chips"><span>{project.media.width}×{project.media.height}</span><span>{String(project.media.videoCodec).toUpperCase()}</span>{project.media.frameRate ? <span>{project.media.frameRate.toFixed(2)} fps</span> : null}<span>{(project.media.size / 1024 / 1024 / 1024).toFixed(2)} GB</span>{project.media.hdr && <span className="warn">HDR</span>}</div><div className="sourceActions"><button className="primary" onClick={() => void addProjectClips()} disabled={busy || exportRunning || generatingAll || !system?.ffprobe.installed}>+ Add base clips</button><button onClick={() => exportEditableProject()} disabled={busy || exportRunning || generatingAll}>Export editable ZIP</button>{!project.sourceAvailable && <button className="danger" onClick={() => void relinkProject(project)} disabled={busy || generatingAll}>Relink missing clip</button>}</div></div></div>
@@ -781,6 +796,10 @@ function SettingsPanel({ system, form, setForm, save, refresh, agyModels, codexM
       <label>Pictures effort<select value={form.picturesEffort} onChange={(e) => setForm({ ...form, picturesEffort: e.target.value })}><option value="">Default (medium)</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">Extra high</option><option value="max">Max</option></select></label>
       <label>Transcription<select value={form.sttProvider} onChange={(e) => setForm({ ...form, sttProvider: e.target.value })}><option value="">Default ({system?.transcription?.provider === 'elevenlabs' ? 'ElevenLabs' : 'Gemini'})</option><option value="gemini">Gemini · Malayalam + English</option><option value="elevenlabs">ElevenLabs Scribe</option></select></label>
       <label>ElevenLabs API key<input type="password" value={form.elevenLabsApiKey} onChange={(e) => setForm({ ...form, elevenLabsApiKey: e.target.value })} placeholder={system?.elevenLabs.configured ? 'Configured — enter only to replace' : 'xi-…'} /></label>
+      <div className="settingsSection wide"><strong>API engines (customer accounts)</strong><small>Accounts set to "API keys" in Accounts always use these for cleaning, planning and the caption, and Gemini for pictures. In-house accounts keep the engines above.</small></div>
+      <label>Claude API key<input type="password" value={form.anthropicApiKey} onChange={(e) => setForm({ ...form, anthropicApiKey: e.target.value })} placeholder={system?.apiEngines?.anthropic.configured ? 'Configured — enter only to replace' : 'sk-ant-…'} /></label>
+      <label>Claude API model<input value={form.apiTextModel} onChange={(e) => setForm({ ...form, apiTextModel: e.target.value })} placeholder={system?.apiEngines?.anthropic.model || 'claude-opus-5-5'} /></label>
+      <label>Claude API effort<select value={form.apiEffort} onChange={(e) => setForm({ ...form, apiEffort: e.target.value })}><option value="">Default (medium)</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">Extra high</option><option value="max">Max</option></select></label>
       <label>Gemini API key<input type="password" value={form.geminiApiKey} onChange={(e) => setForm({ ...form, geminiApiKey: e.target.value })} placeholder={system?.imageProviders?.gemini.configured ? 'Configured — enter only to replace' : 'AIza…'} /></label>
       <label>Gemini image model<input value={form.geminiImageModel} onChange={(e) => setForm({ ...form, geminiImageModel: e.target.value })} placeholder={system?.imageProviders?.gemini.model || 'gemini-3.1-flash-image'} /></label>
       <label>OpenAI API key<input type="password" value={form.openAiApiKey} onChange={(e) => setForm({ ...form, openAiApiKey: e.target.value })} placeholder={system?.imageProviders?.openai.configured ? 'Configured — enter only to replace' : 'sk-…'} /></label>

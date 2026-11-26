@@ -5,7 +5,8 @@ import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { assertMetaVisualCompliant, formatMetaFinding, MetaPolicyError, metaTextGuidelinesPrompt, metaVisualGuidelinesPrompt, scanMetaText, scanMetaVisual } from './meta-guidelines.js';
-import { generateStructuredText, type TextModelChoice, type TextModelConfig, type TextProvider } from './text-models.js';
+import { assertImageEngineAllowed, recordUsage } from './usage.js';
+import { generateStructuredText, TEXT_PROVIDERS, type TextModelChoice, type TextModelConfig, type TextProvider } from './text-models.js';
 
 export type BrollWord = { id: string; text: string; start: number; end: number };
 export type BrollKeepRange = { startWordId: string; endWordId: string };
@@ -247,8 +248,8 @@ function normalizeSettings(raw: Partial<BrollPlanSettings> | undefined): BrollPl
   const videoProvider: VideoProvider = ['grok-cli', 'google-flow', 'magnific'].includes(String(raw?.videoProvider)) ? raw!.videoProvider as VideoProvider : 'grok-cli';
   const countMode: BrollCountMode = ['auto', 'exact', 'per-minute', 'interval'].includes(String(raw?.countMode)) ? raw!.countMode as BrollCountMode : 'auto';
   const aspectRatio = ['auto', '9:16', '16:9'].includes(String(raw?.aspectRatio)) ? raw!.aspectRatio as BrollPlanSettings['aspectRatio'] : 'auto';
-  const planningProvider: TextProvider = ['codex-cli', 'claude-cli', 'agy-cli', 'gemini', 'openai'].includes(String(raw?.planningProvider)) ? raw!.planningProvider as TextProvider : 'codex-cli';
-  const videoPromptProvider: TextProvider | undefined = ['codex-cli', 'claude-cli', 'agy-cli', 'gemini', 'openai'].includes(String(raw?.videoPromptProvider)) ? raw!.videoPromptProvider as TextProvider : undefined;
+  const planningProvider: TextProvider = TEXT_PROVIDERS.includes(raw?.planningProvider as TextProvider) ? raw!.planningProvider as TextProvider : 'codex-cli';
+  const videoPromptProvider: TextProvider | undefined = TEXT_PROVIDERS.includes(raw?.videoPromptProvider as TextProvider) ? raw!.videoPromptProvider as TextProvider : undefined;
   return { planningEffort: raw?.planningEffort?.trim() || undefined, workflowMode, provider, imageModel: raw?.imageModel?.trim() || '', videoPromptProvider, videoPromptModel: raw?.videoPromptModel?.trim() || '', planningProvider, planningModel: raw?.planningModel?.trim() || '', videoProvider, countMode, targetCount: Math.max(1, Math.min(40, Number(raw?.targetCount) || 6)), imagesPerMinute: Math.max(0.5, Math.min(20, Number(raw?.imagesPerMinute) || 5)), intervalSeconds: Math.max(10, Math.min(300, Number(raw?.intervalSeconds) || 20)), minSceneDuration: Math.max(1, Math.min(20, Number(raw?.minSceneDuration) || 3)), maxSceneDuration: Math.max(2, Math.min(30, Number(raw?.maxSceneDuration) || 8)), aspectRatio, displayTemplate: normalizeDisplayTemplate(raw?.displayTemplate), returnVideoWithAudio: raw?.returnVideoWithAudio === true };
 }
 function validateStoryPlan(words: BrollWord[], keepRanges: BrollKeepRange[] | undefined, raw: any, settings: BrollPlanSettings) {
@@ -568,6 +569,7 @@ export async function generateBrollImage(options: { config: ImageProviderConfig;
   const scene = plan.scenes.find((candidate) => candidate.id === sceneId);
   if (!scene) throw new Error('B-roll scene not found');
   const provider = plan.settings.provider;
+  assertImageEngineAllowed(provider);
   if (provider === 'chatgpt-browser') {
     const [made] = await generateBrollImagesWithChatGpt({ config, workDir, plan, sceneIds: [sceneId], regenerationComment: options.regenerationComment });
     if (!made) throw new Error('ChatGPT did not save the image. Check that Chrome on this computer is open, signed in to ChatGPT and connected to Claude.');
@@ -589,6 +591,7 @@ export async function generateBrollImage(options: { config: ImageProviderConfig;
     else if (provider === 'gemini') model = await generateGemini(prompt, aspect, imageConfig, rawPath);
     else model = await generateWithAgentCli(provider, prompt, imageConfig, workDir, rawPath);
     await normalizeImage(rawPath, outputPath, aspect, config.ffmpegBin, true);
+    await recordUsage({ kind: 'image', provider, model, images: 1 });
     scene.imageFile = outputPath;
     scene.generatedAt = new Date().toISOString();
     scene.generatedAspectRatio = aspect;
@@ -1065,6 +1068,7 @@ ${metaVisualGuidelinesPrompt()}`,
  */
 export async function generateBrollImagesWithChatGpt(options: { config: ImageProviderConfig; workDir: string; plan: BrollPlan; sceneIds: string[]; regenerationComment?: string; onLine?: (text: string) => void; signal?: AbortSignal }) {
   const { config, workDir, plan } = options;
+  assertImageEngineAllowed('chatgpt-browser');
   const engine = config.picturesEngine ?? { ...DEFAULT_PICTURES_ENGINE, claudeBin: config.claudeBin, codexBin: config.codexBin };
   const brollDir = path.join(workDir, 'broll'); await fs.mkdir(brollDir, { recursive: true });
   const scenes = options.sceneIds.map((id) => plan.scenes.find((scene) => scene.id === id)).filter((scene): scene is BrollScene => Boolean(scene));
@@ -1087,6 +1091,7 @@ export async function generateBrollImagesWithChatGpt(options: { config: ImagePro
       made = Object.assign([...made, ...retry], { lastMessage: retry.lastMessage, logPath: retry.logPath });
     }
     madeIds = new Set(made.map((r) => r.id));
+    if (made.length) await recordUsage({ kind: 'image', provider: 'chatgpt-browser', model: 'ChatGPT', images: made.length });
     if (!made.length) throw new Error(`ChatGPT made no pictures. Last message: ${made.lastMessage.slice(0, 300) || '(none)'} (log: ${made.logPath})`);
   } finally {
     for (const scene of scenes) {

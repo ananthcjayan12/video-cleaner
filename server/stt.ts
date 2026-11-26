@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { Word } from './project-store.js';
+import { recordUsage } from './usage.js';
 
 /** Speech-to-text returns the project's transcript.json word schema: { id, text, start, end } in source seconds. */
 export type SttProvider = 'gemini' | 'elevenlabs';
@@ -92,7 +93,7 @@ async function audioDuration(ffmpegBin: string, file: string) {
   return Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
 }
 
-async function geminiChunk(apiKey: string, model: string, file: string) {
+async function geminiChunk(apiKey: string, model: string, file: string, seconds = 0) {
   const body = {
     contents: [{ parts: [{ inline_data: { mime_type: 'audio/mpeg', data: (await fs.readFile(file)).toString('base64') } }, { text: GEMINI_STT_PROMPT }] }],
     generationConfig: { temperature: 0, responseMimeType: 'application/json' },
@@ -108,6 +109,7 @@ async function geminiChunk(apiKey: string, model: string, file: string) {
       const text = data?.candidates?.[0]?.content?.parts?.map((part: any) => part.text ?? '').join('') ?? '';
       const parsed = JSON.parse(text);
       if (!Array.isArray(parsed?.words)) throw new Error('Gemini returned no words array');
+      await recordUsage({ kind: 'stt', provider: 'gemini', model, audioSeconds: seconds, inputTokens: data?.usageMetadata?.promptTokenCount, outputTokens: (data?.usageMetadata?.candidatesTokenCount ?? 0) + (data?.usageMetadata?.thoughtsTokenCount ?? 0) });
       return parsed as { language?: string; words: RawWord[] };
     } catch (error) { lastError = error; }
   }
@@ -131,7 +133,7 @@ async function transcribeGemini(audioPath: string, config: SttConfig): Promise<T
       const index = next++; const [start, end] = chunks[index];
       const file = path.join(dir, `chunk-${String(index).padStart(3, '0')}.mp3`);
       await run(config.ffmpegBin, ['-v', 'error', '-y', '-ss', start.toFixed(3), '-to', end.toFixed(3), '-i', audioPath, '-ac', '1', '-ar', '16000', '-b:a', '48k', file]);
-      const raw = await geminiChunk(config.geminiApiKey!, model, file);
+      const raw = await geminiChunk(config.geminiApiKey!, model, file, end - start);
       results[index] = { language: raw.language, words: placeChunkWords(raw.words, start, end) };
       config.onProgress?.(++done, chunks.length);
     }

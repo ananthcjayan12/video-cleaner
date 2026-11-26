@@ -16,11 +16,15 @@ export type AutoStage = { id: AutoStageId; label: string; state: 'pending' | 'ru
 export type AutoJob = {
   state: 'running' | 'review' | 'completed' | 'failed' | 'stopped'; stages: AutoStage[]; startedAt: number; finishedAt?: number;
   /** While state is "review": the transcript and the current keep decision for the review screen. */
-  review?: { words: Array<{ id: string; text: string; start: number; end: number }>; keepRanges: KeepRange[]; keptSeconds: number; sourceSeconds: number; notes?: string; redoing?: boolean };
+  review?: { words: Array<{ id: string; text: string; start: number; end: number }>; keepRanges: KeepRange[]; keptSeconds: number; sourceSeconds: number; notes?: string; redoing?: boolean; flags?: import('./claims.js').ClaimFlag[] };
+  /** Set while waiting for another reel to finish rendering (this machine renders one at a time). */
+  queuePosition?: number; resumed?: boolean;
   error?: string; outputPath?: string; previewUrl?: string; downloadUrl?: string; sourceSeconds?: number; finalSeconds?: number;
   options: AutoOptions; stopRequested?: boolean;
   /** Thumbnail and Instagram post caption, made after the reel (and remade from the review screen). */
   package?: ReelPackage;
+  /** Engines the reel ran on, and what it cost (shown to the owner only). */
+  profile?: import('./usage.js').EngineProfile; cost?: import('./usage.js').UsageSummary;
 };
 export type AutoOptions = { targetDurationSec?: number; imageProvider: 'gemini' | 'chatgpt'; broll: boolean; captions: boolean; review: boolean; thumbnail?: boolean; postCaption?: boolean };
 export type ThumbnailBadge = { icon: string; label?: string };
