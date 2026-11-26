@@ -1,5 +1,6 @@
 import { listStickFacePacks, loadStickDraft, makeStickDraft, renderStickReel, saveStickDraft, STICK_THEMES, stickMusicPath, type StickRender } from './stick-reel.js';
 import { planStickReelWithAi } from './stick-planner.js';
+import { loadStudioSettings, MALE_VOICES, narrateScript, narrationJobs, newNarrationJob, previewVoice, saveStudioSettings, writeStickScript, type StickScript } from './stick-narration.js';
 import { EMOTIONS } from './emotion-sfx.js';
 import { MOTION_SOUNDS, motionSoundPath } from './motion-sfx.js';
 import { colorVideoFilter } from './color.js';
@@ -1822,6 +1823,99 @@ async function loadAutoJob(project: Project) {
   if (saved.package?.state === 'running') { saved.package.state = 'failed'; saved.package.error = 'Interrupted by a restart of the app.'; }
   autoJobs.set(project.id, saved); return saved;
 }
+// ---- Stick studio ("write it for me"): settings, AI script, AI narration. Owner login only.
+const studioRoute = (handler: (req: express.Request, res: express.Response) => Promise<void>) =>
+  route(async (req, res) => {
+    if (!isAdmin(res)) return void res.status(403).json({ error: 'Stick-figure reels are for the owner login only.' });
+    await handler(req, res);
+  });
+const studioDir = () => path.join(CONFIG_DIR, 'stick-studio');
+const scriptFromBody = (value: unknown): StickScript | undefined => {
+  const input = value as { title?: unknown; lines?: unknown } | undefined;
+  if (!input || !Array.isArray(input.lines)) return undefined;
+  const lines = input.lines.map((line) => String(line ?? '').trim()).filter(Boolean).slice(0, 30).map((line) => line.slice(0, 300));
+  return lines.length ? { title: String(input.title ?? '').slice(0, 80), lines } : undefined;
+};
+app.get('/api/stick/studio', studioRoute(async (_req, res) => {
+  const settings = await resolvedSettings(); const planning = textEngines(settings).planning;
+  res.json({
+    settings: await loadStudioSettings(), voices: MALE_VOICES, themes: STICK_THEMES, facePacks: await listStickFacePacks(),
+    scriptEngine: { provider: planning.provider, model: planning.model || 'default' }, geminiReady: Boolean(settings.geminiApiKey),
+  });
+}));
+app.put('/api/stick/studio', studioRoute(async (req, res) => { res.json({ settings: await saveStudioSettings(req.body ?? {}) }); }));
+type ScriptJob = { id: string; state: 'running' | 'ready' | 'failed'; script?: StickScript; error?: string; startedAt: number };
+const scriptJobs = new Map<string, ScriptJob>();
+app.get('/api/stick/script/:jobId', studioRoute(async (req, res) => {
+  const job = scriptJobs.get(routeParam(req.params.jobId));
+  if (!job) return void res.status(404).json({ error: 'That script job is gone (the app restarted). Write it again.' });
+  res.json({ job });
+}));
+app.post('/api/stick/script', studioRoute(async (req, res) => {
+  const settings = await resolvedSettings(); const studio = await loadStudioSettings();
+  for (const [key, old] of scriptJobs) if (Date.now() - old.startedAt > 6 * 3600_000) scriptJobs.delete(key);
+  const job: ScriptJob = { id: randomUUID(), state: 'running', startedAt: Date.now() }; scriptJobs.set(job.id, job);
+  const concept = typeof req.body?.concept === 'string' ? req.body.concept.slice(0, 3000) : '';
+  const script = writeStickScript({
+    concept, seconds: Number(req.body?.seconds) || undefined,
+    feedback: typeof req.body?.feedback === 'string' ? req.body.feedback.slice(0, 1500) : undefined,
+    previous: scriptFromBody(req.body?.previous),
+    settings: studio, textConfig: settings, choice: textEngines(settings).planning, workDir: path.join(studioDir(), 'work'),
+  });
+  res.status(202).json({ job });
+  void script.then((value) => Object.assign(job, { state: 'ready', script: value }), (error) => Object.assign(job, { state: 'failed', error: error instanceof Error ? error.message : String(error) }));
+}));
+app.post('/api/stick/voice-preview', studioRoute(async (req, res) => {
+  const settings = await resolvedSettings(); const studio = { ...await loadStudioSettings(), ...(typeof req.body?.voice === 'string' && /^[A-Za-z]{2,30}$/.test(req.body.voice) ? { voice: req.body.voice } : {}), ...(typeof req.body?.voiceStyle === 'string' && req.body.voiceStyle.trim() ? { voiceStyle: req.body.voiceStyle.trim().slice(0, 1200) } : {}) };
+  const id = randomUUID(); const file = path.join(studioDir(), 'previews', `${id}.wav`);
+  await previewVoice({ settings: studio, apiKey: settings.geminiApiKey, line: typeof req.body?.line === 'string' ? req.body.line : undefined, outWav: file });
+  res.json({ url: `/api/stick/voice-preview/${id}.wav` });
+}));
+app.get('/api/stick/voice-preview/:file', studioRoute(async (req, res) => {
+  const name = routeParam(req.params.file); if (!/^[0-9a-f-]{36}\.wav$/.test(name)) return void res.status(404).end();
+  res.sendFile(path.join(studioDir(), 'previews', name));
+}));
+app.post('/api/stick/narrate', studioRoute(async (req, res) => {
+  const script = scriptFromBody(req.body?.script); if (!script) throw new Error('Approve a script first.');
+  if ([...narrationJobs.values()].some((job) => job.state === 'running')) return void res.status(409).json({ error: 'A voice is already being made. Wait for it to finish.' });
+  const settings = await resolvedSettings(); const studio = await loadStudioSettings();
+  if (!settings.ffmpegBin) throw new Error('FFmpeg was not found.');
+  const ffmpegBin = settings.ffmpegBin;
+  const job = newNarrationJob();
+  res.status(202).json({ job });
+  void (async () => {
+    const work = path.join(studioDir(), 'narration', job.id);
+    try {
+      const wav = path.join(work, 'voice.wav');
+      job.stage = `Recording line 1 of ${script.lines.length}…`;
+      await narrateScript({ lines: script.lines, settings: studio, apiKey: settings.geminiApiKey, outWav: wav, progress: (done, total) => { job.progress = done / total * 0.9; job.stage = done < total ? `Recording line ${done + 1} of ${total}…` : 'Finishing the voice…'; } });
+      const slug = (script.title || 'ai-voice').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'ai-voice';
+      const m4a = path.join(work, `${slug}.m4a`);
+      const tempo = Math.abs(studio.speed - 1) > 0.005 ? ['-af', `atempo=${studio.speed.toFixed(3)}`] : [];
+      await run(ffmpegBin, ['-hide_banner', '-loglevel', 'error', '-y', '-i', wav, ...tempo, '-ar', '48000', '-c:a', 'aac', '-b:a', '160k', m4a], undefined, 120_000);
+      await fs.writeFile(path.join(work, 'script.json'), JSON.stringify(script, null, 2));
+      const size = (await fs.stat(m4a)).size;
+      const meta = await createUpload(await uploadsDir(), { name: `${slug}.m4a`, size });
+      await fs.copyFile(m4a, meta.file);
+      const probed = await probe(m4a).catch(() => null);
+      Object.assign(job, { state: 'ready', progress: 1, stage: 'Voice ready', uploadId: meta.id, seconds: probed?.duration ?? undefined });
+      await fs.rm(wav, { force: true }).catch(() => undefined);
+    } catch (error) {
+      Object.assign(job, { state: 'failed', progress: 0, stage: 'Failed', error: error instanceof Error ? error.message : String(error) });
+    }
+  })();
+}));
+app.get('/api/stick/narrate/:jobId', studioRoute(async (req, res) => {
+  const job = narrationJobs.get(routeParam(req.params.jobId));
+  if (!job) return void res.status(404).json({ error: 'That voice job is gone (the app restarted). Make the voice again.' });
+  res.json({ job, url: job.uploadId ? `/api/stick/narrate/${job.id}/audio` : undefined });
+}));
+app.get('/api/stick/narrate/:jobId/audio', studioRoute(async (req, res) => {
+  const job = narrationJobs.get(routeParam(req.params.jobId));
+  if (!job?.uploadId) return void res.status(404).end();
+  res.setHeader('Accept-Ranges', 'bytes'); res.sendFile((await readUpload(await uploadsDir(), job.uploadId)).file);
+}));
+
 const stickJobs = new Map<string, StickRender>();
 const stickRoute = (handler: (req: express.Request, res: express.Response, project: Project) => Promise<void>) =>
   route(async (req, res) => {
@@ -1845,6 +1939,7 @@ app.get('/api/projects/:id/stick', stickRoute(async (_req, res, project) => {
     customMusic: await fs.access(stickMusicPath(project)).then(() => true, () => false),
     facePacks: await listStickFacePacks(),
     themes: STICK_THEMES,
+    plan: stickPlans.get(project.id) ?? null,
   });
 }));
 app.get('/api/projects/:id/stick/audio', stickRoute(async (_req, res, project) => {
@@ -1882,7 +1977,15 @@ app.post('/api/projects/:id/stick/transcribe', stickRoute(async (_req, res, proj
   next.useOpenverse = existing.useOpenverse;
   res.json({ draft: await saveStickDraft(project, next) });
 }));
+/** Planning can take minutes (longer than Cloudflare's ~100 s request limit), so it runs in the background; GET .../stick reports it. */
+const stickPlans = new Map<string, { state: 'running' | 'failed'; error?: string }>();
 app.post('/api/projects/:id/stick/plan', stickRoute(async (req, res, project) => {
+  if (stickPlans.get(project.id)?.state === 'running') return void res.status(202).json({ plan: stickPlans.get(project.id) });
+  const plan = { state: 'running' as 'running' | 'failed', error: undefined as string | undefined }; stickPlans.set(project.id, plan);
+  res.status(202).json({ plan });
+  void planStickInBackground(req, project).then(() => { stickPlans.delete(project.id); }, (error) => { plan.state = 'failed'; plan.error = error instanceof Error ? error.message : String(error); });
+}));
+async function planStickInBackground(req: express.Request, project: Project) {
   const context = await projectUsageContext(project);
   const settings = await resolvedSettings();
   const existing = await loadStickDraft(project);
@@ -1903,8 +2006,8 @@ app.post('/api/projects/:id/stick/plan', stickRoute(async (req, res, project) =>
     brief,
     themeId,
   }));
-  res.json({ draft: await saveStickDraft(project, planned) });
-}));
+  await saveStickDraft(project, planned);
+}
 app.post('/api/projects/:id/stick/render', stickRoute(async (req, res, project) => {
   if ([...stickJobs.values()].some(job => job.state === 'running')) {
     return void res.status(409).json({ error: 'A stick-figure reel is already rendering.' });

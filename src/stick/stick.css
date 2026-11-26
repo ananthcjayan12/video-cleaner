@@ -1,0 +1,31 @@
+/* Stick-figure studio: PractiReel phone look (.pr tokens from phone/phone.css), a few extras. */
+.st-choice { display: flex; flex-direction: column; gap: 6px; text-align: left; width: 100%; border: 1.5px solid var(--line); border-radius: var(--radius); background: var(--card); box-shadow: var(--shadow); padding: 16px; color: var(--ink); }
+.st-choice .kind { font-size: 11px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; color: var(--teal); }
+.st-choice strong { font-size: 18px; line-height: 1.25; }
+.st-choice span { color: var(--muted); font-size: 14px; }
+.st-choice:active { border-color: var(--teal); }
+.st-lines { display: flex; flex-direction: column; gap: 8px; }
+.st-line { display: grid; grid-template-columns: 26px 1fr 36px; gap: 8px; align-items: start; }
+.st-line .n { font-size: 13px; font-weight: 800; color: var(--faint); padding-top: 13px; text-align: right; }
+.st-line textarea { width: 100%; border: 1.5px solid var(--line); border-radius: 12px; padding: 10px 12px; font-size: 16px; line-height: 1.5; resize: vertical; min-height: 48px; field-sizing: content; background: var(--card); color: var(--ink); }
+.st-line .x { min-height: 44px; border: 0; background: none; color: var(--faint); font-size: 20px; }
+.st-meta { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.st-audio { width: 100%; }
+.st-scene { border: 1.5px solid var(--line); border-radius: 14px; padding: 12px; display: flex; flex-direction: column; gap: 8px; background: var(--card); }
+.st-scene .head { display: flex; align-items: center; gap: 8px; }
+.st-scene .time { font-variant-numeric: tabular-nums; font-weight: 800; font-size: 13px; color: var(--teal); background: var(--teal-soft); border: 0; border-radius: 999px; padding: 4px 10px; min-height: 32px; }
+.st-scene .head .grow { flex: 1; }
+.st-scene input, .st-scene select, .st-look input:not([type=range]):not([type=checkbox]), .st-look select { border: 1.5px solid var(--line); border-radius: 10px; padding: 10px; font-size: 15px; width: 100%; background: var(--card); color: var(--ink); }
+.st-scene details summary, .pr details.st-more > summary { cursor: pointer; color: var(--teal); font-weight: 600; font-size: 14px; min-height: 36px; display: flex; align-items: center; }
+.st-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; }
+.st-grid label, .st-look label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; font-weight: 600; color: var(--muted); }
+.st-range { display: flex; flex-direction: column; gap: 4px; font-size: 14px; font-weight: 600; }
+.st-range input { width: 100%; accent-color: var(--teal); }
+.st-check { display: flex !important; flex-direction: row !important; align-items: center; gap: 10px; font-size: 15px !important; color: var(--ink) !important; }
+.st-check input { width: 22px; height: 22px; accent-color: var(--teal); }
+.st-look { display: flex; flex-direction: column; gap: 12px; }
+.st-swatch { display: inline-block; width: 14px; height: 14px; border-radius: 50%; margin-right: 6px; vertical-align: -2px; border: 1px solid rgba(0, 0, 0, .12); }
+.st-voice { display: flex; align-items: center; justify-content: space-between; gap: 10px; background: var(--sunk); border-radius: 12px; padding: 10px 12px; font-size: 14px; }
+.st-sticky { position: sticky; bottom: calc(10px + env(safe-area-inset-bottom, 0px)); z-index: 5; }
+.pr-page.st-wide { max-width: 720px; }
+.pr a.pr-back { text-decoration: none; }

@@ -1,4 +1,8 @@
 import type { StickDraft, StickRender, StickTheme } from '../server/stick-reel';
+import type { NarrationJob, StickScript, StickStudioSettings } from '../server/stick-narration';
+export type StickPlanState = { state: 'running' | 'failed'; error?: string } | null;
+export type StudioInfo = { settings: StickStudioSettings; voices: Array<{ id: string; label: string }>; themes: StickTheme[]; facePacks: string[]; scriptEngine: { provider: string; model: string }; geminiReady: boolean };
+export type ScriptJob = { id: string; state: 'running' | 'ready' | 'failed'; script?: StickScript; error?: string };
 export type Word = { id: string; text: string; start: number; end: number };
 export type EditorMediaEntry = {
   id: string; name: string; kind: 'video' | 'audio' | 'image'; duration: number;
@@ -277,12 +281,19 @@ export const api = {
   addMember: (workspaceId: string, username: string, password: string) => request<{ username: string }>(`/api/admin/workspaces/${encodeURIComponent(workspaceId)}/members`, { method: 'POST', body: JSON.stringify({ username, password }) }),
   removeMember: (username: string) => request<{ ok: true }>(`/api/admin/members/${encodeURIComponent(username)}`, { method: 'DELETE' }),
   createStick: (uploadId: string) => request<Project>('/api/projects/select', { method: 'POST', body: JSON.stringify({ uploadIds: [uploadId], stick: true }) }),
-  stick: (id: string) => request<{ draft: StickDraft; render: StickRender | null; duration: number; audioUrl: string; customMusic: boolean; facePacks: string[]; themes: StickTheme[] }>(`/api/projects/${id}/stick`),
+  stick: (id: string) => request<{ draft: StickDraft; render: StickRender | null; duration: number; audioUrl: string; customMusic: boolean; facePacks: string[]; themes: StickTheme[]; plan: StickPlanState }>(`/api/projects/${id}/stick`),
   stickMusic: (id: string, uploadId?: string) => request<{ customMusic: boolean }>(`/api/projects/${id}/stick/music`, uploadId
     ? { method: 'PUT', body: JSON.stringify({ uploadId }) } : { method: 'DELETE' }),
   saveStick: (id: string, draft: StickDraft) => request<{ draft: StickDraft }>(`/api/projects/${id}/stick`, { method: 'PUT', body: JSON.stringify(draft) }),
   transcribeStick: (id: string) => request<{ draft: StickDraft }>(`/api/projects/${id}/stick/transcribe`, { method: 'POST' }),
-  planStick: (id: string, body?: { brief?: string; themeId?: string }) => request<{ draft: StickDraft }>(`/api/projects/${id}/stick/plan`, { method: 'POST', body: JSON.stringify(body ?? {}) }),
+  planStick: (id: string, body?: { brief?: string; themeId?: string }) => request<{ plan: StickPlanState }>(`/api/projects/${id}/stick/plan`, { method: 'POST', body: JSON.stringify(body ?? {}) }),
+  studio: () => request<StudioInfo>('/api/stick/studio'),
+  saveStudio: (settings: Partial<StickStudioSettings>) => request<{ settings: StickStudioSettings }>('/api/stick/studio', { method: 'PUT', body: JSON.stringify(settings) }),
+  writeScript: (body: { concept: string; seconds?: number; feedback?: string; previous?: StickScript }) => request<{ job: ScriptJob }>('/api/stick/script', { method: 'POST', body: JSON.stringify(body) }),
+  scriptJob: (jobId: string) => request<{ job: ScriptJob }>(`/api/stick/script/${jobId}`),
+  previewVoice: (body: { voice?: string; voiceStyle?: string; line?: string }) => request<{ url: string }>('/api/stick/voice-preview', { method: 'POST', body: JSON.stringify(body) }),
+  narrate: (script: StickScript) => request<{ job: NarrationJob }>('/api/stick/narrate', { method: 'POST', body: JSON.stringify({ script }) }),
+  narration: (jobId: string) => request<{ job: NarrationJob; url?: string }>(`/api/stick/narrate/${jobId}`),
   renderStick: (id: string, draft: StickDraft) => request<{ render: StickRender }>(`/api/projects/${id}/stick/render`, { method: 'POST', body: JSON.stringify(draft) }),
   startAuto: (id: string, options: AutoOptions) => request<AutoJob>(`/api/projects/${id}/auto`, { method: 'POST', body: JSON.stringify(options) }),
   autoStatus: (id: string) => request<AutoJob>(`/api/projects/${id}/auto`),

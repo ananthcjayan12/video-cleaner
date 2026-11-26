@@ -15,7 +15,7 @@ import path from 'node:path';
 
 export type EngineProfile = 'in-house' | 'api';
 export const ENGINE_PROFILES: EngineProfile[] = ['in-house', 'api'];
-export type UsageKind = 'text' | 'stt' | 'image' | 'render';
+export type UsageKind = 'text' | 'stt' | 'image' | 'render' | 'tts';
 export type UsageContext = { file?: string; task: string; profile: EngineProfile; apiTextModel: string };
 export type UsageInput = {
   kind: UsageKind; provider: string; model?: string; task?: string;
@@ -37,6 +37,8 @@ export const IMAGE_PRICE_USD = 0.067;
 /** Estimated Gemini audio input price per million tokens (about 32 tokens per second of audio). */
 export const AUDIO_INPUT_PRICE = 1;
 export const AUDIO_TOKENS_PER_SECOND = 32;
+/** Estimated Gemini Flash TTS price: about 25 audio tokens per second at $10 per million output tokens. */
+export const TTS_USD_PER_SECOND = 25 * 10 / 1_000_000;
 /** Cloud rendering (Cloudflare Containers): 4 vCPU at $0.00002 per vCPU-second plus 4 GiB at $0.0000025 per GiB-second. */
 export const RENDER_USD_PER_SECOND = 4 * 0.00002 + 4 * 0.0000025;
 export const DEFAULT_API_TEXT_MODEL = 'claude-opus-5-5';
@@ -87,6 +89,7 @@ export function priceUsage(input: UsageInput, apiTextModel = DEFAULT_API_TEXT_MO
     const apiUsd = (input.images ?? 0) * IMAGE_PRICE_USD;
     return { costUsd: SUBSCRIPTION_IMAGE_PROVIDERS.has(input.provider) ? 0 : apiUsd, apiUsd };
   }
+  if (input.kind === 'tts') { const cost = (input.audioSeconds ?? 0) * TTS_USD_PER_SECOND; return { costUsd: cost, apiUsd: cost }; }
   if (input.kind === 'stt') {
     const audio = (input.audioSeconds ?? 0) * AUDIO_TOKENS_PER_SECOND * AUDIO_INPUT_PRICE / 1_000_000;
     const cost = input.inputTokens || input.outputTokens ? tokenCost(textPrice(input.model, input.provider), input) : audio;

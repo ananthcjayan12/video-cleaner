@@ -203,6 +203,7 @@ function buildDirectorPrompt(words: Word[], duration: number, brief?: string, th
     `- For standard UI/transitions/impacts, set sfx to one of: ${CURATED_SFX_IDS.join(', ')}.`,
     '- When a scene calls for a specific real-world foley sound not in that list (e.g. "cash register bell", "mechanical keyboard typing", "camera shutter"), set sfxQuery to a 2–4 word English search phrase for Openverse Freesound AND still set sfx as a safe local fallback.',
     '- Keep headlines crisp (<= 55 chars, in the same language/script as the narration or clean English) and card items concise so nothing wraps awkwardly.',
+    '- HEALTH RULES for every headline, note and card item: no outcome guarantees and never the words painless, pain-free, best, guaranteed, 100%, permanent or cure; say "may", "can", "often" instead. No patient names or identifiable details.',
     '- Scene 1 MUST start on the first wordId. Every startWordId and beat.wordId MUST come verbatim from the transcript below.',
     '',
     'TRANSCRIPT (wordId:text):',
