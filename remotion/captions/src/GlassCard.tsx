@@ -9,7 +9,9 @@ import { measure, packStack, useBrandFonts } from './fonts';
 export type GlassWord = { text: string; at: number; key?: boolean };
 export type GlassPhrase = { start: number; end: number; words: GlassWord[] };
 /** font / keyColor come from the account's niche pack; the defaults are the dental look. */
-export type GlassCardProps = { phrases: GlassPhrase[]; size: number; font?: string; keyColor?: string };
+export type GlassCardProps = { phrases: GlassPhrase[]; size: number; font?: string; keyColor?: string;
+  /** "States" mode: frame N shows the caption at frameTimes[N] seconds (the server draws each distinct look once). -1 = blank. */
+  frameTimes?: number[] };
 
 const MINT = '#7fe3d6';
 const TINT = 'rgba(14, 16, 22, 0.46)';
@@ -33,13 +35,13 @@ function packLines(words: GlassWord[], size: number, stack: string) {
   return lines;
 }
 
-export const GlassCard: React.FC<GlassCardProps> = ({ phrases, size, font, keyColor = MINT }) => {
+export const GlassCard: React.FC<GlassCardProps> = ({ phrases, size, font, keyColor = MINT, frameTimes }) => {
   const stack = packStack(font);
   const ready = useBrandFonts();
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
   if (!ready) return null;
-  const time = frame / fps;
+  const time = frameTimes ? frameTimes[frame] ?? -1 : frame / fps;
   const phrase = phrases.find((p) => time >= p.start && time < p.end);
   if (!phrase) return null;
   const lines = packLines(phrase.words, size, stack).slice(0, 2);

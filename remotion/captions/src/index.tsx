@@ -20,6 +20,9 @@ const Root: React.FC = () => (
     <Composition id="GlassCard" component={GlassCard as React.ComponentType<any>} durationInFrames={90} fps={30} width={1080} height={300}
       calculateMetadata={({ props }) => ({ durationInFrames: Math.round(Number((props as any).duration ?? 3) * 30) })}
       defaultProps={{ phrases: [], size: 46, duration: 3 }} />
+    <Composition id="GlassCardStates" component={GlassCard as React.ComponentType<any>} durationInFrames={1} fps={30} width={1080} height={300}
+      calculateMetadata={({ props }) => ({ durationInFrames: Math.max(1, ((props as any).frameTimes ?? []).length) })}
+      defaultProps={{ phrases: [], size: 46, frameTimes: [-1] }} />
     <Composition id="Thumbnail" component={Thumbnail as React.ComponentType<any>} durationInFrames={1} fps={30} width={1080} height={1920}
       defaultProps={{ image: '', lines: ['', '', ''], label: '', badges: [] }} />
     <Composition id="CleanPop" component={CleanPop as React.ComponentType<any>} durationInFrames={90} {...common}

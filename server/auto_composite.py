@@ -4,7 +4,7 @@
   dissolve in/out and a quiet whoosh (-18 dB) just before each.
 - Glass card: blur the frame under the caption band and show it only where the caption layer is opaque
   (card shape), then lay the card tint, border and text on top.
-Usage: python3 -I auto_composite.py <base.mp4> <broll-plan.json> <clips_dir> <caption.webm|-> <caption_y> <whoosh.wav> <out.mp4> <width> <height>
+Usage: python3 -I auto_composite.py <base.mp4> <broll-plan.json> <clips_dir> <captions.txt|caption.webm|-> <caption_y> <whoosh.wav> <out.mp4> <width> <height>
 broll-plan.json: {"scenes": [{"id", "image", "start", "end"}]} with times on the edited timeline.
 """
 import json, os, subprocess, sys
@@ -40,7 +40,8 @@ for i, s in enumerate(plan['scenes']):
 cap_in = len(plan['scenes']) + 1
 has_caption = caption != '-'
 if has_caption:
-    args += ['-c:v', 'libvpx-vp9', '-i', caption]
+    # A .txt caption is a timed list of transparent PNGs (concat demuxer); older reels used a VP9-with-alpha video.
+    args += (['-f', 'concat', '-safe', '0', '-i', caption] if caption.endswith('.txt') else ['-c:v', 'libvpx-vp9', '-i', caption])
 else:
     cap_in -= 1
     filters.append(f'[{label}]format=yuv420p[vout]')

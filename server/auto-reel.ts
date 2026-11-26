@@ -1,4 +1,5 @@
 import type { PackLook } from './niche-packs.js';
+import { captionStates } from './captions.js';
 import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
@@ -129,20 +130,35 @@ function captionServeUrl(workDir: string) {
   return captionBundle;
 }
 
-/** Render the Glass Card caption band (1080x300, transparent VP9) for the whole edited video. */
+/**
+ * Render the Glass Card caption band (1080x300, transparent) for the whole edited video.
+ * The card is still most of the time, so each distinct look is drawn once as a PNG (no video encode at all) and
+ * outputPath gets an FFmpeg concat list that shows each image for as long as it holds. ~2-4x faster than VP9.
+ */
 export async function renderCaptionLayer(options: { look?: PackLook; phrases: CaptionPhrase[]; duration: number; outputPath: string; chromeBin?: string | null; workDir: string; onProgress?: (fraction: number) => void; signal?: AbortSignal }) {
   const serveUrl = await captionServeUrl(options.workDir);
-  const { renderMedia, selectComposition, makeCancelSignal } = await import('@remotion/renderer');
-  const inputProps = { phrases: options.phrases, size: 46, duration: options.duration, font: options.look?.font, keyColor: options.look?.highlight };
+  const { renderFrames, selectComposition, makeCancelSignal } = await import('@remotion/renderer');
+  const fps = 30;
+  const { times, runs } = captionStates(options.phrases, options.duration, fps);
+  const inputProps = { phrases: options.phrases, size: 46, font: options.look?.font, keyColor: options.look?.highlight, frameTimes: times };
   const browserExecutable = options.chromeBin || null;
-  const composition = await selectComposition({ serveUrl, id: 'GlassCard', inputProps, browserExecutable });
+  const composition = await selectComposition({ serveUrl, id: 'GlassCardStates', inputProps, browserExecutable });
   const { cancelSignal, cancel } = makeCancelSignal();
   options.signal?.addEventListener('abort', cancel, { once: true });
-  await fs.mkdir(path.dirname(options.outputPath), { recursive: true });
-  await renderMedia({
-    composition, serveUrl, inputProps, codec: 'vp9', imageFormat: 'png', pixelFormat: 'yuva420p', outputLocation: options.outputPath,
-    concurrency: 2, browserExecutable, muted: true, overwrite: true, cancelSignal, onProgress: ({ progress }) => options.onProgress?.(progress),
+  const framesDir = options.outputPath.replace(/\.txt$/, '') + '-frames';
+  await fs.rm(framesDir, { recursive: true, force: true }); await fs.mkdir(framesDir, { recursive: true });
+  await renderFrames({
+    composition, serveUrl, inputProps, imageFormat: 'png', outputDir: framesDir, imageSequencePattern: 'state-[frame].[ext]',
+    concurrency: Math.max(2, Math.min(4, os.cpus().length)), browserExecutable, cancelSignal, muted: true,
+    onStart: () => undefined, onFrameUpdate: (done) => options.onProgress?.(done / times.length),
   });
+  const files = (await fs.readdir(framesDir)).filter((name) => name.endsWith('.png')).sort();
+  if (files.length !== times.length) throw new Error(`Caption render made ${files.length} of ${times.length} images`);
+  // Concat list: each run of identical frames is one image with its duration; the last entry is repeated (FFmpeg rule).
+  const lines = ['ffconcat version 1.0'];
+  for (const run of runs) lines.push(`file '${path.join(framesDir, files[run.state]).replace(/'/g, "'\\''")}'`, `duration ${(run.frames / fps).toFixed(6)}`);
+  lines.push(`file '${path.join(framesDir, files[runs.at(-1)!.state]).replace(/'/g, "'\\''")}'`);
+  await fs.writeFile(options.outputPath, lines.join('\n') + '\n');
   return options.outputPath;
 }
 

@@ -1749,7 +1749,7 @@ async function runAutoReel(project: Project, job: AutoJob) {
   }, async () => ({ duration: job.finalSeconds! }));
   const duration = edited!.duration;
   await run(settings.ffmpegBin, ['-hide_banner', '-v', 'error', '-y', '-i', path.join(dir, 'video.mp4'), '-i', path.join(dir, 'speech-master.wav'), '-map', '0:v', '-map', '1:a', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-shortest', path.join(dir, 'base.mp4')]);
-  const captionFile = path.join(dir, 'captions-glass.webm');
+  const captionFile = path.join(dir, 'captions-glass.txt'); // timed list of caption images (see renderCaptionLayer)
   const captioned = await stage('captions', async (note) => {
     const editedWords = JSON.parse(await fs.readFile(path.join(dir, 'edited-words.json'), 'utf8')).words as CaptionWordIn[];
     const phrases = buildCaptionPhrases(editedWords, duration);

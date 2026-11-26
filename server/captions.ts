@@ -53,3 +53,33 @@ export function buildCaptionPhrases(words: CaptionWordIn[], duration: number, op
 }
 
 export { MALAYALAM };
+
+const clamp01 = (value: number) => Math.min(1, Math.max(0, value));
+/**
+ * The Glass Card only changes while a card fades in/out (0.14 s / 0.1 s) or a word lights up (0.08 s); in between it
+ * is still. Mirrors GlassCard.tsx: returns one time per distinct look (`times`) and, for every video frame in order,
+ * runs of { state, frames } so each distinct image is drawn once and shown for as long as it holds.
+ * State 0 is always "no card" (blank).
+ */
+export function captionStates(phrases: CaptionPhrase[], duration: number, fps = 30) {
+  const total = Math.max(1, Math.round(duration * fps));
+  const keys = new Map<string, number>([['blank', 0]]); const times: number[] = [-1];
+  const runs: Array<{ state: number; frames: number }> = [];
+  const r = (value: number) => Math.round(value * 1000) / 1000;
+  let p = 0;
+  for (let frame = 0; frame < total; frame += 1) {
+    const time = frame / fps;
+    while (p < phrases.length && phrases[p].end <= time) p += 1;
+    const phrase = phrases[p] && time >= phrases[p].start && time < phrases[p].end ? phrases[p] : undefined;
+    let key = 'blank';
+    if (phrase) {
+      const enter = clamp01((time - phrase.start) / 0.14); const exit = clamp01((phrase.end - time) / 0.1);
+      key = `${p}|${r(enter)}|${r(exit)}|${phrase.words.map((word) => r(clamp01((time - word.at) / 0.08))).join(',')}`;
+    }
+    let state = keys.get(key);
+    if (state === undefined) { state = times.length; keys.set(key, state); times.push(time); }
+    const last = runs.at(-1);
+    if (last && last.state === state) last.frames += 1; else runs.push({ state, frames: 1 });
+  }
+  return { times, runs, totalFrames: total };
+}

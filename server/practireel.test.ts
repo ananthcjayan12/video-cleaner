@@ -70,3 +70,21 @@ test('niche packs: every field has a full look, distinct fonts, and its own risk
   assert.equal(findClaims(words('You will never need glasses again.'), nichePack('optometry').risky)[0]?.match.toLowerCase(), 'never need glasses');
   assert.deepEqual(findClaims(words('This detox tea melts belly fat.')), [], 'field words only count for that field');
 });
+
+test('captions: each distinct card look is drawn once and the runs cover every frame in order', async () => {
+  const { captionStates } = await import('./captions.js');
+  const phrases = [
+    { start: 1, end: 3, words: [{ text: 'Brush', at: 1.1, key: false }, { text: 'twice', at: 1.6, key: false }] },
+    { start: 4, end: 5, words: [{ text: 'Floss', at: 4.05, key: true }] },
+  ];
+  const { times, runs, totalFrames } = captionStates(phrases, 6, 30);
+  assert.equal(totalFrames, 180);
+  assert.equal(runs.reduce((sum, run) => sum + run.frames, 0), 180, 'every frame is covered');
+  assert.equal(times[0], -1, 'state 0 is the blank frame');
+  assert.equal(runs[0].state, 0); assert.equal(runs[0].frames, 30, 'first second is blank');
+  assert.ok(times.length < 60, `only changing frames are drawn (${times.length})`);
+  // A frame in the middle of a still stretch maps to a state whose time shows the same look.
+  let frame = 0; const stateAt = (f: number) => { frame = 0; for (const run of runs) { if (f < frame + run.frames) return run.state; frame += run.frames; } return -1; };
+  assert.equal(stateAt(75), stateAt(85), 'card holds still between word changes');
+  assert.equal(stateAt(105), 0, 'gap between phrases is blank');
+});
