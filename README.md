@@ -391,3 +391,23 @@ talking head in the Live editor, so it can be moved, trimmed, muted or deleted
 there, and it is mixed into the MP4 export. Changing a cue in the panel
 replaces that clip's position and volume; otherwise your timeline edits are
 kept. No rendering is needed.
+
+## Stick-figure reels
+
+Open **Stick-figure reels** in the local owner console or visit
+`http://localhost:5173/?mode=stick-reel` when running `npm run dev`.
+
+1. Choose an audio recording or a video with sound. The reel uses the source narration
+   at its original pace.
+2. Use **Transcribe & draft** to run the configured transcription provider, or import
+   a JSON file with a `words` array containing `text`, `start`, and `end` in seconds.
+   The default draft can also be edited directly.
+3. Edit scene cues and caption spelling, then choose a music track and mix levels.
+   **Copy scene prompt** provides the timestamped words and supported presets for an
+   external scene-planning pass. Import the resulting JSON scene array to apply it.
+4. Render the preview and download the 1080 × 1920, 30 fps MP4.
+
+The personal expression PNGs are local assets. On another Mac, place
+`neutral.png`, `happy.png`, `surprised.png`, `thinking.png`, and `smirk.png` in
+`remotion/stick-reel/local/stick-demo/` before rendering. See
+[the audio asset notes](assets/stick-reel/README.md) for sound effect setup.

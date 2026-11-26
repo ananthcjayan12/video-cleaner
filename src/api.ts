@@ -1,3 +1,4 @@
+import type { StickDraft, StickRender } from '../server/stick-reel';
 export type Word = { id: string; text: string; start: number; end: number };
 export type EditorMediaEntry = {
   id: string; name: string; kind: 'video' | 'audio' | 'image'; duration: number;
@@ -275,6 +276,13 @@ export const api = {
   updateWorkspace: (id: string, body: { name?: string; profile?: EngineProfile; niche?: Niche; reelsPerMonth?: number }) => request<Workspace>(`/api/admin/workspaces/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(body) }),
   addMember: (workspaceId: string, username: string, password: string) => request<{ username: string }>(`/api/admin/workspaces/${encodeURIComponent(workspaceId)}/members`, { method: 'POST', body: JSON.stringify({ username, password }) }),
   removeMember: (username: string) => request<{ ok: true }>(`/api/admin/members/${encodeURIComponent(username)}`, { method: 'DELETE' }),
+  createStick: (uploadId: string) => request<Project>('/api/projects/select', { method: 'POST', body: JSON.stringify({ uploadIds: [uploadId], stick: true }) }),
+  stick: (id: string) => request<{ draft: StickDraft; render: StickRender | null; customMusic: boolean }>(`/api/projects/${id}/stick`),
+  stickMusic: (id: string, uploadId?: string) => request<{ customMusic: boolean }>(`/api/projects/${id}/stick/music`, uploadId
+    ? { method: 'PUT', body: JSON.stringify({ uploadId }) } : { method: 'DELETE' }),
+  saveStick: (id: string, draft: StickDraft) => request<{ draft: StickDraft }>(`/api/projects/${id}/stick`, { method: 'PUT', body: JSON.stringify(draft) }),
+  transcribeStick: (id: string) => request<{ draft: StickDraft }>(`/api/projects/${id}/stick/transcribe`, { method: 'POST' }),
+  renderStick: (id: string, draft: StickDraft) => request<{ render: StickRender }>(`/api/projects/${id}/stick/render`, { method: 'POST', body: JSON.stringify(draft) }),
   startAuto: (id: string, options: AutoOptions) => request<AutoJob>(`/api/projects/${id}/auto`, { method: 'POST', body: JSON.stringify(options) }),
   autoStatus: (id: string) => request<AutoJob>(`/api/projects/${id}/auto`),
   reviewAuto: (id: string, body: { action: 'continue' | 'redo'; keepRanges?: KeepRange[]; notes?: string }) => request<{ ok: boolean }>(`/api/projects/${id}/auto/review`, { method: 'POST', body: JSON.stringify(body) }),

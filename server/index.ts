@@ -1,3 +1,4 @@
+import { loadStickDraft, makeStickDraft, renderStickReel, saveStickDraft, stickMusicPath, type StickRender } from './stick-reel.js';
 import { EMOTIONS } from './emotion-sfx.js';
 import { MOTION_SOUNDS, motionSoundPath } from './motion-sfx.js';
 import { colorVideoFilter } from './color.js';
@@ -935,8 +936,12 @@ app.get('/api/projects', route(async (_req, res) => {
 
 app.post('/api/projects/select', route(async (req, res) => {
   // Auto reels re-render every clip to 1080x1920 with its own colour handling, so clips only need audio there.
-  const relaxed = req.body?.auto === true;
-  const sourcePaths = await uploadedOr(req, 'video', () => pickNativeFiles()); if (!sourcePaths.length) return void res.status(400).json({ error: 'No video clips selected' }); const probed = await Promise.all(sourcePaths.map(async (sourcePath) => withDuration(sourcePath, await probe(sourcePath)))); if (relaxed) { const silent = probed.find((item) => !item.media.audioCodec); if (silent) throw new Error(`${path.basename(silent.sourcePath)} has no audio track.`); } else assertCompatibleClips(probed);
+  const stick = req.body?.stick === true && !isRemoteRequest(req);
+  const relaxed = req.body?.auto === true || stick;
+  const stickUpload = stick && Array.isArray(req.body?.uploadIds) && req.body.uploadIds.length === 1
+    ? await readUpload(await uploadsDir(), String(req.body.uploadIds[0])) : undefined;
+  if (stick && (!stickUpload || !['audio', 'video'].includes(stickUpload.kind))) throw new Error('Upload one voiceover or video with sound.');
+  const sourcePaths = await uploadedOr(req, stickUpload?.kind ?? 'video', () => pickNativeFiles()); if (!sourcePaths.length) return void res.status(400).json({ error: 'No video clips selected' }); const probed = await Promise.all(sourcePaths.map(async (sourcePath) => withDuration(sourcePath, await probe(sourcePath)))); if (relaxed) { const silent = probed.find((item) => !item.media.audioCodec); if (silent) throw new Error(`${path.basename(silent.sourcePath)} has no audio track.`); } else assertCompatibleClips(probed);
   const settings = await resolvedSettings(); const id = randomUUID(); const workDir = path.join(settings.projectsDir, id); await fs.mkdir(workDir, { recursive: true }); const now = new Date().toISOString(); const firstName = path.basename(sourcePaths[0]);
   const clips: ProjectClip[] = probed.map((item, index) => ({ id: `clip-${String(index + 1).padStart(3, '0')}`, sourcePath: item.sourcePath, sourceName: path.basename(item.sourcePath), media: item.media, timelineStart: 0, timelineEnd: 0 }));
   // A customer's reels always go to their own account; the owner can make one for any account (default: Personal).
@@ -1816,6 +1821,82 @@ async function loadAutoJob(project: Project) {
   if (saved.package?.state === 'running') { saved.package.state = 'failed'; saved.package.error = 'Interrupted by a restart of the app.'; }
   autoJobs.set(project.id, saved); return saved;
 }
+const stickJobs = new Map<string, StickRender>();
+const stickRoute = (handler: (req: express.Request, res: express.Response, project: Project) => Promise<void>) =>
+  route(async (req, res) => {
+    if (isRemoteRequest(req) || !isAdmin(res)) return void res.status(403).json({ error: 'Stick-figure reels are available on this Mac.' });
+    const project = getProject(routeParam(req.params.id));
+    if (projectClips(project).length !== 1 || !Number.isFinite(project.media.duration) || project.media.duration <= 0 || project.media.duration > 300) {
+      throw new Error('Use one recording, up to five minutes long.');
+    }
+    await handler(req, res, project);
+  });
+
+app.get('/api/projects/:id/stick', stickRoute(async (_req, res, project) => {
+  const saved = await fs.readFile(path.join(project.workDir, 'stick-render.json'), 'utf8')
+    .then(text => JSON.parse(text) as StickRender).catch(() => null);
+  res.json({ draft: await loadStickDraft(project), render: stickJobs.get(project.id) ?? saved, customMusic: await fs.access(stickMusicPath(project)).then(() => true, () => false) });
+}));
+app.put('/api/projects/:id/stick', stickRoute(async (req, res, project) => {
+  res.json({ draft: await saveStickDraft(project, req.body) });
+}));
+app.put('/api/projects/:id/stick/music', stickRoute(async (req, res, project) => {
+  const settings = await resolvedSettings();
+  if (!settings.ffmpegBin) throw new Error('FFmpeg was not found.');
+  const source = await completedUploadPath(await uploadsDir(), String(req.body?.uploadId ?? ''), 'audio');
+  const temporary = path.join(project.workDir, `music-${randomUUID()}.m4a`);
+  try {
+    await run(settings.ffmpegBin, ['-v', 'error', '-i', source, '-map', '0:a:0', '-t', '300', '-c:a', 'aac', '-b:a', '192k', temporary], undefined, 120_000);
+    await fs.rename(temporary, stickMusicPath(project));
+  } finally { await fs.rm(temporary, { force: true }); }
+  res.json({ customMusic: true });
+}));
+app.delete('/api/projects/:id/stick/music', stickRoute(async (_req, res, project) => {
+  await fs.rm(stickMusicPath(project), { force: true });
+  res.json({ customMusic: false });
+}));
+app.post('/api/projects/:id/stick/transcribe', stickRoute(async (_req, res, project) => {
+  const context = await projectUsageContext(project);
+  const transcript = await runWithUsage(context, () => transcribeProject(project));
+  res.json({ draft: await saveStickDraft(project, makeStickDraft(transcript.words.filter(word => word.start < project.media.duration))) });
+}));
+app.post('/api/projects/:id/stick/render', stickRoute(async (req, res, project) => {
+  if ([...stickJobs.values()].some(job => job.state === 'running')) {
+    return void res.status(409).json({ error: 'A stick-figure reel is already rendering.' });
+  }
+  const job: StickRender = { state: 'running', progress: 0 };
+  stickJobs.set(project.id, job);
+  try {
+    await requireSource(project);
+    const draft = req.body?.scenes ? await saveStickDraft(project, req.body) : await loadStickDraft(project);
+    const settings = await resolvedSettings();
+    if (!settings.ffmpegBin) throw new Error('FFmpeg was not found.');
+    const ffmpegBin = settings.ffmpegBin;
+    const renderId = randomUUID();
+    const temporary = path.join(project.workDir, `stick-${renderId}-visual.mp4`);
+    const output = path.join(exportsDir(project), `stick-reel-${renderId}.mp4`);
+    await fs.mkdir(exportsDir(project), { recursive: true });
+    res.status(202).json({ render: job });
+    void (async () => {
+      try {
+        await renderStickReel({ project, draft, visual: temporary, output, chromeBin: await detectChromeBin(),
+          ffmpeg: args => run(ffmpegBin, args, undefined, 600_000), progress: value => { job.progress = value; } });
+        const finished: StickRender = { state: 'ready', progress: 1, url: downloadUrlFor(project, output) };
+        await atomicWriteJson(path.join(project.workDir, 'stick-render.json'), finished);
+        Object.assign(job, finished);
+      } catch (error) {
+        Object.assign(job, { state: 'failed', error: error instanceof Error ? error.message : String(error) });
+        await fs.rm(output, { force: true }).catch(() => undefined);
+      } finally {
+        await fs.rm(temporary, { force: true }).catch(() => undefined);
+      }
+    })();
+  } catch (error) {
+    stickJobs.delete(project.id);
+    throw error;
+  }
+}));
+
 app.post('/api/projects/:id/auto', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id));
   if (['running', 'review'].includes(autoJobs.get(project.id)?.state ?? '')) return void res.status(409).json({ error: 'Auto reel is already running for this project' });
