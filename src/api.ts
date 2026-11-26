@@ -1,7 +1,7 @@
 import type { StickDraft, StickRender, StickTheme } from '../server/stick-reel';
 import type { NarrationJob, StickScript, StickStudioSettings } from '../server/stick-narration';
 export type StickPlanState = { state: 'running' | 'failed'; error?: string } | null;
-export type StudioInfo = { settings: StickStudioSettings; voices: Array<{ id: string; label: string }>; themes: StickTheme[]; facePacks: string[]; scriptEngine: { provider: string; model: string }; geminiReady: boolean };
+export type StudioInfo = { settings: StickStudioSettings; voices: Array<{ id: string; label: string }>; themes: StickTheme[]; facePacks: string[]; scriptEngine: { provider: string; model: string; effort: string }; geminiReady: boolean };
 export type ScriptJob = { id: string; state: 'running' | 'ready' | 'failed'; script?: StickScript; error?: string };
 export type Word = { id: string; text: string; start: number; end: number };
 export type EditorMediaEntry = {
@@ -67,7 +67,7 @@ export type SystemStatus = {
   claude: { installed: boolean; authenticated: boolean; path: string | null };
   grok: { installed: boolean; path: string | null; model: string; videoModel?: string };
   agy: { installed: boolean; path: string | null };
-  textModels: { clean: { provider: TextProvider; model: string; effort?: string }; planning: { provider: TextProvider; model: string; effort?: string }; pictures?: { provider: 'claude' | 'codex'; model: string; effort?: string }; codexModel: string };
+  textModels: { clean: { provider: TextProvider; model: string; effort?: string }; planning: { provider: TextProvider; model: string; effort?: string }; pictures?: { provider: 'claude' | 'codex'; model: string; effort?: string }; script?: { provider: TextProvider; model: string; effort?: string }; codexModel: string };
   gflow: { installed: boolean; authenticated: boolean; path: string | null; model: string; profile: string };
   ffmpeg: { installed: boolean; path: string | null; capabilities?: { videoToolboxDecode: boolean; h264VideoToolbox: boolean; hevcVideoToolbox: boolean } };
   ffprobe: { installed: boolean; path: string | null };

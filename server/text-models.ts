@@ -141,6 +141,10 @@ async function writeGenerationLog(workDir: string, outputName: string, details: 
   }
 }
 
+/** Effort (low/medium/high/xhigh/max) mapped to OpenAI reasoning_effort and Gemini thinkingLevel, which top out at high. */
+export const openAiEffort = (effort: string) => (effort === 'low' || effort === 'medium' ? effort : 'high');
+export const geminiThinkingLevel = (effort: string) => (effort === 'low' || effort === 'medium' ? effort : 'high');
+
 export async function generateStructuredText(options: {
   choice: TextModelChoice; config: TextModelConfig; workDir: string;
   prompt: string; schema: Record<string, unknown>; outputName: string;
@@ -237,23 +241,31 @@ export async function generateStructuredText(options: {
   if (!model) throw new Error('Choose a model for ' + choice.provider + ' text generation.');
   if (choice.provider === 'openai') {
     if (!config.openAiApiKey) throw new Error('OpenAI API key is missing.');
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+    const messages = [{ role: 'user', content: images.length ? [{ type: 'text', text: jsonPrompt }, ...await Promise.all(images.map(async file => ({ type: 'image_url', image_url: { url: await dataUrl(file) } })))] : jsonPrompt }];
+    const callOpenAi = (withEffort: boolean) => fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST', headers: { Authorization: 'Bearer ' + config.openAiApiKey, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, messages: [{ role: 'user', content: images.length ? [{ type: 'text', text: jsonPrompt }, ...await Promise.all(images.map(async file => ({ type: 'image_url', image_url: { url: await dataUrl(file) } })))] : jsonPrompt }], response_format: { type: 'json_object' } }),
+      body: JSON.stringify({ model, messages, response_format: { type: 'json_object' }, ...(withEffort ? { reasoning_effort: openAiEffort(choice.effort!) } : {}) }),
       signal: options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(600000)]) : AbortSignal.timeout(600000),
     });
-    const body = await response.json() as any;
+    let response = await callOpenAi(Boolean(choice.effort));
+    let body = await response.json() as any;
+    // Models without reasoning reject reasoning_effort: retry once without it rather than failing the reel.
+    if (!response.ok && choice.effort && /reasoning/i.test(String(body.error?.message))) { response = await callOpenAi(false); body = await response.json() as any; }
     if (!response.ok) throw new Error('OpenAI: ' + (body.error?.message || response.status));
     await recordUsage({ kind: 'text', provider: 'openai', model, inputTokens: body.usage?.prompt_tokens, outputTokens: body.usage?.completion_tokens });
     return parseModelJson(body.choices?.[0]?.message?.content || '');
   }
   if (!config.geminiApiKey) throw new Error('Gemini API key is missing.');
-  const response = await fetch('https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent', {
-    method: 'POST', headers: { 'x-goog-api-key': config.geminiApiKey, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ contents: [{ parts: [{ text: jsonPrompt }, ...await Promise.all(images.map(async file => ({ inlineData: await inlineImage(file) })))] }], generationConfig: { responseMimeType: 'application/json' } }),
+  const parts = [{ text: jsonPrompt }, ...await Promise.all(images.map(async file => ({ inlineData: await inlineImage(file) })))];
+  const callGemini = (withEffort: boolean) => fetch('https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent', {
+    method: 'POST', headers: { 'x-goog-api-key': config.geminiApiKey!, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ contents: [{ parts }], generationConfig: { responseMimeType: 'application/json', ...(withEffort ? { thinkingConfig: { thinkingLevel: geminiThinkingLevel(choice.effort!) } } : {}) } }),
     signal: options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(600000)]) : AbortSignal.timeout(600000),
   });
-  const body = await response.json() as any;
+  let response = await callGemini(Boolean(choice.effort));
+  let body = await response.json() as any;
+  // Older Gemini models have no thinking levels: retry once without.
+  if (!response.ok && choice.effort && /think/i.test(String(body.error?.message))) { response = await callGemini(false); body = await response.json() as any; }
   if (!response.ok) throw new Error('Gemini: ' + (body.error?.message || response.status));
   await recordUsage({ kind: 'text', provider: 'gemini', model, inputTokens: body.usageMetadata?.promptTokenCount, outputTokens: (body.usageMetadata?.candidatesTokenCount ?? 0) + (body.usageMetadata?.thoughtsTokenCount ?? 0) });
   return parseModelJson((body.candidates?.[0]?.content?.parts ?? []).map((part: { text?: string }) => part.text || '').join(''));

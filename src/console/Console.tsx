@@ -452,18 +452,21 @@ function EnginesPage({ data, status, onStatus, act }: { data: ConsoleData; statu
         <section className="oc-card">
           <div className="oc-card-head"><h2>💻 In-house <small className="oc-muted">your own clinic</small></h2></div>
           <dl className="oc-engines">
-            <dt>Cleaning</dt><dd>{engine(t.clean)} <Signed ok={cliOk(t.clean.provider)} /></dd>
-            <dt>Planning</dt><dd>{engine(t.planning)} <Signed ok={cliOk(t.planning.provider)} /></dd>
-            <dt>Pictures</dt><dd>ChatGPT in Chrome or Gemini (picked per reel in the phone app)</dd>
+            <dt>Cleaning</dt><dd><EngineRow choice={t.clean} keys={{ provider: 'cleanProvider', model: 'cleanModel', effort: 'cleanEffort' }} save={save} ok={cliOk(t.clean.provider)} /></dd>
+            <dt>Planning</dt><dd><EngineRow choice={t.planning} keys={{ provider: 'planningProvider', model: 'planningModel', effort: 'planningEffort' }} save={save} ok={cliOk(t.planning.provider)} /></dd>
+            <dt>Stick script</dt><dd><EngineRow choice={t.script ?? { provider: 'claude-cli', model: 'claude-sonnet-5-5', effort: 'high' }} keys={{ provider: 'scriptProvider', model: 'scriptModel', effort: 'scriptEffort' }} save={save} ok={cliOk(t.script?.provider ?? 'claude-cli')} /></dd>
+            <dt>Pictures</dt><dd><EngineRow choice={{ provider: t.pictures?.provider === 'codex' ? 'codex-cli' : 'claude-cli', model: t.pictures?.model ?? '', effort: t.pictures?.effort }} providers={['claude-cli', 'codex-cli']} keys={{ provider: 'picturesProvider', model: 'picturesModel', effort: 'picturesEffort' }} save={(body, done) => save(body.picturesProvider ? { ...body, picturesProvider: body.picturesProvider === 'codex-cli' ? 'codex' : 'claude' } : body, done)} ok={cliOk(t.pictures?.provider === 'codex' ? 'codex-cli' : 'claude-cli')} />
+              <small className="oc-muted">Drives ChatGPT in Chrome. Gemini pictures are picked per reel in the phone app.</small></dd>
             <dt>Speech to text</dt><dd>{status.transcription ? `${status.transcription.provider === 'gemini' ? 'Gemini' : 'ElevenLabs'} · ${status.transcription.model}` : '—'}</dd>
+            <dt>Stick voice</dt><dd>Gemini TTS · voice and model in the stick app's Settings</dd>
           </dl>
-          <small className="oc-muted">Change these in the <a href="/?advanced=1">advanced editor's settings</a>.</small>
+          <small className="oc-muted">Effort = how long the model thinks. Higher is slower and better. API providers use the keys on the right (OpenAI key in the <a href="/?advanced=1">advanced settings</a>).</small>
         </section>
         <section className="oc-card">
           <div className="oc-card-head"><h2>☁️ API <small className="oc-muted">customers</small></h2></div>
           <dl className="oc-engines">
             <dt>Text</dt><dd><select value={api_?.anthropic.model ?? 'claude-opus-5-5'} onChange={(e) => void save({ apiTextModel: e.target.value }, 'Text model saved.')}>{API_MODELS.map(([id, label]) => <option key={id} value={id}>{label}</option>)}</select>
-              <select value={api_?.anthropic.effort || 'medium'} onChange={(e) => void save({ apiEffort: e.target.value }, 'Effort saved.')} aria-label="Effort">{['low', 'medium', 'high'].map((e) => <option key={e} value={e}>{e}</option>)}</select></dd>
+              <select value={api_?.anthropic.effort || 'medium'} onChange={(e) => void save({ apiEffort: e.target.value }, 'Effort saved.')} aria-label="Effort">{EFFORT_LEVELS.map((e) => <option key={e} value={e}>{e}</option>)}</select></dd>
             <dt>Pictures</dt><dd>Gemini · {api_?.gemini.imageModel}</dd>
             <dt>Speech to text</dt><dd>Gemini</dd>
             <dt>Claude API key</dt><dd><KeyField configured={Boolean(api_?.anthropic.configured)} value={anthropicKey} onChange={setAnthropicKey} onSave={() => { void save({ anthropicApiKey: anthropicKey }, 'Claude API key saved.'); setAnthropicKey(''); }} check={checks?.anthropic} /></dd>
@@ -474,6 +477,34 @@ function EnginesPage({ data, status, onStatus, act }: { data: ConsoleData; statu
       </div>
       <section className="oc-card"><div className="oc-card-head"><h2>Cost per reel</h2><small className="oc-muted">Last 30 days · on paid APIs</small></div><CostChart reels={data.reels} now={data.now} /></section>
     </>
+  );
+}
+const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
+const ENGINE_PROVIDERS = ['claude-cli', 'codex-cli', 'agy-cli', 'anthropic', 'openai', 'gemini'];
+const MODEL_HINTS: Record<string, string[]> = {
+  'claude-cli': ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-fable-5-2'],
+  anthropic: ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-fable-5-2'],
+  gemini: ['gemini-3.8-flash', 'gemini-3.8-pro'],
+};
+const PROVIDER_TITLE: Record<string, string> = { 'claude-cli': 'Claude CLI', 'codex-cli': 'Codex CLI', 'agy-cli': 'Antigravity CLI', anthropic: 'Claude API', openai: 'OpenAI API', gemini: 'Gemini API' };
+/** Provider + model + effort for one pipeline step; saves each change straight away. */
+function EngineRow({ choice, keys, save, ok, providers = ENGINE_PROVIDERS }: { choice: { provider: string; model: string; effort?: string }; keys: { provider: string; model: string; effort: string }; save: (body: Record<string, string>, done: string) => Promise<void> | void; ok: boolean; providers?: string[] }) {
+  const [model, setModel] = useState(choice.model);
+  useEffect(() => setModel(choice.model), [choice.model]);
+  const listId = `models-${keys.model}`;
+  const noEffort = choice.provider === 'agy-cli';
+  return (
+    <span className="oc-engine-row">
+      <select aria-label="Provider" value={choice.provider} onChange={(e) => void save({ [keys.provider]: e.target.value, [keys.model]: '' }, 'Engine saved.')}>
+        {providers.map((p) => <option key={p} value={p}>{PROVIDER_TITLE[p] ?? p}</option>)}
+      </select>
+      <input aria-label="Model" list={listId} value={model} placeholder="default model" onChange={(e) => setModel(e.target.value)} onBlur={() => { if (model.trim() !== choice.model) void save({ [keys.model]: model.trim() }, 'Model saved.'); }} onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }} />
+      <datalist id={listId}>{(MODEL_HINTS[choice.provider] ?? []).map((m) => <option key={m} value={m} />)}</datalist>
+      <select aria-label="Effort" value={noEffort ? '' : choice.effort || 'medium'} disabled={noEffort} title={noEffort ? 'Antigravity has no effort setting' : 'How long the model thinks'} onChange={(e) => void save({ [keys.effort]: e.target.value }, 'Effort saved.')}>
+        {noEffort ? <option value="">no effort</option> : EFFORT_LEVELS.map((e) => <option key={e} value={e}>{e}</option>)}
+      </select>
+      {['claude-cli', 'codex-cli', 'agy-cli'].includes(choice.provider) && <Signed ok={ok} />}
+    </span>
   );
 }
 function Signed({ ok }: { ok: boolean }) { return <span className={`oc-status ${ok ? 'good' : 'warn'}`}>{ok ? '✓ Signed in' : '! Not signed in'}</span>; }

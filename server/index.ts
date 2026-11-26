@@ -1,6 +1,6 @@
 import { listStickFacePacks, loadStickDraft, makeStickDraft, renderStickReel, saveStickDraft, STICK_THEMES, stickMusicPath, type StickRender } from './stick-reel.js';
 import { planStickReelWithAi } from './stick-planner.js';
-import { loadStudioSettings, MALE_VOICES, narrateScript, narrationJobs, newNarrationJob, previewVoice, saveStudioSettings, writeStickScript, type StickScript } from './stick-narration.js';
+import { DEFAULT_SCRIPT_ENGINE, loadStudioSettings, MALE_VOICES, narrateScript, narrationJobs, newNarrationJob, previewVoice, saveStudioSettings, writeStickScript, type StickScript } from './stick-narration.js';
 import { EMOTIONS } from './emotion-sfx.js';
 import { MOTION_SOUNDS, motionSoundPath } from './motion-sfx.js';
 import { colorVideoFilter } from './color.js';
@@ -113,6 +113,8 @@ type LocalSettings = {
   sttProvider?: SttProvider; geminiSttModel?: string;
   // Per-task AI engine like story-reels: provider + model + effort. Pictures = ChatGPT in Chrome.
   cleanEffort?: string; planningEffort?: string; picturesProvider?: 'claude' | 'codex'; picturesModel?: string; picturesEffort?: string;
+  // Stick-figure narration script writer (own engine so it can differ from Planning).
+  scriptProvider?: TextProvider; scriptModel?: string; scriptEffort?: string;
   accessTeamDomain?: string; accessAud?: string; accessAllowedEmails?: string;
   openAiImageModel?: string; geminiImageModel?: string; grokModel?: string; grokVideoModel?: string; gflowProfile?: string; gflowVideoModel?: string;
   magnificApiKey?: string; magnificVideoModel?: string; magnificVideoEndpoint?: string;
@@ -317,6 +319,7 @@ async function resolvedSettings() {
     imageProvider: providerValue(localSettings.imageProvider || process.env.IMAGE_PROVIDER),
     cleanProvider: textProviderValue(localSettings.cleanProvider || process.env.CLEAN_PROVIDER), cleanModel: localSettings.cleanModel || process.env.CLEAN_MODEL || '',
     cleanEffort: localSettings.cleanEffort || 'medium', planningEffort: localSettings.planningEffort || 'medium',
+    scriptProvider: textProviderValue(localSettings.scriptProvider || 'claude-cli'), scriptModel: localSettings.scriptModel ?? DEFAULT_SCRIPT_ENGINE.model, scriptEffort: localSettings.scriptEffort || DEFAULT_SCRIPT_ENGINE.effort,
     picturesProvider: (localSettings.picturesProvider === 'codex' ? 'codex' : 'claude') as 'claude' | 'codex',
     picturesModel: localSettings.picturesModel ?? (localSettings.picturesProvider === 'codex' ? '' : DEFAULT_PICTURES_ENGINE.model), picturesEffort: localSettings.picturesEffort || DEFAULT_PICTURES_ENGINE.effort,
     planningProvider: textProviderValue(localSettings.planningProvider || process.env.BROLL_PLANNING_PROVIDER), planningModel: localSettings.planningModel || process.env.BROLL_PLANNING_MODEL || '',
@@ -340,9 +343,9 @@ type Settings = Awaited<ReturnType<typeof resolvedSettings>>;
  * Text engines for the current account. In-house accounts use the engines chosen in Settings (CLIs on this
  * computer's subscriptions); API accounts always use the Claude API, whatever Settings say.
  */
-function textEngines(settings: Settings, profile: EngineProfile = currentProfile()): { clean: TextModelChoice; planning: TextModelChoice } {
-  if (profile === 'api') { const api: TextModelChoice = { provider: 'anthropic', model: settings.apiTextModel, effort: settings.apiEffort }; return { clean: api, planning: api }; }
-  return { clean: { provider: settings.cleanProvider, model: settings.cleanModel, effort: settings.cleanEffort }, planning: { provider: settings.planningProvider, model: settings.planningModel, effort: settings.planningEffort } };
+function textEngines(settings: Settings, profile: EngineProfile = currentProfile()): { clean: TextModelChoice; planning: TextModelChoice; script: TextModelChoice } {
+  if (profile === 'api') { const api: TextModelChoice = { provider: 'anthropic', model: settings.apiTextModel, effort: settings.apiEffort }; return { clean: api, planning: api, script: api }; }
+  return { clean: { provider: settings.cleanProvider, model: settings.cleanModel, effort: settings.cleanEffort }, planning: { provider: settings.planningProvider, model: settings.planningModel, effort: settings.planningEffort }, script: { provider: settings.scriptProvider, model: settings.scriptModel, effort: settings.scriptEffort } };
 }
 function picturesEngine(settings: Awaited<ReturnType<typeof resolvedSettings>>) {
   return { provider: settings.picturesProvider, model: settings.picturesModel || undefined, effort: settings.picturesEffort || undefined, claudeBin: settings.claudeBin, codexBin: settings.codexBin };
@@ -394,7 +397,7 @@ async function systemStatus() {
     codex: { installed: codexInstalled, authenticated: codexAuthenticated, path: settings.codexBin || null },
     claude: { installed: claudeInstalled, authenticated: claudeAuthenticated, path: settings.claudeBin || null },
     agy: { installed: Boolean(settings.agyBin) && await canRun(settings.agyBin, ['--version']), path: settings.agyBin || null },
-    textModels: { clean: { provider: settings.cleanProvider, model: settings.cleanModel, effort: settings.cleanEffort }, planning: { provider: settings.planningProvider, model: settings.planningModel, effort: settings.planningEffort }, pictures: { provider: settings.picturesProvider, model: settings.picturesModel, effort: settings.picturesEffort }, codexModel: settings.codexModel },
+    textModels: { clean: { provider: settings.cleanProvider, model: settings.cleanModel, effort: settings.cleanEffort }, planning: { provider: settings.planningProvider, model: settings.planningModel, effort: settings.planningEffort }, pictures: { provider: settings.picturesProvider, model: settings.picturesModel, effort: settings.picturesEffort }, script: { provider: settings.scriptProvider, model: settings.scriptModel, effort: settings.scriptEffort }, codexModel: settings.codexModel },
     grok: { installed: grokInstalled, path: settings.grokBin || null, model: settings.grokModel || 'CLI default', videoModel: settings.grokVideoModel },
     gflow: { installed: gflowInstalled, authenticated: gflowAuthenticated, path: settings.gflowBin || null, model: settings.gflowVideoModel, profile: settings.gflowProfile || 'default' },
     ffmpeg: { installed: ffmpegInstalled, path: settings.ffmpegBin || null, capabilities }, ffprobe: { installed: ffprobeInstalled, path: settings.ffprobeBin || null },
@@ -913,7 +916,7 @@ app.get('/api/projects/:id/exports/:file', route(async (req, res) => {
 app.get('/api/system/status', route(async (_req, res) => { res.json(await systemStatus()); }));
 app.get('/api/models/agy', route(async (_req, res) => { const settings = await resolvedSettings(); res.json({ models: await availableAgyModels(settings.agyBin) }); }));
 app.get('/api/models/codex', route(async (_req, res) => { const settings = await resolvedSettings(); res.json({ models: await availableCodexModels(settings.codexBin) }); }));
-app.get('/api/settings', route(async (_req, res) => { const status = await systemStatus(); res.json({ ...status, overrides: { apiTextModel: localSettings.apiTextModel ?? '', apiEffort: localSettings.apiEffort ?? '', codexBin: localSettings.codexBin ?? '', claudeBin: localSettings.claudeBin ?? '', agyBin: localSettings.agyBin ?? '', sttProvider: localSettings.sttProvider ?? '', geminiSttModel: localSettings.geminiSttModel ?? '', cleanEffort: localSettings.cleanEffort ?? '', planningEffort: localSettings.planningEffort ?? '', picturesProvider: localSettings.picturesProvider ?? '', picturesModel: localSettings.picturesModel ?? '', picturesEffort: localSettings.picturesEffort ?? '', cleanProvider: localSettings.cleanProvider ?? '', cleanModel: localSettings.cleanModel ?? '', planningProvider: localSettings.planningProvider ?? '', planningModel: localSettings.planningModel ?? '', codexModel: localSettings.codexModel ?? '', grokBin: localSettings.grokBin ?? '', gflowBin: localSettings.gflowBin ?? '', ffmpegBin: localSettings.ffmpegBin ?? '', ffprobeBin: localSettings.ffprobeBin ?? '', projectsDir: localSettings.projectsDir ?? '', imageProvider: localSettings.imageProvider ?? '', openAiImageModel: localSettings.openAiImageModel ?? '', geminiImageModel: localSettings.geminiImageModel ?? '', grokModel: localSettings.grokModel ?? '', grokVideoModel: localSettings.grokVideoModel ?? '', gflowProfile: localSettings.gflowProfile ?? '', gflowVideoModel: localSettings.gflowVideoModel ?? '', magnificVideoModel: localSettings.magnificVideoModel ?? '', magnificVideoEndpoint: localSettings.magnificVideoEndpoint ?? '' } }); }));
+app.get('/api/settings', route(async (_req, res) => { const status = await systemStatus(); res.json({ ...status, overrides: { apiTextModel: localSettings.apiTextModel ?? '', apiEffort: localSettings.apiEffort ?? '', codexBin: localSettings.codexBin ?? '', claudeBin: localSettings.claudeBin ?? '', agyBin: localSettings.agyBin ?? '', sttProvider: localSettings.sttProvider ?? '', geminiSttModel: localSettings.geminiSttModel ?? '', cleanEffort: localSettings.cleanEffort ?? '', planningEffort: localSettings.planningEffort ?? '', picturesProvider: localSettings.picturesProvider ?? '', picturesModel: localSettings.picturesModel ?? '', picturesEffort: localSettings.picturesEffort ?? '', scriptProvider: localSettings.scriptProvider ?? '', scriptModel: localSettings.scriptModel ?? '', scriptEffort: localSettings.scriptEffort ?? '', cleanProvider: localSettings.cleanProvider ?? '', cleanModel: localSettings.cleanModel ?? '', planningProvider: localSettings.planningProvider ?? '', planningModel: localSettings.planningModel ?? '', codexModel: localSettings.codexModel ?? '', grokBin: localSettings.grokBin ?? '', gflowBin: localSettings.gflowBin ?? '', ffmpegBin: localSettings.ffmpegBin ?? '', ffprobeBin: localSettings.ffprobeBin ?? '', projectsDir: localSettings.projectsDir ?? '', imageProvider: localSettings.imageProvider ?? '', openAiImageModel: localSettings.openAiImageModel ?? '', geminiImageModel: localSettings.geminiImageModel ?? '', grokModel: localSettings.grokModel ?? '', grokVideoModel: localSettings.grokVideoModel ?? '', gflowProfile: localSettings.gflowProfile ?? '', gflowVideoModel: localSettings.gflowVideoModel ?? '', magnificVideoModel: localSettings.magnificVideoModel ?? '', magnificVideoEndpoint: localSettings.magnificVideoEndpoint ?? '' } }); }));
 app.put('/api/settings', route(async (req, res) => {
   const body = req.body ?? {}; const previousProjectsDir = (await resolvedSettings()).projectsDir;
   if (typeof body.elevenLabsApiKey === 'string' && body.elevenLabsApiKey.trim()) localSettings.elevenLabsApiKey = body.elevenLabsApiKey.trim(); if (typeof body.openAiApiKey === 'string' && body.openAiApiKey.trim()) localSettings.openAiApiKey = body.openAiApiKey.trim(); if (typeof body.geminiApiKey === 'string' && body.geminiApiKey.trim()) localSettings.geminiApiKey = body.geminiApiKey.trim(); if (typeof body.magnificApiKey === 'string' && body.magnificApiKey.trim()) localSettings.magnificApiKey = body.magnificApiKey.trim(); if (typeof body.anthropicApiKey === 'string' && body.anthropicApiKey.trim()) localSettings.anthropicApiKey = body.anthropicApiKey.trim();
@@ -921,9 +924,11 @@ app.put('/api/settings', route(async (req, res) => {
   if (typeof body.sttProvider === 'string') localSettings.sttProvider = body.sttProvider ? sttProviderValue(body.sttProvider, 'gemini') : undefined;
   if (typeof body.picturesProvider === 'string') localSettings.picturesProvider = body.picturesProvider === 'codex' ? 'codex' : body.picturesProvider === 'claude' ? 'claude' : undefined;
   if (typeof body.picturesModel === 'string') localSettings.picturesModel = body.picturesModel.trim();
-  for (const key of ['cleanEffort', 'planningEffort', 'picturesEffort'] as const) if (typeof body[key] === 'string') localSettings[key] = ['low', 'medium', 'high', 'xhigh', 'max'].includes(body[key]) ? body[key] : undefined;
+  for (const key of ['cleanEffort', 'planningEffort', 'picturesEffort', 'scriptEffort'] as const) if (typeof body[key] === 'string') localSettings[key] = ['low', 'medium', 'high', 'xhigh', 'max'].includes(body[key]) ? body[key] : undefined;
   if (typeof body.cleanProvider === 'string') localSettings.cleanProvider = textProviderValue(body.cleanProvider);
   if (typeof body.planningProvider === 'string') localSettings.planningProvider = textProviderValue(body.planningProvider);
+  if (typeof body.scriptProvider === 'string') localSettings.scriptProvider = body.scriptProvider ? textProviderValue(body.scriptProvider) : undefined;
+  if (typeof body.scriptModel === 'string') localSettings.scriptModel = body.scriptModel.trim();
   for (const key of ['apiTextModel', 'geminiSttModel', 'cleanModel', 'planningModel', 'codexModel', 'agyBin', 'codexBin', 'claudeBin', 'grokBin', 'gflowBin', 'ffmpegBin', 'ffprobeBin', 'projectsDir', 'openAiImageModel', 'geminiImageModel', 'grokModel', 'grokVideoModel', 'gflowProfile', 'gflowVideoModel', 'magnificVideoModel', 'magnificVideoEndpoint'] as const) if (typeof body[key] === 'string') localSettings[key] = body[key].trim() || undefined;
   capabilityCache.clear(); await saveSettings(); const nextProjectsDir = (await resolvedSettings()).projectsDir; if (nextProjectsDir !== previousProjectsDir) await hydrateProjects(true); res.json(await systemStatus());
 }));
@@ -1837,10 +1842,10 @@ const scriptFromBody = (value: unknown): StickScript | undefined => {
   return lines.length ? { title: String(input.title ?? '').slice(0, 80), lines } : undefined;
 };
 app.get('/api/stick/studio', studioRoute(async (_req, res) => {
-  const settings = await resolvedSettings(); const planning = textEngines(settings).planning;
+  const settings = await resolvedSettings(); const script = textEngines(settings).script;
   res.json({
     settings: await loadStudioSettings(), voices: MALE_VOICES, themes: STICK_THEMES, facePacks: await listStickFacePacks(),
-    scriptEngine: { provider: planning.provider, model: planning.model || 'default' }, geminiReady: Boolean(settings.geminiApiKey),
+    scriptEngine: { provider: script.provider, model: script.model || 'default', effort: script.effort || 'default' }, geminiReady: Boolean(settings.geminiApiKey),
   });
 }));
 app.put('/api/stick/studio', studioRoute(async (req, res) => { res.json({ settings: await saveStudioSettings(req.body ?? {}) }); }));
@@ -1860,7 +1865,7 @@ app.post('/api/stick/script', studioRoute(async (req, res) => {
     concept, seconds: Number(req.body?.seconds) || undefined,
     feedback: typeof req.body?.feedback === 'string' ? req.body.feedback.slice(0, 1500) : undefined,
     previous: scriptFromBody(req.body?.previous),
-    settings: studio, textConfig: settings, choice: textEngines(settings).planning, workDir: path.join(studioDir(), 'work'),
+    settings: studio, textConfig: settings, choice: textEngines(settings).script, workDir: path.join(studioDir(), 'work'),
   });
   res.status(202).json({ job });
   void script.then((value) => Object.assign(job, { state: 'ready', script: value }), (error) => Object.assign(job, { state: 'failed', error: error instanceof Error ? error.message : String(error) }));

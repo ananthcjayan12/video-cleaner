@@ -236,3 +236,7 @@ body:has(.oc) { background: #F5F7F6; }
   .oc-btn { min-height: 44px; }
   .oc-btn.small { min-height: 38px; }
 }
+
+.oc-engine-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.oc-engine-row select, .oc-engine-row input { min-height: 38px; border: 1.5px solid var(--line, #d6e0de); border-radius: 10px; padding: 6px 8px; font: inherit; font-size: 14px; background: #fff; }
+.oc-engine-row input { width: 170px; }

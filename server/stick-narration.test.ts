@@ -33,3 +33,9 @@ test('stick planner schema is strict: every object lists all its properties as r
   };
   walk(PLANNER_SCHEMA);
 });
+
+test('effort maps onto OpenAI reasoning_effort and Gemini thinkingLevel (which top out at high)', async () => {
+  const { openAiEffort, geminiThinkingLevel } = await import('./text-models.js');
+  assert.deepEqual(['low', 'medium', 'high', 'xhigh', 'max'].map(openAiEffort), ['low', 'medium', 'high', 'high', 'high']);
+  assert.deepEqual(['low', 'medium', 'max'].map(geminiThinkingLevel), ['low', 'medium', 'high']);
+});

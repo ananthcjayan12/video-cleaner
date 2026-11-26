@@ -66,7 +66,7 @@ export function StudioSettings({ info, onSaved, onBack }: { info: StudioInfo; on
 
       <section className="pr-card pr-options">
         <h2>Script writer</h2>
-        <small className="muted">Uses your Planning engine: {info.scriptEngine.provider} · {info.scriptEngine.model}. Change it in the Console → Engines.</small>
+        <small className="muted">Engine: {({ 'claude-cli': 'Claude CLI', 'codex-cli': 'Codex CLI', 'agy-cli': 'Antigravity CLI', anthropic: 'Claude API', openai: 'OpenAI API', gemini: 'Gemini API' } as Record<string, string>)[info.scriptEngine.provider] ?? info.scriptEngine.provider} · {info.scriptEngine.model} · {info.scriptEngine.effort} effort. Change it in <a href="/?view=console#engines">Console → Engines → Stick script</a>.</small>
         <div className="pr-field">Language<div className="pr-chips">
           <button type="button" className={`pr-chip${s.scriptLanguage === 'malayalam' ? ' on' : ''}`} onClick={() => set({ scriptLanguage: 'malayalam' })}>Malayalam</button>
           <button type="button" className={`pr-chip${s.scriptLanguage === 'english' ? ' on' : ''}`} onClick={() => set({ scriptLanguage: 'english' })}>English</button>

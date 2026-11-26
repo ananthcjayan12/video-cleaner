@@ -30,6 +30,9 @@ export const MALE_VOICES: Array<{ id: string; label: string }> = [
   { id: 'Sadachbia', label: 'Sadachbia · lively' },
 ];
 
+/** Script writer engine default: Claude CLI, Sonnet 5.5, high effort (owner's choice, 2026-11-26). */
+export const DEFAULT_SCRIPT_ENGINE = { provider: 'claude-cli' as const, model: 'claude-sonnet-5-5', effort: 'high' };
+
 export const DEFAULT_MALE_STYLE =
   'A Malayali man in his early thirties from Kerala, a friendly young doctor talking to people on Instagram. ' +
   'Native Malayalam speaker with a natural Kerala accent and intonation, warm, confident and clear. ' +
