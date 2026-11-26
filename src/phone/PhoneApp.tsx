@@ -89,14 +89,14 @@ export function Brand() { return <div className="pr-brand"><img src="/icons/icon
 
 function greeting() { const h = new Date().getHours(); return h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : 'Good evening'; }
 
-function HomePage({ me, workspaceName, credits, ideas, projects, onUpload }: { me: Me | null; workspaceName?: string; credits?: { reelsPerMonth?: number; reelsThisMonth: number }; ideas: { week: Idea[] } | null; projects: Project[] | null; onUpload: () => void }) {
-  const limit = credits?.reelsPerMonth; const used = credits?.reelsThisMonth ?? 0; const left = limit ? Math.max(0, limit - used) : undefined;
+function HomePage({ me, workspaceName, credits, ideas, projects, onUpload }: { me: Me | null; workspaceName?: string; credits?: { reelsPerMonth?: number; limitThisMonth?: number; reelsThisMonth: number }; ideas: { week: Idea[] } | null; projects: Project[] | null; onUpload: () => void }) {
+  const limit = credits?.limitThisMonth ?? credits?.reelsPerMonth; const used = credits?.reelsThisMonth ?? 0; const left = limit ? Math.max(0, limit - used) : undefined;
   const nextMonth = new Date(); nextMonth.setMonth(nextMonth.getMonth() + 1, 1);
   const working = (projects ?? []).filter((p) => p.reel?.state === 'running' || p.reel?.state === 'review');
   const name = me?.role === 'member' ? (workspaceName ?? '') : '';
   return (
     <main className="pr-page">
-      <div className="pr-top"><Brand /></div>
+      <div className="pr-top"><Brand />{me?.role === 'admin' && <a className="pr-btn small" href="/?view=console#overview">Console</a>}</div>
       <h1>{greeting()}{name ? `, ${name}` : ''}</h1>
       <div className="pr-card pr-credits">
         <div className="pr-ring" style={{ ['--p' as string]: limit ? Math.round((left! / limit) * 100) : 100 }}><b>{left ?? used}</b></div>
@@ -198,7 +198,7 @@ function ProfilePage({ me, onToast }: { me: Me | null; onToast: (text: string) =
     catch (error) { onToast(error instanceof Error ? error.message : String(error)); }
   }
   function choosePictures(value: 'gemini' | 'chatgpt') { setPictures(value); try { window.localStorage.setItem(PICTURES_KEY, value); } catch { /* private mode */ } }
-  const limit = workspace?.reelsPerMonth;
+  const limit = workspace?.limitThisMonth ?? workspace?.reelsPerMonth;
   return (
     <main className="pr-page">
       <div className="pr-top"><h1>Profile</h1></div>
@@ -229,6 +229,7 @@ function ProfilePage({ me, onToast }: { me: Me | null; onToast: (text: string) =
             <button type="button" className={`pr-chip${pictures === 'chatgpt' ? ' on' : ''}`} onClick={() => choosePictures('chatgpt')}>ChatGPT in Chrome</button>
             <button type="button" className={`pr-chip${pictures === 'gemini' ? ' on' : ''}`} onClick={() => choosePictures('gemini')}>Gemini</button>
           </div><small>Customer accounts on API keys always use Gemini.</small></div>
+          <a className="pr-btn primary block" href="/?view=console#overview">Open owner console</a>
           <button type="button" className="pr-btn block" onClick={() => go('accounts')}>Customer accounts</button>
           <a className="pr-btn block" href="/?advanced=1">Engine settings and full editor</a>
         </div>

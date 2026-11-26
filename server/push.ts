@@ -50,7 +50,8 @@ export function recipients(all: PushSubscriber[], workspaceId: string, failure =
 }
 
 /** Best effort: a phone that is off or unsubscribed must never break a reel. Dead subscriptions are removed. */
-export async function notify(workspaceId: string, message: PushMessage, failure = false) {
+/** Returns how many phones it was sent to (0 when nobody on the account turned notifications on). */
+export async function notify(workspaceId: string, message: PushMessage, failure = false): Promise<number> {
   try {
     const keys = await vapidKeys(); const targets = recipients(await loadSubscribers(), workspaceId, failure);
     await Promise.all(targets.map(async (target) => {
@@ -60,5 +61,6 @@ export async function notify(workspaceId: string, message: PushMessage, failure 
         if (error?.statusCode === 404 || error?.statusCode === 410) await removeSubscriber(target.subscription.endpoint);
       }
     }));
-  } catch { /* notifications are optional */ }
+    return targets.length;
+  } catch { return 0; /* notifications are optional */ }
 }

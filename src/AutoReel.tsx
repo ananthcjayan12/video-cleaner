@@ -16,7 +16,8 @@ export function AutoReelLauncher({ me, busy, onStarted, onError }: { me?: Me | n
   const [workspaceId, setWorkspaceId] = useState('personal');
   const account = me?.role === 'member' ? me.workspace : me?.workspaces?.find((w) => w.id === workspaceId);
   const apiOnly = account?.effectiveProfile === 'api';
-  const left = account?.reelsPerMonth ? Math.max(0, account.reelsPerMonth - account.reelsThisMonth) : undefined;
+  const accountLimit = account?.limitThisMonth ?? account?.reelsPerMonth;
+  const left = accountLimit ? Math.max(0, accountLimit - account!.reelsThisMonth) : undefined;
   const [upload, setUpload] = useState('');
   const [review, setReview] = useState(true);
   const [thumbnail, setThumbnail] = useState(true);
@@ -42,7 +43,7 @@ export function AutoReelLauncher({ me, busy, onStarted, onError }: { me?: Me | n
       {me?.role === 'admin' && (me.workspaces?.length ?? 0) > 1 && <div className="autoChoice"><span>For account</span><div>{me.workspaces!.map((w) => (
         <button key={w.id} type="button" className={workspaceId === w.id ? 'on' : ''} onClick={() => setWorkspaceId(w.id)}>{w.name}</button>
       ))}</div></div>}
-      {left !== undefined && <p className="autoCredits">{left} of {account!.reelsPerMonth} reels left this month</p>}
+      {left !== undefined && <p className="autoCredits">{left} of {accountLimit} reels left this month</p>}
       <div className="autoChoice"><span>Length</span><div>{LENGTHS.map((option) => <button key={option.label} type="button" className={target === option.value ? 'on' : ''} onClick={() => setTarget(option.value)}>{option.label}</button>)}</div></div>
       {!apiOnly && <div className="autoChoice"><span>B-roll images</span><div>
         <button type="button" className={images === 'gemini' ? 'on' : ''} onClick={() => setImages('gemini')}>Gemini</button>

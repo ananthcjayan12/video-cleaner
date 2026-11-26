@@ -13,7 +13,21 @@ import { nicheValue, type Niche } from './ideas.js';
  * Members are customer logins tied to one workspace. The owner login (auth.json) is the admin and sees everything.
  * Stored in ~/.video-cleaner/workspaces.json (mode 600).
  */
-export type Workspace = { id: string; name: string; profile: EngineProfile; niche?: Niche; reelsPerMonth?: number; createdAt: string };
+/** extraReels: reels added on top of the plan for one month only (e.g. "5 more" bought mid-month). */
+export type Workspace = { id: string; name: string; profile: EngineProfile; niche?: Niche; reelsPerMonth?: number; extraReels?: { month: string; reels: number }; createdAt: string };
+export const monthKey = (now = new Date()) => `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+/** This month's reel limit: the plan plus any extra reels added for this month. undefined = no limit. */
+export function limitThisMonth(workspace: Workspace, now = new Date()) {
+  if (!workspace.reelsPerMonth) return undefined;
+  return workspace.reelsPerMonth + (workspace.extraReels?.month === monthKey(now) ? workspace.extraReels.reels : 0);
+}
+/** Add reels for this month only (they do not carry over). */
+export function addExtraReels(data: WorkspaceFile, id: string, reels: unknown, now = new Date()) {
+  const workspace = data.workspaces.find((w) => w.id === id); if (!workspace) throw new Error('Account not found.');
+  const n = Math.floor(Number(reels)); if (!Number.isFinite(n) || n < 1 || n > 100) throw new Error('Add between 1 and 100 reels.');
+  const month = monthKey(now); const already = workspace.extraReels?.month === month ? workspace.extraReels.reels : 0;
+  workspace.extraReels = { month, reels: already + n }; return workspace;
+}
 export type Member = { username: string; salt: string; hash: string; sessionSecret: string; workspaceId: string; createdAt: string };
 export type WorkspaceFile = { workspaces: Workspace[]; members: Member[] };
 export type SessionUser = { username: string; role: 'admin' | 'member'; workspaceId?: string };

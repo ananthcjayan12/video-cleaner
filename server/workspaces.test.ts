@@ -101,3 +101,21 @@ test('credits count reels finished this month', () => {
   const now = new Date(2026, 10, 25, 12);
   assert.equal(reelsThisMonth([new Date(2026, 10, 1).getTime(), new Date(2026, 9, 31, 23).getTime(), undefined, new Date(2026, 10, 24).getTime()], now), 2);
 });
+
+test('extra reels count for this month only, on top of the plan', async () => {
+  const { addExtraReels, limitThisMonth } = await import('./workspaces.js');
+  const data = { workspaces: [{ id: 'smile', name: 'Smile', profile: 'api' as const, reelsPerMonth: 10, createdAt: '' }], members: [] };
+  const nov = new Date(2026, 10, 20); const dec = new Date(2026, 11, 2);
+  assert.equal(limitThisMonth(data.workspaces[0], nov), 10);
+  addExtraReels(data, 'smile', 5, nov); addExtraReels(data, 'smile', 5, nov);
+  assert.equal(limitThisMonth(data.workspaces[0], nov), 20);
+  assert.equal(limitThisMonth(data.workspaces[0], dec), 10, 'extra reels do not carry over');
+  assert.throws(() => addExtraReels(data, 'smile', 0, nov));
+  assert.equal(limitThisMonth({ id: 'x', name: 'x', profile: 'api', createdAt: '' }, nov), undefined);
+});
+
+test('customers cannot reach the owner console', () => {
+  for (const [method, url] of [['GET', '/api/admin/console'], ['POST', '/api/admin/workspaces/smile/extra-reels'], ['POST', '/api/admin/workspaces/smile/nudge'], ['POST', '/api/admin/engines/test']] as const) {
+    assert.equal(memberRoute(method, url).allowed, false, url);
+  }
+});

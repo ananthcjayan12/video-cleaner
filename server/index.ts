@@ -64,11 +64,11 @@ import { buildEditorRender } from './editor-render.js';
 import { formatMetaFinding, metaTextGuidelinesPrompt, scanMetaText } from './meta-guidelines.js';
 import { availableAgyModels, availableCodexModels, DEFAULT_ANTHROPIC_MODEL, generateStructuredText, TEXT_PROVIDERS, type TextModelChoice, type TextProvider } from './text-models.js';
 import { findClaims } from './claims.js';
-import { nichePack, packLook, packPreview, packWriterNotes } from './niche-packs.js';
+import { NICHE_PACKS, nichePack, packLook, packPreview, packWriterNotes } from './niche-packs.js';
 import { nicheValue, weeklyIdeas, IDEAS, NICHES } from './ideas.js';
 import { addSubscriber, notify, removeSubscriber, vapidKeys } from './push.js';
 import { currentProfile, readUsage, recordUsage, runWithUsage, summarizeUsage, usageContext, usageFile, withTask, type EngineProfile } from './usage.js';
-import { addMember, allowedProfiles, createWorkspace, effectiveProfile, loadWorkspaces, memberAuth, memberRoute, normalizeUsername, PERSONAL_WORKSPACE, reelsThisMonth, removeMember, saveWorkspaces, sessionUsername, updateWorkspace, type SessionUser, type Workspace } from './workspaces.js';
+import { addExtraReels, limitThisMonth, addMember, allowedProfiles, createWorkspace, effectiveProfile, loadWorkspaces, memberAuth, memberRoute, normalizeUsername, PERSONAL_WORKSPACE, reelsThisMonth, removeMember, saveWorkspaces, sessionUsername, updateWorkspace, type SessionUser, type Workspace } from './workspaces.js';
 import { verifyAccessJwt } from './access.js';
 import { DEFAULT_PICTURES_ENGINE } from './chatgpt-images.js';
 import { checkCredentials, issueSession, loadAuth, LOGIN_PAGE, LoginLimiter, readCookie, SESSION_COOKIE, SESSION_DAYS, verifySession } from './auth.js';
@@ -1488,7 +1488,7 @@ async function workspaceCostThisMonth(workspaceId: string) {
   const entries = (await Promise.all(owned.map((project) => readUsage(usageFile(project.workDir))))).flat().filter((entry) => Date.parse(entry.at) >= start.getTime());
   return summarizeUsage(entries);
 }
-const workspaceView = async (workspace: Workspace) => ({ ...workspace, effectiveProfile: (() => { try { return effectiveProfile(workspace); } catch { return null; } })(), reelsThisMonth: await workspaceReelsThisMonth(workspace.id), look: packPreview(nichePack(workspace.niche)) });
+const workspaceView = async (workspace: Workspace) => ({ ...workspace, effectiveProfile: (() => { try { return effectiveProfile(workspace); } catch { return null; } })(), reelsThisMonth: await workspaceReelsThisMonth(workspace.id), limitThisMonth: limitThisMonth(workspace), look: packPreview(nichePack(workspace.niche)) });
 
 // ---- Accounts: who am I, and (owner only) the accounts, their engines, logins and monthly use.
 app.get('/api/me', route(async (_req, res) => {
@@ -1498,6 +1498,58 @@ app.get('/api/me', route(async (_req, res) => {
     workspaces: user.role === 'admin' ? await Promise.all(data.workspaces.map(workspaceView)) : undefined, allowedProfiles: allowedProfiles() });
 }));
 const requireAdmin = (res: express.Response) => { if (!isAdmin(res)) throw Object.assign(new Error('Only the owner can do this.'), { status: 403 }); };
+// ---- Owner console: everything for the overview, customer pages and reels list in one read.
+app.get('/api/admin/console', route(async (_req, res) => {
+  requireAdmin(res); await hydrateProjects(); const data = await loadWorkspaces();
+  const reels = await Promise.all([...projects.values()].map(async (project) => {
+    const job = autoJobs.get(project.id) ?? await fs.readFile(autoJobFile(project), 'utf8').then((text) => JSON.parse(text) as AutoJob).catch(() => null);
+    const status = await reelStatus(project);
+    const cost = summarizeUsage(await readUsage(usageFile(project.workDir)));
+    return { id: project.id, name: project.name, workspaceId: projectWorkspaceId(project), createdAt: project.createdAt, postedAt: project.postedAt,
+      state: status?.state ?? 'idle', step: status?.step, error: job?.error, startedAt: job?.startedAt, finishedAt: job?.finishedAt, seconds: job?.finalSeconds,
+      coverUrl: status?.coverUrl, previewUrl: status?.previewUrl, cost };
+  }));
+  const workspaces = await Promise.all(data.workspaces.map(async (workspace) => ({
+    ...await workspaceView(workspace), members: data.members.filter((m) => m.workspaceId === workspace.id).map((m) => ({ username: m.username, createdAt: m.createdAt })),
+    costThisMonth: await workspaceCostThisMonth(workspace.id),
+  })));
+  const packs = Object.values(NICHE_PACKS).map((pack) => ({ id: pack.id, ...packPreview(pack), artDirection: pack.artDirection, hashtags: pack.hashtagHints }));
+  res.json({ now: Date.now(), packs, workspaces, reels: reels.sort((a, b) => (b.finishedAt ?? b.startedAt ?? 0) - (a.finishedAt ?? a.startedAt ?? 0)), allowedProfiles: allowedProfiles() });
+}));
+app.post('/api/admin/workspaces/:id/extra-reels', route(async (req, res) => {
+  requireAdmin(res); const data = await loadWorkspaces(); const workspace = addExtraReels(data, routeParam(req.params.id), req.body?.reels ?? 5); await saveWorkspaces(data);
+  void notify(workspace.id, { title: 'More reels added', body: `You can make ${req.body?.reels ?? 5} more reels this month.`, url: '/#home', tag: `credits-${workspace.id}` });
+  res.json(await workspaceView(workspace));
+}));
+// A gentle phone reminder with this week's first idea (only to that account's logins).
+app.post('/api/admin/workspaces/:id/nudge', route(async (req, res) => {
+  requireAdmin(res); const workspace = await workspaceFor(routeParam(req.params.id));
+  if (workspace.id !== routeParam(req.params.id)) return void res.status(404).json({ error: 'Account not found.' });
+  const idea = weeklyIdeas(nichePack(workspace.niche).id, workspace.id)[0];
+  const sent = await notify(workspace.id, { title: 'Time for this week\'s reel', body: idea ? `Idea: ${idea.title} · 3 talking points ready` : 'Record a short tip for your patients.', url: idea ? `/#record-${encodeURIComponent(idea.id)}` : '/#home', tag: `nudge-${workspace.id}` });
+  res.json({ sent });
+}));
+// Check the API keys without spending anything: both providers list models for free.
+app.post('/api/admin/engines/test', route(async (_req, res) => {
+  requireAdmin(res); const settings = await resolvedSettings();
+  const check = async (configured: boolean, work: () => Promise<string>) => {
+    if (!configured) return { ok: false, detail: 'No key saved' };
+    try { return { ok: true, detail: await work() }; } catch (error) { return { ok: false, detail: (error instanceof Error ? error.message : String(error)).replace(/key=[^&\s]+/g, 'key=…').slice(0, 200) }; }
+  };
+  const [anthropic, gemini] = await Promise.all([
+    check(Boolean(settings.anthropicApiKey), async () => {
+      const { default: Anthropic } = await import('@anthropic-ai/sdk');
+      const model = await new Anthropic({ apiKey: settings.anthropicApiKey }).models.retrieve(settings.apiTextModel);
+      return `${model.display_name ?? model.id} is available`;
+    }),
+    check(Boolean(settings.geminiApiKey), async () => {
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(settings.geminiImageModel)}`, { headers: { 'x-goog-api-key': settings.geminiApiKey! } });
+      if (!response.ok) throw new Error(`Gemini answered ${response.status}`);
+      return `${settings.geminiImageModel} is available`;
+    }),
+  ]);
+  res.json({ anthropic, gemini });
+}));
 app.get('/api/admin/workspaces', route(async (_req, res) => {
   requireAdmin(res); await hydrateProjects(); const data = await loadWorkspaces();
   res.json({ allowedProfiles: allowedProfiles(), workspaces: await Promise.all(data.workspaces.map(async (workspace) => ({
@@ -1768,9 +1820,10 @@ app.post('/api/projects/:id/auto', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id));
   if (['running', 'review'].includes(autoJobs.get(project.id)?.state ?? '')) return void res.status(409).json({ error: 'Auto reel is already running for this project' });
   const workspace = await workspaceFor(project.workspaceId); const context = await projectUsageContext(project);
-  if (workspace.reelsPerMonth) {
+  const limit = limitThisMonth(workspace);
+  if (limit) {
     const used = await workspaceReelsThisMonth(workspace.id);
-    if (used >= workspace.reelsPerMonth) return void res.status(409).json({ error: `You have made all ${workspace.reelsPerMonth} reels for this month. New reels open on the 1st.` });
+    if (used >= limit) return void res.status(409).json({ error: `You have made all ${limit} reels for this month. New reels open on the 1st.` });
   }
   const options: AutoOptions = {
     // API accounts make pictures with the Gemini API; ChatGPT in Chrome runs on this computer's subscription.

@@ -1,3 +1,4 @@
+import { Console } from './console/Console';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   api,
@@ -97,6 +98,11 @@ function App() {
   const [targetSeconds, setTargetSeconds] = useState('');
   // One-tap Auto reel in progress (survives refresh via localStorage).
   const [autoProjectId, setAutoProjectId] = useState(savedAutoProjectId());
+  const [wide, setWide] = useState(() => typeof window !== 'undefined' && window.matchMedia('(min-width: 900px)').matches);
+  useEffect(() => { const query = window.matchMedia('(min-width: 900px)'); const on = () => setWide(query.matches); query.addEventListener('change', on); return () => query.removeEventListener('change', on); }, []);
+  const phoneForced = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('phone') === '1';
+  // The owner can switch between the console and the reel app on any screen (?view=console / ?view=phone); the choice is remembered.
+  const [ownerView] = useState<'console' | 'phone' | ''>(() => { try { const v = new URLSearchParams(window.location.search).get('view'); if (v === 'console' || v === 'phone') window.localStorage.setItem('practireel:view', v); const saved = window.localStorage.getItem('practireel:view'); return saved === 'console' || saved === 'phone' ? saved : ''; } catch { return ''; } });
   // Only the simple flow is shown. The old step-by-step editor opens with ?advanced=1 (or ?advanced=0 to hide it again).
   const [advanced] = useState(() => { try { const flag = new URLSearchParams(window.location.search).get('advanced'); if (flag !== null) window.localStorage.setItem('video-cleaner:advanced', flag === '1' ? '1' : ''); return window.localStorage.getItem('video-cleaner:advanced') === '1'; } catch { return false; } });
   const [system, setSystem] = useState<SystemStatus | null>(null);
@@ -719,14 +725,16 @@ function App() {
   } : null;
 
   // Everyone gets the PractiReel phone app; the owner's old step-by-step editor opens with ?advanced=1.
-  if (!advanced || isMember) return <PhoneApp me={me} onMe={setMe} />;
+  // The owner on a computer gets the console; phones (and ?phone=1 links from the console) get the phone app.
+  const showConsole = me?.role === 'admin' && !phoneForced && (ownerView ? ownerView === 'console' : wide);
+  if (!advanced || isMember) return showConsole ? <Console me={me} /> : <PhoneApp me={me} onMe={setMe} />;
   return (
     <main className="shell">
       <header className="topbar">
         <div><span className="eyebrow">{isMember ? me?.workspace?.name ?? 'YOUR REELS' : 'LOCAL AI VIDEO PIPELINE'}</span><h1>Video Cleaner</h1></div>
         {isMember ? <div className="headerActions"><button className="ghost" onClick={() => void fetch('/api/logout', { method: 'POST' }).then(() => window.location.replace('/login'))}>Log out</button></div> : <div className="headerActions">
           <span className={`readyBadge ${ready ? 'ready' : ''}`}>{ready ? 'Core ready' : 'Setup required'}</span>
-          <a className="ghost" href="/?advanced=0" style={{ color: 'inherit', padding: '11px 14px', textDecoration: 'none' }}>Phone app</a>
+          <a className="ghost" href="/?advanced=0" style={{ color: 'inherit', padding: '11px 14px', textDecoration: 'none' }}>Owner console</a>
           <button className="ghost" onClick={() => setAccountsOpen((value) => !value)}>Accounts</button>
           {project && <button className="ghost" onClick={() => void closeProject()} disabled={busy || exportRunning || generatingAll}>Projects</button>}
           <button className="ghost" onClick={() => setSettingsOpen((value) => !value)}>Settings</button>
