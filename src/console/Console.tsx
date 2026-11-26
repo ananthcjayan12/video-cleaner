@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { ModelSelect } from '../ModelSelect';
 import { api, type AdminWorkspace, type ConsoleData, type ConsoleReel, type EngineProfile, type KeyCheck, type Me, type Niche, type SystemStatus } from '../api';
 import { LookPreview } from '../phone/LookPreview';
 import './console.css';
@@ -436,7 +437,6 @@ function PacksPage({ data }: { data: ConsoleData }) {
 }
 
 /* ---------- AI engines ---------- */
-const API_MODELS = [['claude-opus-5-5', 'Opus 5.5 (best)'], ['claude-sonnet-5-5', 'Sonnet 5.5 (cheaper)'], ['claude-haiku-5-5', 'Haiku 5.5 (cheapest)']];
 function EnginesPage({ data, status, onStatus, act }: { data: ConsoleData; status: SystemStatus | null; onStatus: (s: SystemStatus) => void; act: (work: () => Promise<string>) => Promise<void> }) {
   const [anthropicKey, setAnthropicKey] = useState(''); const [geminiKey, setGeminiKey] = useState('');
   const [checks, setChecks] = useState<{ anthropic: KeyCheck; gemini: KeyCheck } | null>(null); const [checking, setChecking] = useState(false);
@@ -465,10 +465,10 @@ function EnginesPage({ data, status, onStatus, act }: { data: ConsoleData; statu
         <section className="oc-card">
           <div className="oc-card-head"><h2>☁️ API <small className="oc-muted">customers</small></h2></div>
           <dl className="oc-engines">
-            <dt>Text</dt><dd><select value={api_?.anthropic.model ?? 'claude-opus-5-5'} onChange={(e) => void save({ apiTextModel: e.target.value }, 'Text model saved.')}>{API_MODELS.map(([id, label]) => <option key={id} value={id}>{label}</option>)}</select>
+            <dt>Text</dt><dd><ModelSelect provider="anthropic" allowDefault={false} value={api_?.anthropic.model ?? 'claude-opus-5-5'} onChange={(model) => void save({ apiTextModel: model }, 'Text model saved.')} />
               <select value={api_?.anthropic.effort || 'medium'} onChange={(e) => void save({ apiEffort: e.target.value }, 'Effort saved.')} aria-label="Effort">{EFFORT_LEVELS.map((e) => <option key={e} value={e}>{e}</option>)}</select></dd>
-            <dt>Pictures</dt><dd>Gemini · {api_?.gemini.imageModel}</dd>
-            <dt>Speech to text</dt><dd>Gemini</dd>
+            <dt>Pictures</dt><dd>Gemini <ModelSelect provider="gemini" kind="image" allowDefault={false} value={api_?.gemini.imageModel ?? ''} onChange={(model) => void save({ geminiImageModel: model }, 'Picture model saved.')} /></dd>
+            <dt>Speech to text</dt><dd>Gemini <ModelSelect provider="gemini" kind="stt" allowDefault={false} value={status.transcription?.model ?? ''} onChange={(model) => void save({ geminiSttModel: model }, 'Speech-to-text model saved.')} /></dd>
             <dt>Claude API key</dt><dd><KeyField configured={Boolean(api_?.anthropic.configured)} value={anthropicKey} onChange={setAnthropicKey} onSave={() => { void save({ anthropicApiKey: anthropicKey }, 'Claude API key saved.'); setAnthropicKey(''); }} check={checks?.anthropic} /></dd>
             <dt>Gemini key</dt><dd><KeyField configured={Boolean(api_?.gemini.configured)} value={geminiKey} onChange={setGeminiKey} onSave={() => { void save({ geminiApiKey: geminiKey }, 'Gemini key saved.'); setGeminiKey(''); }} check={checks?.gemini} /></dd>
           </dl>
@@ -481,25 +481,16 @@ function EnginesPage({ data, status, onStatus, act }: { data: ConsoleData; statu
 }
 const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
 const ENGINE_PROVIDERS = ['claude-cli', 'codex-cli', 'agy-cli', 'anthropic', 'openai', 'gemini'];
-const MODEL_HINTS: Record<string, string[]> = {
-  'claude-cli': ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-fable-5-2'],
-  anthropic: ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-fable-5-2'],
-  gemini: ['gemini-3.8-flash', 'gemini-3.8-pro'],
-};
 const PROVIDER_TITLE: Record<string, string> = { 'claude-cli': 'Claude CLI', 'codex-cli': 'Codex CLI', 'agy-cli': 'Antigravity CLI', anthropic: 'Claude API', openai: 'OpenAI API', gemini: 'Gemini API' };
 /** Provider + model + effort for one pipeline step; saves each change straight away. */
 function EngineRow({ choice, keys, save, ok, providers = ENGINE_PROVIDERS }: { choice: { provider: string; model: string; effort?: string }; keys: { provider: string; model: string; effort: string }; save: (body: Record<string, string>, done: string) => Promise<void> | void; ok: boolean; providers?: string[] }) {
-  const [model, setModel] = useState(choice.model);
-  useEffect(() => setModel(choice.model), [choice.model]);
-  const listId = `models-${keys.model}`;
   const noEffort = choice.provider === 'agy-cli';
   return (
     <span className="oc-engine-row">
       <select aria-label="Provider" value={choice.provider} onChange={(e) => void save({ [keys.provider]: e.target.value, [keys.model]: '' }, 'Engine saved.')}>
         {providers.map((p) => <option key={p} value={p}>{PROVIDER_TITLE[p] ?? p}</option>)}
       </select>
-      <input aria-label="Model" list={listId} value={model} placeholder="default model" onChange={(e) => setModel(e.target.value)} onBlur={() => { if (model.trim() !== choice.model) void save({ [keys.model]: model.trim() }, 'Model saved.'); }} onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }} />
-      <datalist id={listId}>{(MODEL_HINTS[choice.provider] ?? []).map((m) => <option key={m} value={m} />)}</datalist>
+      <ModelSelect provider={choice.provider} value={choice.model} onChange={(model) => void save({ [keys.model]: model }, 'Model saved.')} />
       <select aria-label="Effort" value={noEffort ? '' : choice.effort || 'medium'} disabled={noEffort} title={noEffort ? 'Antigravity has no effort setting' : 'How long the model thinks'} onChange={(e) => void save({ [keys.effort]: e.target.value }, 'Effort saved.')}>
         {noEffort ? <option value="">no effort</option> : EFFORT_LEVELS.map((e) => <option key={e} value={e}>{e}</option>)}
       </select>

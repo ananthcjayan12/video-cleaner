@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, type StudioInfo } from '../api';
+import { ModelSelect } from '../ModelSelect';
 import type { StickStudioSettings } from '../../server/stick-narration';
 
 const LENGTHS = [30, 45, 60, 90];
@@ -60,7 +61,7 @@ export function StudioSettings({ info, onSaved, onBack }: { info: StudioInfo; on
           <input type="range" min="0" max="800" step="10" value={s.lineGapMs} onChange={(e) => set({ lineGapMs: Number(e.target.value) })} />
         </div>
         <details className="st-more"><summary>Voice model</summary>
-          <label className="pr-field">Gemini TTS model<input value={s.ttsModel} onChange={(e) => set({ ttsModel: e.target.value.trim() })} /></label>
+          <label className="pr-field">Gemini TTS model<ModelSelect provider="gemini" kind="tts" allowDefault={false} value={s.ttsModel} onChange={(model) => set({ ttsModel: model })} /></label>
         </details>
       </section>
 

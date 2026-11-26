@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import Anthropic from '@anthropic-ai/sdk';
 import { assertTextEngineAllowed, estimateTokens, recordUsage } from './usage.js';
@@ -83,6 +84,119 @@ export function parseCodexModels(output: string): ModelOption[] {
 export async function availableCodexModels(bin?: string): Promise<ModelOption[]> {
   if (!bin) return [];
   return parseCodexModels(await command(bin, ['debug', 'models'], undefined, undefined, 15000));
+}
+
+export type ModelKind = 'text' | 'tts' | 'image' | 'stt';
+export type ModelList = { models: ModelOption[]; source: 'live' | 'built-in'; note?: string };
+/** Current Claude models; used for the Claude CLI (which cannot list models) and when no Claude API key is set. */
+export const CLAUDE_MODELS: ModelOption[] = [
+  { id: 'claude-opus-5-5', label: 'Opus 5.5 (best)' }, { id: 'claude-sonnet-5-5', label: 'Sonnet 5.5' },
+  { id: 'claude-haiku-5-5', label: 'Haiku 5.5 (fastest)' }, { id: 'claude-fable-5-2', label: 'Fable 5.2' },
+];
+const CLAUDE_CLI_ALIASES: ModelOption[] = [{ id: 'opus', label: 'opus (latest Opus)' }, { id: 'sonnet', label: 'sonnet (latest Sonnet)' }, { id: 'haiku', label: 'haiku (latest Haiku)' }];
+
+/** Sort Gemini's catalogue into what each pipeline step can use. */
+export function geminiKindOf(id: string): ModelKind | null {
+  if (/embedding|aqa|lyria|robotics|computer-use|antigravity|deep-research|genie|decision|live|native-audio|gemma/.test(id)) return null;
+  if (/tts/.test(id)) return 'tts';
+  if (/image|banana/.test(id)) return 'image';
+  if (/transcribe/.test(id)) return 'stt';
+  return 'text';
+}
+/** Newest first: higher version number, stable before preview, dated names by date. */
+export function modelRank(id: string): number[] {
+  const version = (/(\d+(?:\.\d+)?)/.exec(id.replace(/^gpt-/, 'gpt-').replace(/(\d{4})-?(\d{2})/, ''))?.[1] ?? '0').split('.').map(Number);
+  const preview = /preview|exp|latest|-\d{2}-\d{4}/.test(id) ? 0 : 1;
+  return [version[0] ?? 0, version[1] ?? 0, preview];
+}
+export function topModels(models: ModelOption[], count = 5, keepOrder = false): ModelOption[] {
+  const unique = [...new Map(models.map((m) => [m.id, m])).values()];
+  if (keepOrder) return unique.slice(0, count);
+  return unique.map((m, i) => ({ m, i, r: modelRank(m.id) }))
+    .sort((a, b) => b.r[0] - a.r[0] || b.r[1] - a.r[1] || b.r[2] - a.r[2] || a.i - b.i)
+    .slice(0, count).map((x) => x.m);
+}
+
+// Model lists are cached on disk for a day and served from there; a stale list is returned at once and refreshed in the background.
+const MODEL_CACHE_TTL = 24 * 3600_000;
+const modelCacheFile = () => path.join(process.env.VIDEO_CLEANER_CONFIG_DIR || path.join(os.homedir(), '.video-cleaner'), 'model-cache.json');
+let modelCache: Map<string, { at: number; list: ModelList }> | null = null;
+const refreshing = new Set<string>();
+async function loadModelCache() {
+  if (modelCache) return modelCache;
+  const raw = await fs.readFile(modelCacheFile(), 'utf8').then((text) => JSON.parse(text) as Record<string, { at: number; list: ModelList }>).catch(() => ({}));
+  modelCache = new Map(Object.entries(raw));
+  return modelCache;
+}
+async function saveModelCache() {
+  if (!modelCache) return;
+  await fs.mkdir(path.dirname(modelCacheFile()), { recursive: true }).catch(() => undefined);
+  await fs.writeFile(modelCacheFile(), JSON.stringify(Object.fromEntries(modelCache), null, 1)).catch(() => undefined);
+}
+
+/** Top 5 models a provider offers for one kind of job, from the day-old cache when there is one. */
+export async function listProviderModels(provider: string, kind: ModelKind, config: TextModelConfig & { agyBin?: string }, options: { force?: boolean } = {}): Promise<ModelList> {
+  const cache = await loadModelCache();
+  const key = `${provider}:${kind}:${config.anthropicApiKey ? 'a' : ''}${config.openAiApiKey ? 'o' : ''}${config.geminiApiKey ? 'g' : ''}`;
+  const cached = cache.get(key);
+  const refresh = async () => {
+    const list = await fetchProviderModels(provider, kind, config).catch((error): ModelList => ({ models: cached?.list.models ?? [], source: 'live', note: error instanceof Error ? error.message : String(error) }));
+    cache.set(key, { at: Date.now(), list }); await saveModelCache();
+    return list;
+  };
+  if (cached && !options.force) {
+    if (Date.now() - cached.at > MODEL_CACHE_TTL && !refreshing.has(key)) {
+      refreshing.add(key); void refresh().finally(() => refreshing.delete(key));
+    }
+    return cached.list;
+  }
+  return refresh();
+}
+
+async function fetchProviderModels(provider: string, kind: ModelKind, config: TextModelConfig & { agyBin?: string }): Promise<ModelList> {
+  const all = await (async (): Promise<ModelList> => {
+    if (provider === 'codex-cli' || provider === 'codex') return { models: await availableCodexModels(config.codexBin), source: 'live' };
+    if (provider === 'agy-cli') { const models = await availableAgyModels(config.agyBin); return { models, source: 'live', ...(models.length ? {} : { note: 'Antigravity reported no models.' }) }; }
+    if (provider === 'anthropic' || provider === 'claude-cli' || provider === 'claude') {
+      const cli = provider !== 'anthropic';
+      if (config.anthropicApiKey) {
+        try {
+          const client = new Anthropic({ apiKey: config.anthropicApiKey }); const models: ModelOption[] = [];
+          for await (const model of client.models.list({ limit: 100 })) models.push({ id: model.id, label: model.display_name || model.id });
+          if (models.length) return { models: cli ? [...models, ...CLAUDE_CLI_ALIASES] : models, source: 'live' };
+        } catch { /* fall back to the built-in list */ }
+      }
+      return { models: cli ? [...CLAUDE_MODELS, ...CLAUDE_CLI_ALIASES] : CLAUDE_MODELS, source: 'built-in', note: cli ? 'The Claude CLI cannot list models; add a Claude API key to read the live list.' : 'Add a Claude API key to read the live list.' };
+    }
+    if (provider === 'openai') {
+      if (!config.openAiApiKey) return { models: [], source: 'live', note: 'Add an OpenAI API key to list its models.' };
+      const response = await fetch('https://api.openai.com/v1/models', { headers: { Authorization: 'Bearer ' + config.openAiApiKey }, signal: AbortSignal.timeout(15000) });
+      const body = await response.json() as { data?: Array<{ id: string }>; error?: { message?: string } };
+      if (!response.ok) throw new Error('OpenAI: ' + (body.error?.message || response.status));
+      const wanted = kind === 'image' ? /image|dall-e/ : kind === 'tts' ? /tts/ : kind === 'stt' ? /transcribe|whisper/ : /^(gpt|o\d|chatgpt)/;
+      const skip = kind === 'text' ? /audio|realtime|tts|transcribe|image|search|embedding/ : /$^/;
+      return { models: (body.data ?? []).map((m) => m.id).filter((id) => wanted.test(id) && !skip.test(id)).sort().reverse().map((id) => ({ id, label: id })), source: 'live' };
+    }
+    if (provider === 'gemini') {
+      if (!config.geminiApiKey) return { models: [], source: 'live', note: 'Add a Gemini API key to list its models.' };
+      const response = await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000', { headers: { 'x-goog-api-key': config.geminiApiKey }, signal: AbortSignal.timeout(15000) });
+      const body = await response.json() as { models?: Array<{ name: string; displayName?: string; supportedGenerationMethods?: string[] }>; error?: { message?: string } };
+      if (!response.ok) throw new Error('Gemini: ' + (body.error?.message || response.status));
+      const models = (body.models ?? []).filter((m) => m.supportedGenerationMethods?.includes('generateContent'))
+        .map((m) => ({ id: m.name.replace(/^models\//, ''), label: m.displayName || m.name }))
+        .filter((m) => { const k = geminiKindOf(m.id); return k === kind || (kind === 'stt' && k === 'text'); });
+      return { models: models.reverse(), source: 'live' };
+    }
+    return { models: [], source: 'live', note: `Unknown provider ${provider}.` };
+  })();
+  // Codex and Claude lists are already in the provider's own order of importance; the rest are ranked newest first.
+  const keepOrder = ['codex-cli', 'codex', 'agy-cli', 'anthropic', 'claude-cli', 'claude'].includes(provider);
+  if (provider === 'gemini' && kind === 'stt') {
+    // Dedicated transcription models first, then the newest general models.
+    const dedicated = topModels(all.models.filter((m) => geminiKindOf(m.id) === 'stt'), 2);
+    return { ...all, models: [...dedicated, ...topModels(all.models.filter((m) => geminiKindOf(m.id) !== 'stt'), 5 - dedicated.length)] };
+  }
+  return { ...all, models: topModels(all.models, 5, keepOrder) };
 }
 
 export function parseModelJson(text: string): unknown {

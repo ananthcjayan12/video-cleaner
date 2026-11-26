@@ -65,7 +65,7 @@ import { ensurePresenterMatte, mattingSystemStatus, presenterMatteStatus, resolv
 import { exportProjectZip, normalizeProjectExportOptions } from './project-export.js';
 import { buildEditorRender } from './editor-render.js';
 import { formatMetaFinding, metaTextGuidelinesPrompt, scanMetaText } from './meta-guidelines.js';
-import { availableAgyModels, availableCodexModels, DEFAULT_ANTHROPIC_MODEL, generateStructuredText, TEXT_PROVIDERS, type TextModelChoice, type TextProvider } from './text-models.js';
+import { availableAgyModels, availableCodexModels, DEFAULT_ANTHROPIC_MODEL, generateStructuredText, listProviderModels, type ModelKind, TEXT_PROVIDERS, type TextModelChoice, type TextProvider } from './text-models.js';
 import { findClaims } from './claims.js';
 import { NICHE_PACKS, nichePack, packLook, packPreview, packWriterNotes } from './niche-packs.js';
 import { nicheValue, weeklyIdeas, IDEAS, NICHES } from './ideas.js';
@@ -915,6 +915,13 @@ app.get('/api/projects/:id/exports/:file', route(async (req, res) => {
 
 app.get('/api/system/status', route(async (_req, res) => { res.json(await systemStatus()); }));
 app.get('/api/models/agy', route(async (_req, res) => { const settings = await resolvedSettings(); res.json({ models: await availableAgyModels(settings.agyBin) }); }));
+app.get('/api/models/list', route(async (req, res) => {
+  if (!isAdmin(res)) return void res.status(403).json({ error: 'Owner only.' });
+  const provider = String(req.query.provider ?? ''); const kindParam = String(req.query.kind ?? 'text');
+  const kind = (['text', 'tts', 'image', 'stt'].includes(kindParam) ? kindParam : 'text') as ModelKind;
+  try { res.json(await listProviderModels(provider, kind, await resolvedSettings())); }
+  catch (error) { res.json({ models: [], source: 'live', note: error instanceof Error ? error.message : String(error) }); }
+}));
 app.get('/api/models/codex', route(async (_req, res) => { const settings = await resolvedSettings(); res.json({ models: await availableCodexModels(settings.codexBin) }); }));
 app.get('/api/settings', route(async (_req, res) => { const status = await systemStatus(); res.json({ ...status, overrides: { apiTextModel: localSettings.apiTextModel ?? '', apiEffort: localSettings.apiEffort ?? '', codexBin: localSettings.codexBin ?? '', claudeBin: localSettings.claudeBin ?? '', agyBin: localSettings.agyBin ?? '', sttProvider: localSettings.sttProvider ?? '', geminiSttModel: localSettings.geminiSttModel ?? '', cleanEffort: localSettings.cleanEffort ?? '', planningEffort: localSettings.planningEffort ?? '', picturesProvider: localSettings.picturesProvider ?? '', picturesModel: localSettings.picturesModel ?? '', picturesEffort: localSettings.picturesEffort ?? '', scriptProvider: localSettings.scriptProvider ?? '', scriptModel: localSettings.scriptModel ?? '', scriptEffort: localSettings.scriptEffort ?? '', cleanProvider: localSettings.cleanProvider ?? '', cleanModel: localSettings.cleanModel ?? '', planningProvider: localSettings.planningProvider ?? '', planningModel: localSettings.planningModel ?? '', codexModel: localSettings.codexModel ?? '', grokBin: localSettings.grokBin ?? '', gflowBin: localSettings.gflowBin ?? '', ffmpegBin: localSettings.ffmpegBin ?? '', ffprobeBin: localSettings.ffprobeBin ?? '', projectsDir: localSettings.projectsDir ?? '', imageProvider: localSettings.imageProvider ?? '', openAiImageModel: localSettings.openAiImageModel ?? '', geminiImageModel: localSettings.geminiImageModel ?? '', grokModel: localSettings.grokModel ?? '', grokVideoModel: localSettings.grokVideoModel ?? '', gflowProfile: localSettings.gflowProfile ?? '', gflowVideoModel: localSettings.gflowVideoModel ?? '', magnificVideoModel: localSettings.magnificVideoModel ?? '', magnificVideoEndpoint: localSettings.magnificVideoEndpoint ?? '' } }); }));
 app.put('/api/settings', route(async (req, res) => {
