@@ -57,7 +57,7 @@ export function StudioSettings({ info, onSaved, onBack }: { info: StudioInfo; on
         <div className="st-range">Speed · {s.speed.toFixed(2)}×
           <input type="range" min="0.8" max="1.25" step="0.01" value={s.speed} onChange={(e) => set({ speed: Number(e.target.value) })} />
         </div>
-        <div className="st-range">Pause between lines · {s.lineGapMs} ms
+        <div className="st-range">Pause at line breaks · {s.lineGapMs < 150 ? 'short' : s.lineGapMs > 450 ? 'long' : 'natural'}
           <input type="range" min="0" max="800" step="10" value={s.lineGapMs} onChange={(e) => set({ lineGapMs: Number(e.target.value) })} />
         </div>
         <details className="st-more"><summary>Voice model</summary>

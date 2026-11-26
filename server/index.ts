@@ -1913,8 +1913,8 @@ app.post('/api/stick/narrate', studioRoute(async (req, res) => {
     const work = path.join(studioDir(), 'narration', job.id);
     try {
       const wav = path.join(work, 'voice.wav');
-      job.stage = `Recording line 1 of ${script.lines.length}…`;
-      await narrateScript({ lines: script.lines, settings: studio, apiKey: settings.geminiApiKey, outWav: wav, signal: job.abort!.signal, progress: (done, total) => { job.progress = done / total * 0.9; job.stage = done < total ? `Recording line ${done + 1} of ${total}…` : 'Finishing the voice…'; } });
+      job.stage = 'Recording the voice…';
+      await narrateScript({ lines: script.lines, settings: studio, apiKey: settings.geminiApiKey, outWav: wav, signal: job.abort!.signal, progress: (done, total) => { job.progress = Math.max(0.1, done / total * 0.9); job.stage = done < total ? (total > 1 ? `Recording part ${done + 1} of ${total}…` : 'Recording the voice…') : 'Finishing the voice…'; } });
       const slug = (script.title || 'ai-voice').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'ai-voice';
       const m4a = path.join(work, `${slug}.m4a`);
       const tempo = Math.abs(studio.speed - 1) > 0.005 ? ['-af', `atempo=${studio.speed.toFixed(3)}`] : [];
@@ -1928,6 +1928,7 @@ app.post('/api/stick/narrate', studioRoute(async (req, res) => {
       await fs.rm(wav, { force: true }).catch(() => undefined);
     } catch (error) {
       if (job.state === 'running') Object.assign(job, { state: 'failed', progress: 0, stage: 'Failed', error: job.abort?.signal.aborted ? 'Stopped.' : error instanceof Error ? error.message : String(error) });
+      if (!job.abort?.signal.aborted) console.error(`[stick voice] ${job.id} failed (${studio.voice}, ${studio.ttsModel}, ${script.lines.length} lines):`, error instanceof Error ? error.message : error);
     }
   })();
 }));

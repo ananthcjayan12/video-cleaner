@@ -39,3 +39,11 @@ test('effort maps onto OpenAI reasoning_effort and Gemini thinkingLevel (which t
   assert.deepEqual(['low', 'medium', 'high', 'xhigh', 'max'].map(openAiEffort), ['low', 'medium', 'high', 'high', 'high']);
   assert.deepEqual(['low', 'medium', 'max'].map(geminiThinkingLevel), ['low', 'medium', 'high']);
 });
+
+test('narration goes in one request unless the script is very long, split on whole lines', async () => {
+  const { narrationChunks, pauseInstruction } = await import('./stick-narration.js');
+  assert.equal(narrationChunks(['a', 'b', 'c']).length, 1);
+  const long = Array.from({ length: 40 }, (_, i) => `line ${i} `.repeat(10));
+  const chunks = narrationChunks(long); assert.ok(chunks.length > 1); assert.equal(chunks.join('\n'), long.join('\n'));
+  assert.match(pauseInstruction(50), /barely/); assert.match(pauseInstruction(220), /short natural/); assert.match(pauseInstruction(600), /clear/);
+});

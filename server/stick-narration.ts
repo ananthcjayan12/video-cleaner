@@ -207,16 +207,17 @@ async function ttsLine(line: string, settings: StickStudioSettings, apiKey: stri
     contents: [{ role: 'user', parts: [{ text: line, speech_metadata: { style: settings.voiceStyle } }] }],
     generationConfig: { responseModalities: ['AUDIO'], speechConfig: { voiceConfig: { voice: settings.voice } } },
   };
-  let lastError = '';
+  let lastError = ''; let lastStatus = 0;
   for (let attempt = 0; attempt < 4; attempt++) {
-    if (attempt) await new Promise(resolve => setTimeout(resolve, 1500 * 2 ** attempt));
+    if (attempt) await new Promise(resolve => setTimeout(resolve, lastStatus === 429 ? 8000 * attempt : 2000 * attempt));
+    if (signal?.aborted) throw new Error('Stopped.');
     const response = await fetch(`${GEMINI_BASE}${settings.ttsModel}:generateContent`, {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey }, body: JSON.stringify(body), signal,
     }).catch(error => { lastError = error instanceof Error ? error.message : String(error); return null; });
     if (!response) continue;
     if (!response.ok) {
       const detail = (await response.text()).slice(0, 400);
-      lastError = `Gemini voice ${response.status}: ${detail}`;
+      lastError = `Gemini voice ${response.status}: ${detail}`; lastStatus = response.status;
       if (response.status === 429 && /PerDay/i.test(detail)) throw new Error('Gemini daily voice quota is used up. Try again tomorrow.');
       if (response.status === 429 || response.status >= 500) continue;
       throw new Error(lastError);
@@ -266,7 +267,28 @@ export function wavBytes(samples: Int16Array, rate: number): Buffer {
   return Buffer.concat([head, data]);
 }
 
-/** Speak every line (3 at a time), trim, join with gaps. Returns a mono 16-bit WAV and its length in seconds. */
+/** How the pause setting is said to the voice model (one request reads the whole script, so pauses are asked for). */
+export function pauseInstruction(lineGapMs: number) {
+  if (lineGapMs < 150) return 'Run the lines together with barely any pause at line breaks.';
+  if (lineGapMs > 450) return 'Leave a clear, unhurried pause at each line break.';
+  return 'Leave a short natural pause at each line break.';
+}
+
+/** Group lines into requests of at most ~1800 characters (about 2 minutes of speech), keeping whole lines. */
+export function narrationChunks(lines: string[], maxChars = 1800): string[] {
+  const chunks: string[] = []; let current: string[] = [];
+  for (const line of lines) {
+    if (current.length && [...current, line].join('\n').length > maxChars) { chunks.push(current.join('\n')); current = []; }
+    current.push(line);
+  }
+  if (current.length) chunks.push(current.join('\n'));
+  return chunks;
+}
+
+/**
+ * Read the whole script in ONE Gemini request (one continuous take, natural pacing, and far fewer requests than a
+ * call per line, which ran into the per-minute limit). Scripts over ~2 minutes go in a few sequential requests.
+ */
 export async function narrateScript(options: {
   lines: string[]; settings: StickStudioSettings; apiKey: string; outWav: string;
   progress?: (done: number, total: number) => void; signal?: AbortSignal;
@@ -274,21 +296,18 @@ export async function narrateScript(options: {
   const { lines, settings } = options;
   if (!options.apiKey) throw new Error('Add a Gemini API key in Settings to make the AI voice.');
   if (!lines.length) throw new Error('The script has no lines.');
-  const clips: Pcm[] = new Array(lines.length);
-  let next = 0; let done = 0;
-  const worker = async () => {
-    while (next < lines.length) {
-      const index = next++;
-      const pcm = await ttsLine(lines[index], settings, options.apiKey, options.signal);
-      clips[index] = { samples: trimSilence(pcm.samples, pcm.rate), rate: pcm.rate };
-      options.progress?.(++done, lines.length);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(3, lines.length) }, worker));
+  const chunks = narrationChunks(lines);
+  const voice = { ...settings, voiceStyle: `${settings.voiceStyle} ${pauseInstruction(settings.lineGapMs)}` };
+  const clips: Pcm[] = [];
+  for (const [index, chunk] of chunks.entries()) {
+    options.progress?.(index, chunks.length);
+    const pcm = await ttsLine(chunk, voice, options.apiKey, options.signal);
+    clips.push({ samples: trimSilence(pcm.samples, pcm.rate), rate: pcm.rate });
+  }
+  options.progress?.(chunks.length, chunks.length);
   const rate = clips[0].rate;
-  const gap = new Int16Array(Math.round((rate * settings.lineGapMs) / 1000));
-  const lead = new Int16Array(Math.round(rate * 0.15));
-  const parts = [lead, ...clips.flatMap((clip, i) => (i < clips.length - 1 ? [clip.samples, gap] : [clip.samples])), new Int16Array(Math.round(rate * 0.4))];
+  const gap = new Int16Array(Math.round(rate * 0.35));
+  const parts = [new Int16Array(Math.round(rate * 0.15)), ...clips.flatMap((clip, i) => (i < clips.length - 1 ? [clip.samples, gap] : [clip.samples])), new Int16Array(Math.round(rate * 0.4))];
   const total = parts.reduce((sum, part) => sum + part.length, 0);
   const joined = new Int16Array(total); let at = 0;
   for (const part of parts) { joined.set(part, at); at += part.length; }
