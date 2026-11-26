@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { api, type AutoJob, type AutoReview, type Me, type Project } from '../api';
+import { api, type AutoJob, type AutoReview, type Me, type Project, type ReelLook } from '../api';
 import { flagsToRanges, keepFlags, keptSeconds, sentences } from '../review';
 import { CostLine } from '../Accounts';
 import { go } from './PhoneApp';
@@ -235,38 +235,65 @@ function SaveFile({ url, type, label, primary, onToast }: { url: string; type: '
 }
 
 /** Cover editor: pick the photo from the reel, edit the lines and label, or ask the AI for a new cover. */
+/** Live draft of the cover while editing (same layout as the real one); the real JPEG is made once, on Save. */
+function CoverDraft({ src, lines, label, look }: { src: string; lines: string[]; label: string; look?: ReelLook }) {
+  const font = look ? `'${look.font}', system-ui, sans-serif` : 'inherit';
+  // Rough version of the renderer's fit: about 13 characters fill the width at full size.
+  const size = (text: string, base: number) => `${(base / 1080) * 100 * Math.min(1, 13 / Math.max(1, text.length))}cqw`;
+  const white = (text: string) => <div style={{ fontSize: size(text, 128), color: '#fff', textShadow: '0 2px 10px rgba(0,0,0,.6)' }}>{text}</div>;
+  return (
+    <div className="pr-cover pr-cover-draft" style={{ fontFamily: font }}>
+      <img src={src} alt="" />
+      <div className="shade" />
+      <div className="lines">
+        {lines[0] ? white(lines[0]) : null}
+        {lines[1] ? <div className="block" style={{ fontSize: size(lines[1], 118), background: look?.accent ?? '#D7F25B', color: look?.onAccent ?? '#0B0D0C' }}>{lines[1]}</div> : null}
+        {lines[2] ? white(lines[2]) : null}
+      </div>
+      {label ? <div className="label" style={{ color: look?.coverHighlight ?? '#D7F25B' }}>{label}</div> : null}
+    </div>
+  );
+}
+
 export function CoverEditor({ id, onToast }: { id: string; onToast: (text: string) => void }) {
   const { job, setJob } = useReel(id);
   const pkg = job?.package;
   const [lines, setLines] = useState<string[]>(['', '', '']);
   const [label, setLabel] = useState('');
+  const [frame, setFrame] = useState(0);
   const [notes, setNotes] = useState('');
   const [busy, setBusy] = useState('');
-  useEffect(() => { if (pkg && pkg.state !== 'running') { setLines(pkg.lines.length ? [...pkg.lines, '', '', ''].slice(0, 3) : ['', '', '']); setLabel(pkg.label); } }, [pkg?.state, pkg?.thumbnailUrl]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (pkg && pkg.state !== 'running') { setLines(pkg.lines.length ? [...pkg.lines, '', '', ''].slice(0, 3) : ['', '', '']); setLabel(pkg.label); setFrame(pkg.frame); } }, [pkg?.state, pkg?.thumbnailUrl]); // eslint-disable-line react-hooks/exhaustive-deps
   async function act(text: string, work: () => Promise<AutoJob>, done: string) {
     setBusy(text); try { setJob(await work()); onToast(done); } catch (err) { onToast(err instanceof Error ? err.message : String(err)); } finally { setBusy(''); }
   }
   const back = <button type="button" className="pr-back" onClick={() => go(`reel-${id}`)}>‹ Back to reel</button>;
   if (!pkg) return <main className="pr-page">{back}<div className="pr-card"><small>{job ? 'This reel has no cover yet.' : 'Loading…'}</small></div></main>;
-  if (pkg.state === 'running') return <main className="pr-page">{back}<h1>Edit cover</h1><p className="pr-info">Making a new cover… about a minute.</p></main>;
+  if (pkg.state === 'running') return <main className="pr-page">{back}<h1>Edit cover</h1><p className="pr-info">Writing a new cover and caption… about 30 seconds. You can leave this screen.</p></main>;
+  const saved = [...pkg.lines, '', '', ''].slice(0, 3);
+  const changed = frame !== pkg.frame || label !== pkg.label || lines.some((line, i) => line !== saved[i]);
   return (
     <main className="pr-page">
       {back}
       <h1>Edit cover</h1>
-      {pkg.thumbnailUrl && <img className="pr-cover" src={pkg.thumbnailUrl} alt="Reel cover" />}
+      {changed || !pkg.thumbnailUrl
+        ? pkg.frames[frame] && <CoverDraft src={pkg.frames[frame]} lines={lines} label={label} look={job?.look} />
+        : <img className="pr-cover" src={pkg.thumbnailUrl} alt="Reel cover" />}
+      {changed && <small style={{ textAlign: 'center' }}>Preview. Tap Save cover to make it.</small>}
       {pkg.frames.length > 0 && <div className="pr-field">Photo<div className="pr-frames">{pkg.frames.map((src, n) => (
-        <button key={src} type="button" className={n === pkg.frame ? 'on' : ''} disabled={!!busy} aria-label={`Use frame ${n + 1}`} onClick={() => void act('Updating…', () => api.editPackage(id, { frame: n, lines, label }), 'Cover updated')}><img src={src} alt="" /></button>
+        <button key={src} type="button" className={n === frame ? 'on' : ''} disabled={!!busy} aria-label={`Use frame ${n + 1}`} aria-pressed={n === frame} onClick={() => setFrame(n)}><img src={src} alt="" /></button>
       ))}</div></div>}
       <div className="pr-card">
         <label className="pr-field">Top line<input value={lines[0]} onChange={(e) => setLines([e.target.value, lines[1], lines[2]])} /></label>
         <label className="pr-field">Highlighted line<input value={lines[1]} onChange={(e) => setLines([lines[0], e.target.value, lines[2]])} /></label>
         <label className="pr-field">Bottom line<input value={lines[2]} onChange={(e) => setLines([lines[0], lines[1], e.target.value])} /></label>
-        <label className="pr-field">Label<input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="DENTAL TIP" /></label>
-        <button type="button" className="pr-btn primary block" disabled={!!busy} onClick={() => void act('Saving…', () => api.editPackage(id, { lines, label }), 'Cover saved')}>{busy || 'Save cover'}</button>
+        <label className="pr-field">Label<input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="SAVE THIS TIP" /></label>
+        <button type="button" className="pr-btn primary block" disabled={!!busy || (!changed && !!pkg.thumbnailUrl)} onClick={() => void act('Saving…', () => api.editPackage(id, { frame, lines, label }), 'Cover saved')}>{busy || (changed || !pkg.thumbnailUrl ? 'Save cover' : 'Saved')}</button>
       </div>
       <details className="pr-card"><summary style={{ fontWeight: 700, cursor: 'pointer', minHeight: 28 }}>✨ Ask AI for a new cover and caption</summary>
         <textarea className="pr-caption" rows={3} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="e.g. Make the headline a question. Caption in English." />
         <button type="button" className="pr-btn block" disabled={!!busy} onClick={() => void act('Starting…', () => api.remakePackage(id, notes), 'Making a new cover…')}>Make a new one</button>
+        <small>Takes about 30 seconds.</small>
       </details>
     </main>
   );

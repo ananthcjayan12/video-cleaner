@@ -253,7 +253,7 @@ export type Me = { username: string; role: 'admin' | 'member'; workspace?: Works
 export type Idea = { id: string; kind: string; title: string; hook: string; points: string[]; seconds: number };
 export type ClaimFlag = { from: number; to: number; match: string; title: string; fix: string };
 export type ReelStatus = { state: AutoJob['state']; step?: string; queuePosition?: number; finishedAt?: number; coverUrl?: string; previewUrl?: string };
-export type AutoJob = { queuePosition?: number; resumed?: boolean; profile?: EngineProfile; cost?: UsageSummary; state: 'idle' | 'running' | 'review' | 'completed' | 'failed' | 'stopped'; review?: AutoReview; stages?: AutoStage[]; startedAt?: number; finishedAt?: number; error?: string; previewUrl?: string; downloadUrl?: string; sourceSeconds?: number; finalSeconds?: number; options?: AutoOptions; package?: ReelPackage };
+export type AutoJob = { look?: ReelLook; queuePosition?: number; resumed?: boolean; profile?: EngineProfile; cost?: UsageSummary; state: 'idle' | 'running' | 'review' | 'completed' | 'failed' | 'stopped'; review?: AutoReview; stages?: AutoStage[]; startedAt?: number; finishedAt?: number; error?: string; previewUrl?: string; downloadUrl?: string; sourceSeconds?: number; finalSeconds?: number; options?: AutoOptions; package?: ReelPackage };
 
 export const api = {
   me: () => request<Me>('/api/me'),

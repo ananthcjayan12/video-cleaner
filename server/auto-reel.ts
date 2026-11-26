@@ -146,6 +146,35 @@ export async function renderCaptionLayer(options: { look?: PackLook; phrases: Ca
   return options.outputPath;
 }
 
+/** Bundle the caption templates in the background at startup, so the first cover edit does not wait for it. */
+export function warmCaptionRenderer(workDir: string) { void captionServeUrl(workDir).catch(() => undefined); }
+
+// One Chrome kept open for cover renders (opening a new one costs a second or two per save); closed after a quiet spell.
+let stillBrowser: Promise<any> | null = null; let stillBrowserTimer: NodeJS.Timeout | undefined;
+async function coverBrowser(chromeBin: string | null) {
+  const { openBrowser } = await import('@remotion/renderer');
+  stillBrowser ??= openBrowser('chrome', { browserExecutable: chromeBin }).catch((error) => { stillBrowser = null; throw error; });
+  clearTimeout(stillBrowserTimer);
+  stillBrowserTimer = setTimeout(() => { const open = stillBrowser; stillBrowser = null; void open?.then((b) => b.close({ silent: true })).catch(() => undefined); }, 5 * 60_000);
+  stillBrowserTimer.unref();
+  return stillBrowser;
+}
+
+/**
+ * A small copy of the finished reel for watching on the phone (720p, ~2 Mbps, starts playing at once).
+ * The full-quality file is still what "Save video" downloads.
+ */
+export function makePreviewVideo(ffmpegBin: string, input: string, output: string, signal?: AbortSignal) {
+  return new Promise<string>((resolve, reject) => {
+    const args = ['-hide_banner', '-v', 'error', '-y', '-i', input, '-vf', "scale='if(gt(iw,ih),1280,720)':-2", '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '27',
+      '-maxrate', '2500k', '-bufsize', '5000k', '-pix_fmt', 'yuv420p', '-threads', '2', '-c:a', 'aac', '-b:a', '96k', '-movflags', '+faststart', output];
+    const child = spawn(ffmpegBin, args, { stdio: ['ignore', 'ignore', 'pipe'], signal });
+    let err = ''; child.stderr.on('data', (chunk) => { err += String(chunk); });
+    child.on('error', reject);
+    child.on('close', (code) => code === 0 ? resolve(output) : reject(new Error(`Preview encode failed (${code}): ${err.slice(-300)}`)));
+  });
+}
+
 /** Render the reel cover (1080x1920 JPEG) from a frame of the speaker and the headline text. */
 export async function renderThumbnail(options: { look?: PackLook; framePath: string; faceX?: number; lines: string[]; label: string; badges: ThumbnailBadge[]; outputPath: string; chromeBin?: string | null; workDir: string }) {
   const serveUrl = await captionServeUrl(options.workDir);
@@ -153,8 +182,9 @@ export async function renderThumbnail(options: { look?: PackLook; framePath: str
   const image = `data:image/jpeg;base64,${(await fs.readFile(options.framePath)).toString('base64')}`;
   const inputProps = { image, lines: options.lines, label: options.label, badges: options.badges.slice(0, 2), faceX: options.faceX ?? 0.5, font: options.look?.font, accent: options.look?.accent, onAccent: options.look?.onAccent, highlight: options.look?.coverHighlight };
   const browserExecutable = options.chromeBin || null;
-  const composition = await selectComposition({ serveUrl, id: 'Thumbnail', inputProps, browserExecutable });
+  const puppeteerInstance = await coverBrowser(browserExecutable).catch(() => undefined);
+  const composition = await selectComposition({ serveUrl, id: 'Thumbnail', inputProps, browserExecutable, puppeteerInstance });
   await fs.mkdir(path.dirname(options.outputPath), { recursive: true });
-  await renderStill({ composition, serveUrl, inputProps, output: options.outputPath, imageFormat: 'jpeg', jpegQuality: 92, browserExecutable, overwrite: true });
+  await renderStill({ composition, serveUrl, inputProps, output: options.outputPath, imageFormat: 'jpeg', jpegQuality: 92, browserExecutable, overwrite: true, puppeteerInstance });
   return options.outputPath;
 }

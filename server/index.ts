@@ -73,7 +73,7 @@ import { verifyAccessJwt } from './access.js';
 import { DEFAULT_PICTURES_ENGINE } from './chatgpt-images.js';
 import { checkCredentials, issueSession, loadAuth, LOGIN_PAGE, LoginLimiter, readCookie, SESSION_COOKIE, SESSION_DAYS, verifySession } from './auth.js';
 import { appendChunk, completedUploadPath, createUpload, readUpload, type UploadKind } from './uploads.js';
-import { AUTO_COMPOSITE_SCRIPT, AUTO_EDIT_SCRIPT, keepIndexRanges, newAutoJob, placeBroll, renderCaptionLayer, renderThumbnail, runPython, WHOOSH, type AutoJob, type AutoOptions, type AutoStageId, type EditRange, type ReelPackage } from './auto-reel.js';
+import { AUTO_COMPOSITE_SCRIPT, AUTO_EDIT_SCRIPT, keepIndexRanges, makePreviewVideo, warmCaptionRenderer, newAutoJob, placeBroll, renderCaptionLayer, renderThumbnail, runPython, WHOOSH, type AutoJob, type AutoOptions, type AutoStageId, type EditRange, type ReelPackage } from './auto-reel.js';
 import { buildPackagePrompt, cleanPackage, extractCandidateFrames, FRAME_COUNT, framePaths, PACKAGE_SCHEMA } from './reel-package.js';
 import { buildCaptionPhrases, type CaptionWordIn } from './captions.js';
 import { buildCleanPrompt, cleanIntensityValue, keptDuration, targetDurationValue, targetFeedback, type CleanNotes } from './clean.js';
@@ -902,6 +902,7 @@ app.get('/api/projects/:id/exports/:file', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id)); const name = path.basename(routeParam(req.params.file));
   const file = path.join(exportsDir(project), name); const stat = await fs.stat(file).catch(() => null);
   if (!stat?.isFile()) return void res.status(404).json({ error: 'Export not found' });
+  res.setHeader('Cache-Control', 'private, max-age=604800'); // names carry a timestamp: a new version is a new file
   if (req.query.inline) return void res.sendFile(file); // plays in the page's video player
   res.download(file, name.replace(/^\d{8}-\d{6}-/, ''));
 }));
@@ -1568,6 +1569,25 @@ function startAutoRun(project: Project, job: AutoJob, context: Awaited<ReturnTyp
       else if (job.state === 'failed') void notify(workspaceId, { title: 'Your reel stopped', body: `${project.name}: tap to see what happened. No reel was used.`, url, tag: `reel-${project.id}` }, true);
     });
 }
+const previewPathFor = (output: string) => output.replace(/-auto-reel\.mp4$/, '-preview.mp4');
+/** Small 720p copy for watching on the phone; the full file stays for saving. */
+async function addPhonePreview(project: Project, job: AutoJob, ffmpegBin: string) {
+  if (!job.outputPath || !/-auto-reel\.mp4$/.test(job.outputPath)) return;
+  const preview = previewPathFor(job.outputPath);
+  if (!(await fs.stat(preview).catch(() => null))?.size) await makePreviewVideo(ffmpegBin, job.outputPath, `${preview}.part.mp4`).then(() => fs.rename(`${preview}.part.mp4`, preview));
+  const url = downloadUrlFor(project, preview); if (url) job.previewUrl = `${url}?inline=1`;
+}
+/** Older finished reels: make their phone previews one at a time in the background. */
+async function backfillPhonePreviews() {
+  const settings = await resolvedSettings(); if (!settings.ffmpegBin) return;
+  for (const project of projects.values()) {
+    const job = await loadAutoJob(project).catch(() => null);
+    if (!job || job.state !== 'completed' || !job.outputPath || job.previewUrl?.includes('-preview.mp4')) continue;
+    if (!(await fs.stat(job.outputPath).catch(() => null))) continue;
+    try { await addPhonePreview(project, job, settings.ffmpegBin); await persistAutoJob(project, job); console.log(`Phone preview made for ${project.id}`); }
+    catch (error) { console.error(`Preview for ${project.id} failed:`, error); }
+  }
+}
 /** After a restart: carry on with reels that were mid-way (finished steps are not redone). */
 async function resumeAutoJobs() {
   for (const project of projects.values()) {
@@ -1694,6 +1714,8 @@ async function runAutoReel(project: Project, job: AutoJob) {
     note(`${broll.length} B-roll cutaways…`);
     await runPython(python, AUTO_COMPOSITE_SCRIPT, [path.join(dir, 'base.mp4'), path.join(dir, 'broll-placed.json'), path.join(dir, 'broll-clips'), captioned ? captionFile : '-', String(Math.round(H * 0.651)), WHOOSH, output, String(W), String(H)]);
     job.outputPath = output; job.downloadUrl = downloadUrlFor(project, output); job.previewUrl = job.downloadUrl ? `${job.downloadUrl}?inline=1` : undefined;
+    note('Making a phone preview…');
+    await addPhonePreview(project, job, settings.ffmpegBin!).catch((error) => console.error(`Preview for ${project.id} failed:`, error));
     note(`${broll.length} B-roll · captions ${captioned ? 'on' : 'off'}`);
   });
   // The reel is done; a failed thumbnail/caption must not throw it away (it can be remade from the reel screen).
@@ -1762,13 +1784,14 @@ app.post('/api/projects/:id/auto', route(async (req, res) => {
 }));
 app.get('/api/projects/:id/auto', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id)); const live = autoJobs.get(project.id);
-  if (live) { if (isAdmin(res)) live.cost = await reelCost(project); return void res.json(jobView(res, live)); }
+  const look = packPreview(await projectPack(project));
+  if (live) { if (isAdmin(res)) live.cost = await reelCost(project); return void res.json({ ...jobView(res, live), look }); }
   // After a restart the job is read back from disk; one that was mid-way cannot continue.
   const saved = await fs.readFile(autoJobFile(project), 'utf8').then((text) => JSON.parse(text) as AutoJob).catch(() => null);
   if (!saved) return void res.json({ state: 'idle' });
   if (saved.state === 'running' || saved.state === 'review') { saved.state = 'failed'; saved.error = 'Interrupted by a restart of the app. Start the reel again.'; }
   if (isAdmin(res)) saved.cost = await reelCost(project);
-  res.json(jobView(res, saved));
+  res.json({ ...jobView(res, saved), look });
 }));
 app.post('/api/projects/:id/auto/review', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id)); const job = autoJobs.get(project.id); const resolve = reviewWaiters.get(project.id);
@@ -1806,7 +1829,7 @@ app.put('/api/projects/:id/auto/package', route(async (req, res) => {
   const coverChanged = edited.frame !== pkg.frame || JSON.stringify([edited.lines, edited.label, edited.badges]) !== JSON.stringify([pkg.lines, pkg.label, pkg.badges]);
   Object.assign(pkg, edited);
   if (coverChanged || !pkg.thumbnailPath) { job.options.thumbnail = true; await renderPackageThumbnail(project, pkg); pkg.state = 'ready'; pkg.error = undefined; }
-  await persistAutoJob(project, job); res.json(jobView(res, job));
+  await persistAutoJob(project, job); res.json({ ...jobView(res, job), look: packPreview(await projectPack(project)) });
 }));
 app.post('/api/projects/:id/auto/stop', route(async (req, res) => {
   const id = routeParam(req.params.id); const job = autoJobs.get(id);
@@ -1830,6 +1853,7 @@ for (const project of projects.values()) {
   } catch { /* leave the project as-is */ }
 }
 // A second copy of the app (a test on another port) shares the projects folder and must not pick up the live app's reels.
-if (!process.env.VIDEO_CLEANER_NO_RESUME) await resumeAutoJobs();
+if (!process.env.VIDEO_CLEANER_NO_RESUME) { await resumeAutoJobs(); void backfillPhonePreviews(); }
+warmCaptionRenderer(os.tmpdir());
 if (process.env.NODE_ENV === 'production') { const distDir = path.resolve('dist'); app.use(express.static(distDir)); app.use((_req, res) => res.sendFile(path.join(distDir, 'index.html'))); }
 app.listen(PORT, '127.0.0.1', () => { console.log(`Video Cleaner local server: http://127.0.0.1:${PORT} · ${projects.size} local project${projects.size === 1 ? '' : 's'} restored`); });
