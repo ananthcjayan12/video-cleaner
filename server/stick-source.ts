@@ -7,7 +7,9 @@ import { parseModelJson } from './text-models.js';
 import { recordUsage } from './usage.js';
 
 /**
- * "From a link": an Instagram / YouTube / Facebook / TikTok reel is downloaded with yt-dlp (logged out, no cookies),
+ * "From a link": an Instagram / YouTube / Facebook / TikTok reel is downloaded with yt-dlp. Instagram links use the
+ * owner's Instagram login from Chrome on this laptop (yt-dlp reads Chrome's cookies in memory for that request; nothing
+ * is copied to disk). INSTAGRAM_COOKIES_BROWSER picks the browser[:profile] (default "chrome"), "off" downloads logged out.
  * shrunk, and watched by Gemini, which returns what it says and how it is built. The script writer then makes OUR
  * OWN version from that; the source video is deleted straight after.
  */
@@ -34,9 +36,10 @@ export function cleanReelUrl(input: string): { url: string; platform: string } {
   return { url: url.toString(), platform };
 }
 
-/** yt-dlp: YTDLP_BIN, then PATH, then the copy in story-reels' Python environment. */
+/** yt-dlp: YTDLP_BIN, then PractiReel's own copy (~/.video-cleaner/ytdlp-venv, has the keyring module needed to read
+ * Chrome's encrypted cookies), then PATH, then the copy in story-reels' Python environment. */
 export function findYtDlp(): string | null {
-  const candidates = [process.env.YTDLP_BIN, ...String(process.env.PATH ?? '').split(':').map((dir) => dir && path.join(dir, 'yt-dlp')), path.join(os.homedir(), '.local/bin/yt-dlp'), path.join(os.homedir(), 'story-reels/.venv/bin/yt-dlp')];
+  const candidates = [process.env.YTDLP_BIN, path.join(os.homedir(), '.video-cleaner/ytdlp-venv/bin/yt-dlp'), ...String(process.env.PATH ?? '').split(':').map((dir) => dir && path.join(dir, 'yt-dlp')), path.join(os.homedir(), '.local/bin/yt-dlp'), path.join(os.homedir(), 'story-reels/.venv/bin/yt-dlp')];
   return candidates.find((file): file is string => Boolean(file) && existsSync(file!)) ?? null;
 }
 
@@ -79,15 +82,18 @@ export async function fetchReelSource(options: {
   if (!options.geminiApiKey) throw new Error('Add a Gemini API key to read the video.');
   await fs.mkdir(options.workDir, { recursive: true });
   try {
-    options.progress(`Reading the ${platform} post…`);
-    const meta = JSON.parse(await run(ytdlp, ['--no-warnings', '--no-playlist', '--dump-single-json', url], 120_000, options.signal).catch((error) => {
+    const browser = process.env.INSTAGRAM_COOKIES_BROWSER ?? 'chrome';
+    const auth = platform === 'Instagram' && browser !== 'off' ? ['--cookies-from-browser', browser] : [];
+    options.progress(`Reading the ${platform} post${auth.length ? ' (with your Instagram login)' : ''}…`);
+    const meta = JSON.parse(await run(ytdlp, ['--no-warnings', '--no-playlist', ...auth, '--dump-single-json', url], 120_000, options.signal).catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
+      if (auth.length && /login|empty media|cookies|private|rate|not available|unavailable/i.test(message)) throw new Error(`Instagram would not share this reel. Make sure Instagram is signed in in Chrome on the laptop (open instagram.com there and log in once), then try again. If it is signed in, the post may be private or Instagram is rate-limiting: wait a few minutes. (${message.slice(0, 140)})`);
       throw new Error(/login|private|rate|not available|unavailable/i.test(message) ? `${platform} would not share this video without a login (private, age-restricted or rate-limited). Try another public link, or upload the video. (${message.slice(0, 160)})` : message);
     })) as { title?: string; description?: string; uploader?: string; channel?: string; duration?: number };
     if ((meta.duration ?? 0) > 20 * 60) throw new Error('That video is over 20 minutes. Use a reel or a short.');
 
     options.progress('Downloading the video…');
-    await run(ytdlp, ['--no-warnings', '--no-playlist', '-q', '-f', 'best[height<=720]/bv*[height<=720]+ba/best', '--max-filesize', '400M', '-o', path.join(options.workDir, 'source.%(ext)s'), url], 600_000, options.signal);
+    await run(ytdlp, ['--no-warnings', '--no-playlist', '-q', ...auth, '-f', 'best[height<=720]/bv*[height<=720]+ba/best', '--max-filesize', '400M', '-o', path.join(options.workDir, 'source.%(ext)s'), url], 600_000, options.signal);
     const file = (await fs.readdir(options.workDir)).find((name) => name.startsWith('source.'));
     if (!file) throw new Error('The download finished without a video file.');
 
