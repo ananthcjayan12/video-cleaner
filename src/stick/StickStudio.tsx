@@ -122,7 +122,7 @@ export function StickStudio() {
   const fetchLink = () => act('Starting…', async () => {
     setSourceStage('Starting…');
     const { job } = await api.fetchSource(flow.link ?? '');
-    setFlow({ sourceJobId: job.id, source: undefined });
+    setFlow({ sourceJobId: job.id, source: undefined, concept: '' });
   });
 
   const useSource = flow.mode === 'link' && flow.source;
@@ -238,8 +238,8 @@ export function StickStudio() {
         <main className="pr-page">
           {header(flow.mode === 'link' ? 'Make it from a reel' : 'What is the reel about?', () => show('home'))}
           <div className="pr-chips">
-            <button type="button" className={`pr-chip${flow.mode !== 'link' ? ' on' : ''}`} onClick={() => setFlow({ mode: 'idea' })}>Type an idea</button>
-            <button type="button" className={`pr-chip${flow.mode === 'link' ? ' on' : ''}`} onClick={() => setFlow({ mode: 'link' })}>From a link</button>
+            <button type="button" className={`pr-chip${flow.mode !== 'link' ? ' on' : ''}`} onClick={() => { if (flow.mode === 'link') setFlow({ mode: 'idea', concept: '' }); }}>Type an idea</button>
+            <button type="button" className={`pr-chip${flow.mode === 'link' ? ' on' : ''}`} onClick={() => { if (flow.mode !== 'link') setFlow({ mode: 'link', concept: '' }); }}>From a link</button>
           </div>
           {flow.mode === 'link' && (
             <section className="pr-card pr-options">
@@ -256,7 +256,7 @@ export function StickStudio() {
                   {flow.source.keyPoints.length > 0 && <ul>{flow.source.keyPoints.slice(0, 6).map((point, i) => <li key={i}>{point}</li>)}</ul>}
                   {flow.source.transcript && <details className="st-more"><summary>What they say</summary><p style={{ whiteSpace: 'pre-wrap' }}>{flow.source.transcript}</p></details>}
                   <small className="muted">We write our own version: same topic, our words. Nothing is copied.</small>
-                  <button type="button" className="pr-btn small text" style={{ alignSelf: 'flex-start' }} onClick={() => setFlow({ source: undefined, link: '' })}>Use a different link</button>
+                  <button type="button" className="pr-btn small text" style={{ alignSelf: 'flex-start' }} onClick={() => setFlow({ source: undefined, link: '', concept: '' })}>Use a different link</button>
                 </div>
               )}
             </section>

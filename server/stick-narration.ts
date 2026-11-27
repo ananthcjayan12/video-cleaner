@@ -162,8 +162,13 @@ export function buildScriptPrompt(input: { concept: string; settings: StickStudi
     ].join(' ');
   return [
     'You write the voiceover for a short vertical reel (Instagram Reels / YouTube Shorts). A stick-figure version of the creator acts it out with on-screen cards, so the words must carry the whole story.',
-    input.concept.trim() ? `CONCEPT FROM THE CREATOR:\n${input.concept.trim()}` : 'CONCEPT FROM THE CREATOR: make our own version of the reference reel below.',
-    input.sourceText ?? '',
+    ...(input.sourceText
+      ? [
+        'TOPIC: the reel is about the SAME topic as the reference reel below. Do not switch to a different subject.',
+        input.sourceText,
+        input.concept.trim() ? `CREATOR'S CHANGES FOR OUR VERSION (apply them, but stay on the reference reel's topic):\n${input.concept.trim()}` : '',
+      ]
+      : [`CONCEPT FROM THE CREATOR:\n${input.concept.trim()}`]),
     `LENGTH: about ${seconds} seconds spoken, roughly ${words} words in total.`,
     language,
     'SHAPE: one continuous story, not a list of facts. Line 1 is the hook: a surprising fact, a question or a relatable moment that stops the scroll in under 3 seconds. Then the problem or common belief, the twist or the real reason (why), what to do instead, and a short payoff. End with one clear call to action.',

@@ -47,3 +47,10 @@ test('narration goes in one request unless the script is very long, split on who
   const chunks = narrationChunks(long); assert.ok(chunks.length > 1); assert.equal(chunks.join('\n'), long.join('\n'));
   assert.match(pauseInstruction(50), /barely/); assert.match(pauseInstruction(220), /short natural/); assert.match(pauseInstruction(600), /clear/);
 });
+
+test('link mode keeps the reference topic first and treats typed text as changes', () => {
+  const prompt = buildScriptPrompt({ concept: 'make it for parents', settings: DEFAULT_STUDIO_SETTINGS, sourceText: 'REFERENCE REEL (instagram).\nTopic: gum bleeding' });
+  assert.ok(prompt.indexOf('Topic: gum bleeding') < prompt.indexOf('make it for parents'));
+  assert.match(prompt, /SAME topic as the reference reel/);
+  assert.doesNotMatch(prompt, /CONCEPT FROM THE CREATOR/);
+});
