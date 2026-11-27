@@ -170,6 +170,19 @@ export type StickRender = {
 
 const root = path.resolve('remotion/stick-reel');
 const assets = path.resolve('assets/stick-reel');
+let vaapiWorks: boolean | undefined;
+/** Upscale the 3/4-size drawing to 1080x1920: Intel Quick Sync (VAAPI) when it works here, else x264. */
+async function upscaleTo1080(ffmpeg: (args: string[]) => Promise<unknown>, input: string, output: string) {
+  const device = process.env.VIDEO_CLEANER_VAAPI_DEVICE || '/dev/dri/renderD128';
+  if (vaapiWorks !== false && process.env.VIDEO_CLEANER_NO_HW_ENCODE !== '1') {
+    try {
+      await ffmpeg(['-hide_banner', '-loglevel', 'error', '-y', '-vaapi_device', device, '-i', input, '-vf', 'format=nv12,hwupload,scale_vaapi=w=1080:h=1920:mode=hq', '-c:v', 'h264_vaapi', '-qp', '18', '-an', output]);
+      vaapiWorks = true; return;
+    } catch { vaapiWorks = false; }
+  }
+  await ffmpeg(['-hide_banner', '-loglevel', 'error', '-y', '-i', input, '-vf', 'scale=1080:1920:flags=lanczos', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p', '-an', output]);
+}
+
 const draftPath = (project: Project) => path.join(project.workDir, 'stick-draft.json');
 export const stickMusicPath = (project: Project) => path.join(project.workDir, 'stick-music.m4a');
 
@@ -746,17 +759,36 @@ export async function renderStickReel(options: {
   const browserExecutable = options.chromeBin || undefined;
   const composition = await selectComposition({ serveUrl, id: 'ReelStudio', inputProps, browserExecutable });
 
-  await renderMedia({
+  // Speed (measured on the HD 520 laptop, 57 s cinematic reel): Chrome drawing with the Intel GPU ('angle') is 1.5x
+  // faster than its default software drawing, and drawing at 3/4 size then upscaling to 1080x1920 is another 1.5x,
+  // with no visible difference after upscaling. STICK_RENDER_GL=off / STICK_RENDER_SCALE=1 turn these off.
+  const gl = process.env.STICK_RENDER_GL === 'off' ? undefined : (process.env.STICK_RENDER_GL || 'angle') as 'angle';
+  const scale = Math.min(1, Math.max(0.5, Number(process.env.STICK_RENDER_SCALE) || 0.75));
+  const drawn = scale < 1 ? visual.replace(/\.mp4$/, '.small.mp4') : visual;
+  const draw = (withGl: typeof gl) => renderMedia({
     serveUrl,
     composition,
     inputProps,
     browserExecutable,
     codec: 'h264',
     muted: true,
-    outputLocation: visual,
+    scale,
+    chromiumOptions: withGl ? { gl: withGl } : undefined,
+    outputLocation: drawn,
     cancelSignal: cancel.cancelSignal,
-    onProgress: ({ progress: fraction }) => progress(0.08 + fraction * 0.80, `Rendering frames (${Math.round(fraction * 100)}%)…`),
+    onProgress: ({ progress: fraction }) => progress(0.08 + fraction * 0.78, `Rendering frames (${Math.round(fraction * 100)}%)…`),
   });
+  try { await draw(gl); } catch (error) {
+    if (signal?.aborted || !gl) throw error;
+    console.error('[stick render] GPU drawing failed, retrying without it:', error instanceof Error ? error.message : error);
+    await draw(undefined);
+  }
+  if (drawn !== visual) {
+    stopped();
+    progress(0.87, 'Sharpening to 1080p…');
+    await upscaleTo1080(ffmpeg, drawn, visual);
+    await fs.rm(drawn, { force: true });
+  }
 
   stopped();
   progress(0.90, 'Mastering audio & mixing SFX…');
