@@ -1,4 +1,4 @@
-import { draftPath, listStickFacePacks, loadStickDraft, makeStickDraft, renderStickReel, saveStickDraft, STICK_THEMES, stickAssetsDir, stickMusicPath, type StickRender } from './stick-reel.js';
+import { listStickFacePacks, loadStickDraft, makeStickDraft, renderStickReel, saveStickDraft, STICK_THEMES, stickAssetsDir, stickMusicPath, type StickRender } from './stick-reel.js';
 import { planStickReelWithAi } from './stick-planner.js';
 import { makeStickPictures } from './stick-pictures.js';
 import { fetchReelSource, newSourceJob, sourceBrief, sourceFromBody, sourceJobs } from './stick-source.js';
@@ -2005,7 +2005,7 @@ function stopStickWork(projectId: string) {
   const job = stickJobs.get(projectId); if (job?.state === 'running') Object.assign(job, { state: 'failed', progress: 0, error: 'Stopped.' }); // job.last (the previous video) stays
 }
 const stickPlanAborts = new Map<string, AbortController>();
-type StickPictureJob = { state: 'running' | 'failed' | 'ready'; stage: string; error?: string; abort: AbortController };
+type StickPictureJob = { state: 'running' | 'failed' | 'ready'; stage: string; error?: string; abort: AbortController; done?: Promise<void> };
 const stickPictureJobs = new Map<string, StickPictureJob>();
 const stickAssetBase = (projectId: string) => `http://127.0.0.1:${process.env.PORT || 3001}/api/projects/${projectId}/stick/asset`;
 const stickRoute = (handler: (req: express.Request, res: express.Response, project: Project) => Promise<void>) =>
@@ -2024,8 +2024,10 @@ app.get('/api/projects/:id/stick', stickRoute(async (_req, res, project) => {
   const render = stickJobs.get(project.id) ?? (saved?.state === 'running' ? { state: 'failed' as const, progress: 0, error: 'Interrupted by a server restart.', last: saved.last } : saved);
   res.json({
     draft: await loadStickDraft(project),
-    // The scene plan is saved once the AI director finishes (or the owner saves edits); before that the draft is only a starter.
-    planned: await fs.access(draftPath(project)).then(() => true, () => false),
+    // The AI director's plan file exists once planning has finished at least once.
+    planned: await fs.access(path.join(project.workDir, 'stick-reel-plan.json')).then(() => true, () => false),
+    /** The server is between steps of plan → pictures → render (it carries on with the app closed). */
+    chain: stickPlanAborts.has(project.id),
     render,
     duration: project.media.duration,
     audioUrl: `/api/projects/${project.id}/stick/audio`,
@@ -2078,14 +2080,18 @@ app.get('/api/projects/:id/stick/asset/:file', stickRoute(async (req, res, proje
 }));
 /** Make the set + photo sheet for a cinematic stick reel (ChatGPT first), then save them on the draft. Background job. */
 app.post('/api/projects/:id/stick/pictures', stickRoute(async (_req, res, project) => {
-  if (stickPictureJobs.get(project.id)?.state === 'running') return void res.status(202).json({ pictures: { state: 'running' } });
+  const job = await startStickPictures(project);
+  res.status(202).json({ pictures: { state: job.state, stage: job.stage } });
+}));
+/** Starts (or joins) the set + photo sheet job; `job.done` settles when it ends (never rejects). */
+async function startStickPictures(project: Project): Promise<StickPictureJob> {
+  const running = stickPictureJobs.get(project.id); if (running?.state === 'running') return running;
   const settings = await resolvedSettings(); const studio = await loadStudioSettings();
   if (!settings.ffmpegBin || !settings.ffprobeBin) throw new Error('FFmpeg was not found.');
   const engine = studio.picturesEngine === 'none' ? 'chatgpt' : studio.picturesEngine;
   const job: StickPictureJob = { state: 'running', stage: 'Starting the pictures…', abort: new AbortController() };
   stickPictureJobs.set(project.id, job);
-  res.status(202).json({ pictures: { state: job.state, stage: job.stage } });
-  void (async () => {
+  job.done = (async () => {
     const draft = await loadStickDraft(project);
     const result = await makeStickPictures({
       engine, assetsDir: stickAssetsDir(project), workDir: project.workDir, setPrompt: draft.setPrompt ?? '', photoPrompts: draft.photoPrompts ?? [], photoKinds: draft.photoKinds ?? [],
@@ -2101,7 +2107,8 @@ app.post('/api/projects/:id/stick/pictures', stickRoute(async (_req, res, projec
     Object.assign(job, { state: 'failed', stage: 'Failed', error: error instanceof Error ? error.message : String(error) });
     console.error(`[stick pictures] ${project.id}:`, job.error);
   });
-}));
+  return job;
+}
 
 /** Planning can take minutes (longer than Cloudflare's ~100 s request limit), so it runs in the background; GET .../stick reports it. */
 const stickPlans = new Map<string, { state: 'running' | 'failed'; error?: string }>();
@@ -2110,8 +2117,41 @@ app.post('/api/projects/:id/stick/plan', stickRoute(async (req, res, project) =>
   const plan = { state: 'running' as 'running' | 'failed', error: undefined as string | undefined }; stickPlans.set(project.id, plan);
   const abort = new AbortController(); stickPlanAborts.set(project.id, abort);
   res.status(202).json({ plan });
-  void planStickInBackground(req, project, abort.signal).then(() => { if (!abort.signal.aborted) stickPlans.delete(project.id); }, (error) => { if (abort.signal.aborted) return; plan.state = 'failed'; plan.error = error instanceof Error ? error.message : String(error); }).finally(() => { if (stickPlanAborts.get(project.id) === abort) stickPlanAborts.delete(project.id); });
+  const auto = req.body?.auto === true;
+  void planStickInBackground(req, project, abort.signal).then(async () => {
+    if (abort.signal.aborted) return;
+    stickPlans.delete(project.id);
+    if (auto) await continueStickChain(project, abort.signal);
+  }, (error) => { if (abort.signal.aborted) return; plan.state = 'failed'; plan.error = error instanceof Error ? error.message : String(error); })
+    .catch((error) => console.error(`[stick chain] ${project.id}:`, error instanceof Error ? error.message : error))
+    .finally(() => { if (stickPlanAborts.get(project.id) === abort) stickPlanAborts.delete(project.id); });
 }));
+/** Carry on without re-planning: pictures if needed, then the video. Runs on the server, so the phone can be closed. */
+app.post('/api/projects/:id/stick/continue', stickRoute(async (_req, res, project) => {
+  if (stickPlanAborts.has(project.id)) return void res.status(202).json({ continuing: true });
+  const abort = new AbortController(); stickPlanAborts.set(project.id, abort);
+  res.status(202).json({ continuing: true });
+  void continueStickChain(project, abort.signal)
+    .catch((error) => console.error(`[stick chain] ${project.id}:`, error instanceof Error ? error.message : error))
+    .finally(() => { if (stickPlanAborts.get(project.id) === abort) stickPlanAborts.delete(project.id); });
+}));
+/** After the plan: the set + photos (cinematic, once), then the render. Stop aborts `signal`. */
+async function continueStickChain(project: Project, signal: AbortSignal) {
+  const studio = await loadStudioSettings();
+  let draft = await loadStickDraft(project);
+  if ((draft.style ?? 'classic') === 'cinematic' && !draft.set && studio.picturesEngine !== 'none') {
+    await (await startStickPictures(project)).done; // a failed picture job still renders, on a plain set
+    if (signal.aborted) return;
+    draft = await loadStickDraft(project);
+  }
+  // One render at a time on this laptop: wait for another reel to finish.
+  while ([...stickJobs.values()].some((job) => job.state === 'running')) {
+    if (signal.aborted) return;
+    await new Promise((resolve) => setTimeout(resolve, 10_000));
+  }
+  if (signal.aborted) return;
+  await startStickRender(project, studio.badge ? { ...draft, badge: studio.badge } : draft);
+}
 app.post('/api/projects/:id/stick/cancel', stickRoute(async (_req, res, project) => {
   stopStickWork(project.id);
   res.json({ stopped: true });
@@ -2145,6 +2185,10 @@ app.post('/api/projects/:id/stick/render', stickRoute(async (req, res, project) 
   if ([...stickJobs.values()].some(job => job.state === 'running')) {
     return void res.status(409).json({ error: 'A stick-figure reel is already rendering.' });
   }
+  const { job } = await startStickRender(project, req.body?.scenes ? req.body : undefined);
+  res.status(202).json({ render: job });
+}));
+async function startStickRender(project: Project, input?: unknown): Promise<{ job: StickRender; done: Promise<void> }> {
   const before = stickJobs.get(project.id) ?? await fs.readFile(path.join(project.workDir, 'stick-render.json'), 'utf8').then((text) => JSON.parse(text) as StickRender).catch(() => null);
   const last = before?.state === 'ready' && before.url ? { url: before.url, ...(before.creditsUrl ? { creditsUrl: before.creditsUrl } : {}) } : before?.last;
   const job: StickRender = { state: 'running', progress: 0, stage: 'Preparing render…', ...(last ? { last } : {}) };
@@ -2152,7 +2196,7 @@ app.post('/api/projects/:id/stick/render', stickRoute(async (req, res, project) 
   const abort = new AbortController(); stickRenderAborts.set(project.id, abort);
   try {
     await requireSource(project);
-    const draft = req.body?.scenes ? await saveStickDraft(project, req.body) : await loadStickDraft(project);
+    const draft = input ? await saveStickDraft(project, input) : await loadStickDraft(project);
     const settings = await resolvedSettings();
     if (!settings.ffmpegBin) throw new Error('FFmpeg was not found.');
     const ffmpegBin = settings.ffmpegBin;
@@ -2161,8 +2205,7 @@ app.post('/api/projects/:id/stick/render', stickRoute(async (req, res, project) 
     const output = path.join(exportsDir(project), `stick-reel-${renderId}.mp4`);
     const creditsPath = path.join(exportsDir(project), `stick-reel-${renderId}-credits.txt`);
     await fs.mkdir(exportsDir(project), { recursive: true });
-    res.status(202).json({ render: job });
-    void (async () => {
+    const done = (async () => {
       try {
         const result = await renderStickReel({
           project, draft, visual: temporary, output, creditsPath, chromeBin: await detectChromeBin(), signal: abort.signal, assetBase: stickAssetBase(project.id),
@@ -2188,11 +2231,12 @@ app.post('/api/projects/:id/stick/render', stickRoute(async (req, res, project) 
         if (stickRenderAborts.get(project.id) === abort) stickRenderAborts.delete(project.id);
       }
     })();
+    return { job, done };
   } catch (error) {
     stickJobs.delete(project.id);
     throw error;
   }
-}));
+}
 
 app.post('/api/projects/:id/auto', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id));

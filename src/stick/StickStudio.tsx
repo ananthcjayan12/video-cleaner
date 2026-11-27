@@ -17,7 +17,7 @@ import './stick.css';
 
 type Flow = { concept: string; seconds: number; mode?: 'idea' | 'link'; link?: string; sourceJobId?: string; source?: ReelSource; script?: StickScript; scriptJobId?: string; narrationJobId?: string; voiceUrl?: string; uploadId?: string; voiceSeconds?: number };
 type View = 'home' | 'write' | 'script' | 'voice' | 'reel' | 'settings';
-type StickData = { draft: StickDraft; render: StickRender | null; duration: number; audioUrl: string; customMusic: boolean; facePacks: string[]; themes: StickTheme[]; planned?: boolean; plan: StickPlanState; pictures: StickPicturesState; assetBase: string };
+type StickData = { draft: StickDraft; render: StickRender | null; duration: number; audioUrl: string; customMusic: boolean; facePacks: string[]; themes: StickTheme[]; planned?: boolean; chain?: boolean; plan: StickPlanState; pictures: StickPicturesState; assetBase: string };
 
 const FLOW_KEY = 'practireel:stickFlow';
 const PROJECT_KEY = 'video-cleaner:stickProject';
@@ -147,8 +147,8 @@ export function StickStudio() {
     const current = await api.stick(project.id);
     const draft: StickDraft = studio ? { ...current.draft, style: studio.look, themeId: studio.themeId, faces: studio.faces, music: studio.music, sfx: studio.sfx, useOpenverse: studio.useOpenverse, ...(studio.badge ? { badge: studio.badge } : {}) } : current.draft;
     await api.saveStick(project.id, draft);
-    await api.planStick(project.id, { brief, themeId: draft.themeId });
-    localStorage.setItem(PROJECT_KEY, project.id); localStorage.setItem(AUTO_KEY, project.id);
+    await api.planStick(project.id, { brief, themeId: draft.themeId, auto: true }); // the server goes on to pictures + render by itself
+    localStorage.setItem(PROJECT_KEY, project.id);
     setProjectId(project.id); show('reel');
   }
 
@@ -388,7 +388,7 @@ function ReelView({ projectId, info, onNew, onSettings, onLost, onHome }: { proj
   const audio = useRef<HTMLAudioElement>(null);
   const planning = data?.plan?.state === 'running';
   const rendering = data?.render?.state === 'running';
-  const picturing = data?.pictures?.state === 'running';
+  const picturing = data?.pictures?.state === 'running' || Boolean(data?.chain && !planning && data?.render?.state !== 'running');
   const cinematic = (data?.draft.style ?? 'classic') === 'cinematic';
 
   async function refresh(keepDraft = false) {
@@ -407,18 +407,7 @@ function ReelView({ projectId, info, onNew, onSettings, onLost, onHome }: { proj
       const timer = window.setTimeout(() => void refresh((rendering || picturing) && editing).catch((err) => setError(message(err))), 2000);
       return () => clearTimeout(timer);
     }
-    if (localStorage.getItem(AUTO_KEY) === projectId && !data.plan && data.render?.state !== 'ready') {
-      // Cinematic reels get their set + photo sheet first (once); if pictures fail the render still runs on a plain set.
-      if (cinematic && !data.draft.set && !data.pictures && info?.settings.picturesEngine !== 'none') {
-        void api.makeStickPictures(projectId).then(() => refresh()).catch((err) => setError(message(err)));
-        return;
-      }
-      localStorage.removeItem(AUTO_KEY);
-      const badge = info?.settings.badge;
-      const next = badge ? { ...data.draft, badge } : data.draft;
-      void api.renderStick(projectId, next).then(() => refresh()).catch((err) => setError(message(err)));
-    }
-  }, [data, planning, rendering]);
+  }, [data, planning, rendering, picturing]);
 
   async function act(label: string, action: () => Promise<void>) {
     setError(''); setNotice(''); setBusy(label);
@@ -427,14 +416,12 @@ function ReelView({ projectId, info, onNew, onSettings, onLost, onHome }: { proj
   /** Carry on from the step that was stopped: what is already done (plan, set, photos) is kept. */
   const resume = () => act('Continuing…', async () => {
     if (!data || !draft) return;
-    localStorage.setItem(AUTO_KEY, projectId);
-    if (data.planned === false) await api.planStick(projectId, { themeId: draft.themeId });
-    else if (cinematic && !draft.set && info?.settings.picturesEngine !== 'none') { await api.saveStick(projectId, draft); await api.makeStickPictures(projectId); }
-    else { localStorage.removeItem(AUTO_KEY); await api.renderStick(projectId, draft); }
+    if (data.planned === false) await api.planStick(projectId, { themeId: draft.themeId, auto: true });
+    else { await api.saveStick(projectId, draft); await api.continueStick(projectId); }
     await refresh(); window.scrollTo(0, 0);
   });
   const renderAgain = () => act('Starting render…', async () => { if (!draft) return; await api.renderStick(projectId, draft); setEditing(false); await refresh(); window.scrollTo(0, 0); });
-  const replan = () => act('Starting…', async () => { if (!draft) return; await api.saveStick(projectId, draft); await api.planStick(projectId, { brief: brief.trim() || undefined, themeId: draft.themeId }); localStorage.setItem(AUTO_KEY, projectId); await refresh(); window.scrollTo(0, 0); });
+  const replan = () => act('Starting…', async () => { if (!draft) return; await api.saveStick(projectId, draft); await api.planStick(projectId, { brief: brief.trim() || undefined, themeId: draft.themeId, auto: true }); await refresh(); window.scrollTo(0, 0); });
   const pickMusic = async () => {
     const [file] = await chooseFiles('audio/*,.mp3,.wav,.m4a,.aac', false); if (!file) return;
     await act('Uploading music…', async () => { const [id] = await uploadAll([file], setBusy); await api.stickMusic(projectId, id); await refresh(true); setNotice('Music added. Render again to hear it.'); });
