@@ -23,5 +23,12 @@ test('a 2×3 contact sheet is cut along its white gutters into 6 photos', { skip
 
 test('the sheet prompt asks for a strict 2×3 grid of real photos with white gutters', () => {
   const prompt = sheetPicturePrompt(['a', 'b', 'c', 'd', 'e', 'f']);
-  assert.match(prompt, /2 columns × 3 rows/); assert.match(prompt, /pure white/); assert.match(prompt, /Not an illustration/); assert.match(prompt, /6\. f/);
+  assert.match(prompt, /2 columns × 3 rows/); assert.match(prompt, /pure white/); assert.match(prompt, /Not an illustration/); assert.match(prompt, /6\. \[PHOTO\] f/); assert.match(prompt, /Indian/);
+});
+
+test('screenshots and articles get their own instructions, with text allowed and no real brands', () => {
+  const prompt = sheetPicturePrompt(['p', 's', 'a', 'p', 'p', 'p'], ['photo', 'screenshot', 'article']);
+  assert.match(prompt, /2\. \[SCREENSHOT\] s/); assert.match(prompt, /3\. \[ARTICLE \/ NOTE\] a/);
+  assert.match(prompt, /no real brand names/); assert.match(prompt, /never a real newspaper/); assert.match(prompt, /dark mode/);
+  assert.doesNotMatch(sheetPicturePrompt(['p', 'p']), /SCREENSHOT cells/);
 });

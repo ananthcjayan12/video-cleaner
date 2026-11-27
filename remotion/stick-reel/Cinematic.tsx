@@ -30,6 +30,7 @@ export type CinematicProps = {
   cast: StickCastMember[];
   setUrl?: string;
   photoUrls: string[];
+  photoKinds?: string[];
 };
 
 const ease = Easing.bezier(0.65, 0, 0.35, 1);
@@ -72,7 +73,7 @@ function walkTo(from: number, to: number, t: number) {
 }
 const lastPose = (scene: StickSceneV2) => [...(scene.beats ?? [])].reverse().find((b) => b.pose)?.pose ?? scene.pose;
 
-export function Cinematic({ scenes, words, duration, faces, badge, theme, tracker, cast, setUrl, photoUrls }: CinematicProps) {
+export function Cinematic({ scenes, words, duration, faces, badge, theme, tracker, cast, setUrl, photoUrls, photoKinds = [] }: CinematicProps) {
   const frame = useCurrentFrame();
   const time = frame / FPS;
   const index = scenes.reduce((current, scene, i) => (time >= scene.at ? i : current), 0);
@@ -160,7 +161,7 @@ export function Cinematic({ scenes, words, duration, faces, badge, theme, tracke
 
       {/* VISUAL: a real photo when the Director picked one, otherwise a building info panel. */}
       <div style={{ position: 'absolute', top: 330, left: 90, right: 90, transform: `translate(${((1 - visualIn) * moveDir * 160).toFixed(1)}px, ${((1 - visualIn) * 40).toFixed(1)}px) scale(${(0.9 + visualIn * 0.1) * (1 + punch * 0.02)})`, opacity: visualIn }}>
-        {photo ? <PhotoFrame src={photo} local={local} tilt={index % 2 ? 2.2 : -2.2} /> : (
+        {photo ? (photoKinds[scene.photo!] === 'screenshot' ? <ScreenshotCard src={photo} local={local} /> : photoKinds[scene.photo!] === 'article' ? <ArticleClip src={photo} local={local} tilt={index % 2 ? 1.6 : -1.6} /> : <PhotoFrame src={photo} local={local} tilt={index % 2 ? 2.2 : -2.2} />) : (
           <div style={{ transform: 'scale(0.86)', transformOrigin: '50% 0%' }}>
             <Stage template={scene.template} data={{ ...scene.data, title: scene.data.title || scene.note || undefined }} note={scene.note} beat={local} theme={glassTheme} glass />
           </div>
@@ -227,6 +228,28 @@ function PhotoFrame({ src, local, tilt }: { src: string; local: number; tilt: nu
     <div style={{ width: 800, height: 620, margin: '0 auto', background: '#f4f1ea', padding: 16, borderRadius: 10, transform: `rotate(${tilt}deg)`, boxShadow: '0 40px 90px rgba(0,0,0,0.65)' }}>
       <div style={{ width: '100%', height: '100%', overflow: 'hidden', borderRadius: 4 }}>
         <Img src={src} style={{ width: '100%', height: '100%', objectFit: 'cover', transform: `scale(${kb.toFixed(4)})` }} />
+      </div>
+    </div>
+  );
+}
+
+/** A screen capture as it appears in editorial reels: uncropped, rounded corners, a slow scroll-zoom towards the top. */
+function ScreenshotCard({ src, local }: { src: string; local: number }) {
+  const t = Math.min(1, local / 120);
+  return (
+    <div style={{ width: 560, height: 680, margin: '0 auto', borderRadius: 28, overflow: 'hidden', border: '3px solid rgba(255,255,255,0.22)', boxShadow: '0 40px 90px rgba(0,0,0,0.7)', background: '#111' }}>
+      <Img src={src} style={{ width: '100%', height: '100%', objectFit: 'cover', objectPosition: '50% 20%', transform: `scale(${(1 + t * 0.06).toFixed(4)})`, transformOrigin: '50% 20%' }} />
+    </div>
+  );
+}
+
+/** An article or note as a cut-out clipping on paper, slightly tilted. */
+function ArticleClip({ src, local, tilt }: { src: string; local: number; tilt: number }) {
+  const kb = 1 + Math.min(1, local / 150) * 0.05;
+  return (
+    <div style={{ width: 620, height: 720, margin: '0 auto', background: '#f7f3ea', padding: 12, borderRadius: 4, transform: `rotate(${tilt}deg)`, boxShadow: '0 40px 90px rgba(0,0,0,0.65)' }}>
+      <div style={{ width: '100%', height: '100%', overflow: 'hidden' }}>
+        <Img src={src} style={{ width: '100%', height: '100%', objectFit: 'cover', objectPosition: '50% 0%', transform: `scale(${kb.toFixed(4)})`, transformOrigin: '50% 0%' }} />
       </div>
     </div>
   );

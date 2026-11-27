@@ -157,7 +157,11 @@ export type StickDraft = {
   /** What the AI Director asked for, so the pictures can be (re)made. */
   setPrompt?: string;
   photoPrompts?: string[];
+  /** What each picture is: a real photo, a screen capture (chat, search, app) or an article / notes clipping. */
+  photoKinds?: StickPhotoKind[];
 };
+export const stickPhotoKinds = ['photo', 'screenshot', 'article'] as const;
+export type StickPhotoKind = typeof stickPhotoKinds[number];
 
 export type StickRender = {
   state: 'running' | 'ready' | 'failed';
@@ -479,7 +483,8 @@ export function validateStickDraft(value: unknown, duration: number): StickDraft
     ...(typeof input.set === 'string' && /^[\w.-]{1,80}$/.test(input.set) ? { set: input.set } : {}),
     ...(Array.isArray(input.photos) ? { photos: input.photos.filter((p): p is string => typeof p === 'string' && /^[\w.-]{1,80}$/.test(p)).slice(0, 12) } : {}),
     ...(typeof input.setPrompt === 'string' && input.setPrompt.trim() ? { setPrompt: input.setPrompt.trim().slice(0, 1200) } : {}),
-    ...(Array.isArray(input.photoPrompts) ? { photoPrompts: input.photoPrompts.map(p => clampString(p, 400)).filter(Boolean).slice(0, 6) } : {}),
+    ...(Array.isArray(input.photoPrompts) ? { photoPrompts: input.photoPrompts.map(p => clampString(p, 600)).filter(Boolean).slice(0, 6) } : {}),
+    ...(Array.isArray(input.photoKinds) ? { photoKinds: input.photoKinds.slice(0, 6).map((k): StickPhotoKind => (stickPhotoKinds as readonly unknown[]).includes(k) ? k as StickPhotoKind : 'photo') } : {}),
   };
 }
 
@@ -755,6 +760,7 @@ export async function renderStickReel(options: {
     cast: draft.cast ?? [],
     setUrl: draft.set && options.assetBase ? `${options.assetBase}/${draft.set}` : undefined,
     photoUrls: (draft.photos ?? []).map((name) => (options.assetBase ? `${options.assetBase}/${name}` : '')).filter(Boolean),
+    photoKinds: draft.photoKinds ?? [],
   };
   const browserExecutable = options.chromeBin || undefined;
   const composition = await selectComposition({ serveUrl, id: 'ReelStudio', inputProps, browserExecutable });

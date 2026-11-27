@@ -14,17 +14,23 @@ import { recordUsage } from './usage.js';
 export type StickPicturesEngine = 'chatgpt' | 'codex' | 'gemini';
 const REAL = 'Photorealistic, a real photograph: natural light, real materials and real skin texture, true-to-life colours, shot on a full-frame DSLR or a good phone camera, shallow depth of field where natural. Not an illustration, not 3D, not CGI, not cartoon. No text, no letters, no logos, no watermarks.';
 
+const SCREEN = 'A real screen capture, pixel-sharp like an actual phone or computer screenshot: real app interface details (status bar with an IST time, battery, read ticks, timestamps, avatars as initials), crisp readable text exactly as written, natural UI spacing. Generic design with no real brand names or logos. Not a photo of a screen, not an illustration or mock-up.';
+const ARTICLE = 'A real cropped editorial screenshot: like a screenshot of a news site or blog article (headline, byline, date, first lines, maybe a photo), or a photo of a printed page or handwritten note on real paper. Crisp, readable text exactly as written. Use only the made-up publication name given, never a real newspaper, website or logo.';
+const INDIAN = 'Any people are Indian: Indian faces, skin tones, hair, clothing and surroundings, candid and natural, not models posing.';
+
 export function setPicturePrompt(setPrompt: string) {
-  return `${setPrompt.trim()}\n\nA vertical 2:3 photograph of an EMPTY location (no people at all). Wide shot at eye level; the lower 40% is open floor where characters will stand; slightly dark, moody, cinematic light with practical lamps and window light. ${REAL}`;
+  return `${setPrompt.trim()}\n\nA vertical 2:3 photograph of an EMPTY, real Indian location (no people at all). Wide shot at eye level; the lower 40% is open floor where characters will stand; slightly dark, moody, cinematic light with practical lamps and window light. ${REAL}`;
 }
 
-export function sheetPicturePrompt(photoPrompts: string[]) {
-  const cells = photoPrompts.slice(0, 6).map((p, i) => `${i + 1}. ${p.trim()}`).join('\n');
-  return `ONE vertical image laid out as a contact sheet: exactly 6 separate photographs in a grid of 2 columns × 3 rows, read left to right, top to bottom.
-Between the photographs and around the outside there must be thick, pure white (#FFFFFF) gutters, about 6% of the image width, perfectly straight, so each photo can be cut out cleanly. Every cell is the same size, filled edge to edge with its own photograph, no borders, no rounded corners, no captions, no numbers.
-The 6 photographs:
+export function sheetPicturePrompt(photoPrompts: string[], kinds: string[] = []) {
+  const label = (kind?: string) => (kind === 'screenshot' ? 'SCREENSHOT' : kind === 'article' ? 'ARTICLE / NOTE' : 'PHOTO');
+  const cells = photoPrompts.slice(0, 6).map((p, i) => `${i + 1}. [${label(kinds[i])}] ${p.trim()}`).join('\n');
+  const used = new Set(photoPrompts.slice(0, 6).map((_, i) => kinds[i] ?? 'photo'));
+  return `ONE vertical image laid out as a contact sheet: exactly 6 separate pictures in a grid of 2 columns × 3 rows, read left to right, top to bottom.
+Between the cells and around the outside there must be thick, pure white (#FFFFFF) gutters, about 6% of the image width, perfectly straight, so each photo can be cut out cleanly. Every cell is the same size, filled edge to edge with its own picture, no borders, no rounded corners, no captions, no numbers. No cell may have a pure white background at its edges (screens use dark mode or a light grey / cream app background, paper is off-white), so the white gutters stay clearly separate.
+The 6 pictures (each fills its own cell; they must look like 6 different REAL images collected from a phone, never like AI art):
 ${cells}
-Each one is a natural, real photograph of real people or real objects: ${REAL}`;
+${used.has('photo') ? `PHOTO cells: ${REAL.replace(' No text, no letters, no logos, no watermarks.', ' No added text, logos or watermarks.')} ${INDIAN}\n` : ''}${used.has('screenshot') ? `SCREENSHOT cells: ${SCREEN} Crop to the part that matters so the text is large enough to read in its cell.\n` : ''}${used.has('article') ? `ARTICLE / NOTE cells: ${ARTICLE} Crop to the headline and first lines so they are large enough to read in its cell.\n` : ''}`;
 }
 
 function run(bin: string, args: string[], timeoutMs: number, signal?: AbortSignal): Promise<Buffer> {
@@ -94,7 +100,7 @@ async function makeOne(engine: StickPicturesEngine, prompt: string, outPng: stri
 
 /** Make the set and the photo sheet, cut the sheet, and return file names inside assetsDir. */
 export async function makeStickPictures(options: {
-  engine: StickPicturesEngine; assetsDir: string; workDir: string; setPrompt: string; photoPrompts: string[];
+  engine: StickPicturesEngine; assetsDir: string; workDir: string; setPrompt: string; photoPrompts: string[]; photoKinds?: string[];
   config: ImageProviderConfig; browser: BrowserEngine; ffmpeg: string; ffprobe: string;
   progress: (stage: string) => void; signal?: AbortSignal;
 }): Promise<{ set?: string; photos: string[]; engineUsed: string; notes: string[] }> {
@@ -104,7 +110,7 @@ export async function makeStickPictures(options: {
   const sheetPng = path.join(options.assetsDir, `sheet-${stamp}.png`);
   const wantSheet = options.photoPrompts.length >= 2;
   const setText = setPicturePrompt(options.setPrompt || 'A modern, tidy clinic interior');
-  const sheetText = sheetPicturePrompt(options.photoPrompts);
+  const sheetText = sheetPicturePrompt(options.photoPrompts, options.photoKinds);
   const notes: string[] = [];
   const ctx = { config: options.config, browser: options.browser, workDir: options.workDir, signal: options.signal };
   const have = async (file: string) => ((await fs.stat(file).catch(() => null))?.size ?? 0) > 50_000;

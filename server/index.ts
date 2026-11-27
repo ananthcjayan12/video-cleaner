@@ -2057,7 +2057,7 @@ app.post('/api/projects/:id/stick/pictures', stickRoute(async (_req, res, projec
   void (async () => {
     const draft = await loadStickDraft(project);
     const result = await makeStickPictures({
-      engine, assetsDir: stickAssetsDir(project), workDir: project.workDir, setPrompt: draft.setPrompt ?? '', photoPrompts: draft.photoPrompts ?? [],
+      engine, assetsDir: stickAssetsDir(project), workDir: project.workDir, setPrompt: draft.setPrompt ?? '', photoPrompts: draft.photoPrompts ?? [], photoKinds: draft.photoKinds ?? [],
       config: { claudeBin: settings.claudeBin, codexBin: settings.codexBin, geminiApiKey: settings.geminiApiKey, geminiModel: settings.geminiImageModel, picturesEngine: picturesEngine(settings) } as never,
       browser: picturesEngine(settings), ffmpeg: settings.ffmpegBin!, ffprobe: settings.ffprobeBin!, signal: job.abort.signal, progress: (stage) => { job.stage = stage; },
     });
