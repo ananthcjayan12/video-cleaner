@@ -2,7 +2,7 @@ import { draftPath, listStickFacePacks, loadStickDraft, makeStickDraft, renderSt
 import { planStickReelWithAi } from './stick-planner.js';
 import { makeStickPictures } from './stick-pictures.js';
 import { fetchReelSource, newSourceJob, sourceBrief, sourceFromBody, sourceJobs } from './stick-source.js';
-import { DEFAULT_SCRIPT_ENGINE, loadStudioSettings, MALE_VOICES, narrateScript, narrationJobs, newNarrationJob, previewVoice, saveStudioSettings, writeStickScript, type StickScript } from './stick-narration.js';
+import { DEFAULT_SCRIPT_ENGINE, loadStudioSettings, MALE_VOICES, narrateScript, narrationJobs, newNarrationJob, previewVoice, saveStudioSettings, writeStickScript, type NarrationJob, type StickScript } from './stick-narration.js';
 import { EMOTIONS } from './emotion-sfx.js';
 import { MOTION_SOUNDS, motionSoundPath } from './motion-sfx.js';
 import { colorVideoFilter } from './color.js';
@@ -1926,6 +1926,7 @@ app.post('/api/stick/narrate', studioRoute(async (req, res) => {
       await fs.copyFile(m4a, meta.file);
       const probed = await probe(m4a).catch(() => null);
       Object.assign(job, { state: 'ready', progress: 1, stage: 'Voice ready', uploadId: meta.id, seconds: probed?.duration ?? undefined });
+      await fs.writeFile(path.join(work, 'job.json'), JSON.stringify({ uploadId: meta.id, seconds: job.seconds }));
       await fs.rm(wav, { force: true }).catch(() => undefined);
     } catch (error) {
       if (job.state === 'running') Object.assign(job, { state: 'failed', progress: 0, stage: 'Failed', error: job.abort?.signal.aborted ? 'Stopped.' : error instanceof Error ? error.message : String(error) });
@@ -1933,13 +1934,41 @@ app.post('/api/stick/narrate', studioRoute(async (req, res) => {
     }
   })();
 }));
+/** A finished voice lives on disk (narration/<id>/): bring it back after a restart so the draft can carry on. */
+async function voiceFromDisk(id: string) {
+  if (!/^[0-9a-f-]{36}$/.test(id)) return undefined;
+  const work = path.join(studioDir(), 'narration', id);
+  const m4a = (await fs.readdir(work).catch(() => [] as string[])).find((name) => name.endsWith('.m4a'));
+  if (!m4a) return undefined;
+  const stat = await fs.stat(path.join(work, m4a));
+  let saved = await fs.readFile(path.join(work, 'job.json'), 'utf8').then((text) => JSON.parse(text) as { uploadId?: string; seconds?: number }).catch(() => ({} as { uploadId?: string; seconds?: number }));
+  if (!saved.uploadId || !(await readUpload(await uploadsDir(), saved.uploadId).then(() => true, () => false))) {
+    const meta = await createUpload(await uploadsDir(), { name: m4a, size: stat.size });
+    await fs.copyFile(path.join(work, m4a), meta.file);
+    saved = { uploadId: meta.id, seconds: (await probe(path.join(work, m4a)).catch(() => null))?.duration ?? undefined };
+    await fs.writeFile(path.join(work, 'job.json'), JSON.stringify(saved));
+  }
+  const job: NarrationJob = { id, state: 'ready', progress: 1, stage: 'Voice ready', uploadId: saved.uploadId, seconds: saved.seconds, startedAt: stat.mtimeMs };
+  narrationJobs.set(id, job);
+  return job;
+}
+app.get('/api/stick/voices', studioRoute(async (_req, res) => {
+  const dir = path.join(studioDir(), 'narration');
+  const rows = await Promise.all((await fs.readdir(dir).catch(() => [] as string[])).map(async (id) => {
+    const script = await fs.readFile(path.join(dir, id, 'script.json'), 'utf8').then((text) => JSON.parse(text) as StickScript).catch(() => null);
+    const m4a = (await fs.readdir(path.join(dir, id)).catch(() => [] as string[])).find((name) => name.endsWith('.m4a'));
+    if (!script || !m4a) return null;
+    return { id, script, at: (await fs.stat(path.join(dir, id, m4a))).mtimeMs };
+  }));
+  res.json({ voices: rows.filter(Boolean).sort((a, b) => b!.at - a!.at).slice(0, 12) });
+}));
 app.get('/api/stick/narrate/:jobId', studioRoute(async (req, res) => {
-  const job = narrationJobs.get(routeParam(req.params.jobId));
+  const job = narrationJobs.get(routeParam(req.params.jobId)) ?? await voiceFromDisk(routeParam(req.params.jobId));
   if (!job) return void res.status(404).json({ error: 'That voice job is gone (the app restarted). Make the voice again.' });
   res.json({ job: { ...job, abort: undefined }, url: job.uploadId ? `/api/stick/narrate/${job.id}/audio` : undefined });
 }));
 app.get('/api/stick/narrate/:jobId/audio', studioRoute(async (req, res) => {
-  const job = narrationJobs.get(routeParam(req.params.jobId));
+  const job = narrationJobs.get(routeParam(req.params.jobId)) ?? await voiceFromDisk(routeParam(req.params.jobId));
   if (!job?.uploadId) return void res.status(404).end();
   res.setHeader('Accept-Ranges', 'bytes'); res.sendFile((await readUpload(await uploadsDir(), job.uploadId)).file);
 }));

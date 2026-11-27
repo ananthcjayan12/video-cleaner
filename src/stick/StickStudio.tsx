@@ -230,6 +230,7 @@ export function StickStudio() {
           </button>
           {busy && <p className="pr-info">{busy}</p>}
           {error && <p className="pr-error">{error}</p>}
+          <RecentVoices onOpen={(voice) => { stopFlowJobs(); const next: Flow = { concept: '', seconds: flow.seconds, mode: 'idea', script: voice.script, narrationJobId: voice.id }; localStorage.setItem(FLOW_KEY, JSON.stringify(next)); setFlowState(next); setError(''); show('voice'); }} />
           <MyReels onOpen={(id) => { localStorage.setItem(PROJECT_KEY, id); setProjectId(id); show('reel'); }} />
         </main>
       )}
@@ -556,6 +557,25 @@ function ReelView({ projectId, info, onNew, onSettings, onLost, onHome }: { proj
           </>}
       </div>
     </main>
+  );
+}
+
+/** Finished AI voices (with their scripts), so a draft lost to a stop or restart can carry on. */
+function RecentVoices({ onOpen }: { onOpen: (voice: { id: string; script: StickScript }) => void }) {
+  const [voices, setVoices] = useState<Awaited<ReturnType<typeof api.stickVoices>>['voices']>([]);
+  useEffect(() => { void api.stickVoices().then((r) => setVoices(r.voices)).catch(() => setVoices([])); }, []);
+  if (!voices.length) return null;
+  return (
+    <details className="pr-section">
+      <summary className="pr-label">Recent voices ({voices.length}) · continue from a script and voice</summary>
+      {voices.map((voice) => (
+        <button key={voice.id} type="button" className="pr-reel" onClick={() => onOpen(voice)}>
+          <span className="pr-thumb" aria-hidden="true">🎙️</span>
+          <span className="meta"><strong>{voice.script.title}</strong><small className="muted">{new Date(voice.at).toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })} · {voice.script.lines.length} lines</small></span>
+          <span aria-hidden="true">›</span>
+        </button>
+      ))}
+    </details>
   );
 }
 

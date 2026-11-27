@@ -302,6 +302,7 @@ export const api = {
   scriptJob: (jobId: string) => request<{ job: ScriptJob }>(`/api/stick/script/${jobId}`),
   previewVoice: (body: { voice?: string; voiceStyle?: string; line?: string }) => request<{ url: string }>('/api/stick/voice-preview', { method: 'POST', body: JSON.stringify(body) }),
   narrate: (script: StickScript) => request<{ job: NarrationJob }>('/api/stick/narrate', { method: 'POST', body: JSON.stringify({ script }) }),
+  stickVoices: () => request<{ voices: Array<{ id: string; script: StickScript; at: number }> }>('/api/stick/voices'),
   narration: (jobId: string) => request<{ job: NarrationJob; url?: string }>(`/api/stick/narrate/${jobId}`),
   renderStick: (id: string, draft: StickDraft) => request<{ render: StickRender }>(`/api/projects/${id}/stick/render`, { method: 'POST', body: JSON.stringify(draft) }),
   startAuto: (id: string, options: AutoOptions) => request<AutoJob>(`/api/projects/${id}/auto`, { method: 'POST', body: JSON.stringify(options) }),
