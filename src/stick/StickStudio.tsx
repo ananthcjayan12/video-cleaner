@@ -143,8 +143,11 @@ export function StickStudio() {
 
   async function startVideo(uploadId: string, brief?: string) {
     const project = await api.createStick(uploadId);
+    localStorage.setItem(PROJECT_KEY, project.id);
     const studio = info?.settings;
     const current = await api.stick(project.id);
+    // This voice already has a reel (planned, in progress or done): just open it.
+    if (current.planned || current.chain || current.render) { setProjectId(project.id); show('reel'); return; }
     const draft: StickDraft = studio ? { ...current.draft, style: studio.look, themeId: studio.themeId, faces: studio.faces, music: studio.music, sfx: studio.sfx, useOpenverse: studio.useOpenverse, ...(studio.badge ? { badge: studio.badge } : {}) } : current.draft;
     await api.saveStick(project.id, draft);
     await api.planStick(project.id, { brief, themeId: draft.themeId, auto: true }); // the server goes on to pictures + render by itself

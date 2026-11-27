@@ -957,6 +957,16 @@ app.post('/api/projects/select', route(async (req, res) => {
   const stickUpload = stick && Array.isArray(req.body?.uploadIds) && req.body.uploadIds.length === 1
     ? await readUpload(await uploadsDir(), String(req.body.uploadIds[0])) : undefined;
   if (stick && (!stickUpload || !['audio', 'video'].includes(stickUpload.kind))) throw new Error('Upload one voiceover or video with sound.');
+  // The same voice already has a stick reel (e.g. "Make the video" pressed again after the app was closed): open that one, don't start a duplicate.
+  if (stick && stickUpload) {
+    await hydrateProjects();
+    const same = [...projects.values()].filter((p) => p.sourcePath === stickUpload.file);
+    const score = async (p: Project) => (await fs.readFile(path.join(p.workDir, 'stick-render.json'), 'utf8').then((t) => (JSON.parse(t) as StickRender).state === 'ready', () => false) ? 2 : 0)
+      + (await fs.access(path.join(p.workDir, 'stick-reel-plan.json')).then(() => 1, () => 0));
+    const ranked = await Promise.all(same.map(async (p) => ({ p, s: await score(p) })));
+    const best = ranked.sort((a, b) => b.s - a.s || Date.parse(b.p.updatedAt) - Date.parse(a.p.updatedAt))[0]?.p;
+    if (best) return void res.json(await summarizeProject(best, null));
+  }
   const sourcePaths = await uploadedOr(req, stickUpload?.kind ?? 'video', () => pickNativeFiles()); if (!sourcePaths.length) return void res.status(400).json({ error: 'No video clips selected' }); const probed = await Promise.all(sourcePaths.map(async (sourcePath) => withDuration(sourcePath, await probe(sourcePath)))); if (relaxed) { const silent = probed.find((item) => !item.media.audioCodec); if (silent) throw new Error(`${path.basename(silent.sourcePath)} has no audio track.`); } else assertCompatibleClips(probed);
   const settings = await resolvedSettings(); const id = randomUUID(); const workDir = path.join(settings.projectsDir, id); await fs.mkdir(workDir, { recursive: true }); const now = new Date().toISOString(); const firstName = path.basename(sourcePaths[0]);
   const clips: ProjectClip[] = probed.map((item, index) => ({ id: `clip-${String(index + 1).padStart(3, '0')}`, sourcePath: item.sourcePath, sourceName: path.basename(item.sourcePath), media: item.media, timelineStart: 0, timelineEnd: 0 }));
