@@ -170,6 +170,8 @@ export type StickRender = {
   url?: string;
   creditsUrl?: string;
   error?: string;
+  /** The last finished video, kept while a newer render runs or after it is stopped. */
+  last?: { url: string; creditsUrl?: string };
 };
 
 const root = path.resolve('remotion/stick-reel');
@@ -187,7 +189,7 @@ async function upscaleTo1080(ffmpeg: (args: string[]) => Promise<unknown>, input
   await ffmpeg(['-hide_banner', '-loglevel', 'error', '-y', '-i', input, '-vf', 'scale=1080:1920:flags=lanczos', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p', '-an', output]);
 }
 
-const draftPath = (project: Project) => path.join(project.workDir, 'stick-draft.json');
+export const draftPath = (project: Project) => path.join(project.workDir, 'stick-draft.json');
 export const stickMusicPath = (project: Project) => path.join(project.workDir, 'stick-music.m4a');
 
 export function resolveStickTheme(themeId?: string): StickTheme {

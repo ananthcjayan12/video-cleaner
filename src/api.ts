@@ -284,7 +284,7 @@ export const api = {
   addMember: (workspaceId: string, username: string, password: string) => request<{ username: string }>(`/api/admin/workspaces/${encodeURIComponent(workspaceId)}/members`, { method: 'POST', body: JSON.stringify({ username, password }) }),
   removeMember: (username: string) => request<{ ok: true }>(`/api/admin/members/${encodeURIComponent(username)}`, { method: 'DELETE' }),
   createStick: (uploadId: string) => request<Project>('/api/projects/select', { method: 'POST', body: JSON.stringify({ uploadIds: [uploadId], stick: true }) }),
-  stick: (id: string) => request<{ draft: StickDraft; render: StickRender | null; duration: number; audioUrl: string; customMusic: boolean; facePacks: string[]; themes: StickTheme[]; plan: StickPlanState; pictures: StickPicturesState; assetBase: string }>(`/api/projects/${id}/stick`),
+  stick: (id: string) => request<{ draft: StickDraft; render: StickRender | null; duration: number; audioUrl: string; customMusic: boolean; facePacks: string[]; themes: StickTheme[]; planned?: boolean; plan: StickPlanState; pictures: StickPicturesState; assetBase: string }>(`/api/projects/${id}/stick`),
   makeStickPictures: (id: string) => request<{ pictures: StickPicturesState }>(`/api/projects/${id}/stick/pictures`, { method: 'POST' }),
   stickMusic: (id: string, uploadId?: string) => request<{ customMusic: boolean }>(`/api/projects/${id}/stick/music`, uploadId
     ? { method: 'PUT', body: JSON.stringify({ uploadId }) } : { method: 'DELETE' }),

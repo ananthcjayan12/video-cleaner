@@ -1,4 +1,4 @@
-import { listStickFacePacks, loadStickDraft, makeStickDraft, renderStickReel, saveStickDraft, STICK_THEMES, stickAssetsDir, stickMusicPath, type StickRender } from './stick-reel.js';
+import { draftPath, listStickFacePacks, loadStickDraft, makeStickDraft, renderStickReel, saveStickDraft, STICK_THEMES, stickAssetsDir, stickMusicPath, type StickRender } from './stick-reel.js';
 import { planStickReelWithAi } from './stick-planner.js';
 import { makeStickPictures } from './stick-pictures.js';
 import { fetchReelSource, newSourceJob, sourceBrief, sourceFromBody, sourceJobs } from './stick-source.js';
@@ -1973,7 +1973,7 @@ function stopStickWork(projectId: string) {
   stickPictureJobs.get(projectId)?.abort.abort(); stickPictureJobs.delete(projectId);
   stickPlanAborts.get(projectId)?.abort(); stickPlanAborts.delete(projectId); stickPlans.delete(projectId);
   stickRenderAborts.get(projectId)?.abort(); stickRenderAborts.delete(projectId);
-  const job = stickJobs.get(projectId); if (job?.state === 'running') Object.assign(job, { state: 'failed', progress: 0, error: 'Stopped.' });
+  const job = stickJobs.get(projectId); if (job?.state === 'running') Object.assign(job, { state: 'failed', progress: 0, error: 'Stopped.' }); // job.last (the previous video) stays
 }
 const stickPlanAborts = new Map<string, AbortController>();
 type StickPictureJob = { state: 'running' | 'failed' | 'ready'; stage: string; error?: string; abort: AbortController };
@@ -1992,9 +1992,11 @@ const stickRoute = (handler: (req: express.Request, res: express.Response, proje
 app.get('/api/projects/:id/stick', stickRoute(async (_req, res, project) => {
   const saved = await fs.readFile(path.join(project.workDir, 'stick-render.json'), 'utf8')
     .then(text => JSON.parse(text) as StickRender).catch(() => null);
-  const render = stickJobs.get(project.id) ?? (saved?.state === 'running' ? { state: 'failed' as const, progress: 0, error: 'Interrupted by a server restart.' } : saved);
+  const render = stickJobs.get(project.id) ?? (saved?.state === 'running' ? { state: 'failed' as const, progress: 0, error: 'Interrupted by a server restart.', last: saved.last } : saved);
   res.json({
     draft: await loadStickDraft(project),
+    // The scene plan is saved once the AI director finishes (or the owner saves edits); before that the draft is only a starter.
+    planned: await fs.access(draftPath(project)).then(() => true, () => false),
     render,
     duration: project.media.duration,
     audioUrl: `/api/projects/${project.id}/stick/audio`,
@@ -2114,7 +2116,9 @@ app.post('/api/projects/:id/stick/render', stickRoute(async (req, res, project) 
   if ([...stickJobs.values()].some(job => job.state === 'running')) {
     return void res.status(409).json({ error: 'A stick-figure reel is already rendering.' });
   }
-  const job: StickRender = { state: 'running', progress: 0, stage: 'Preparing render…' };
+  const before = stickJobs.get(project.id) ?? await fs.readFile(path.join(project.workDir, 'stick-render.json'), 'utf8').then((text) => JSON.parse(text) as StickRender).catch(() => null);
+  const last = before?.state === 'ready' && before.url ? { url: before.url, ...(before.creditsUrl ? { creditsUrl: before.creditsUrl } : {}) } : before?.last;
+  const job: StickRender = { state: 'running', progress: 0, stage: 'Preparing render…', ...(last ? { last } : {}) };
   stickJobs.set(project.id, job);
   const abort = new AbortController(); stickRenderAborts.set(project.id, abort);
   try {
@@ -2145,7 +2149,7 @@ app.post('/api/projects/:id/stick/render', stickRoute(async (req, res, project) 
         await atomicWriteJson(path.join(project.workDir, 'stick-render.json'), finished);
         Object.assign(job, finished);
       } catch (error) {
-        const failed: StickRender = { state: 'failed', progress: 0, error: abort.signal.aborted ? 'Stopped.' : error instanceof Error ? error.message : String(error) };
+        const failed: StickRender = { state: 'failed', progress: 0, error: abort.signal.aborted ? 'Stopped.' : error instanceof Error ? error.message : String(error), ...(last ? { last } : {}) };
         // A deleted reel's folder is gone: do not recreate it just to say it stopped.
         if (projects.has(project.id)) await atomicWriteJson(path.join(project.workDir, 'stick-render.json'), failed).catch(() => undefined);
         Object.assign(job, failed);

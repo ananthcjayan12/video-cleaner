@@ -17,7 +17,7 @@ import './stick.css';
 
 type Flow = { concept: string; seconds: number; mode?: 'idea' | 'link'; link?: string; sourceJobId?: string; source?: ReelSource; script?: StickScript; scriptJobId?: string; narrationJobId?: string; voiceUrl?: string; uploadId?: string; voiceSeconds?: number };
 type View = 'home' | 'write' | 'script' | 'voice' | 'reel' | 'settings';
-type StickData = { draft: StickDraft; render: StickRender | null; duration: number; audioUrl: string; customMusic: boolean; facePacks: string[]; themes: StickTheme[]; plan: StickPlanState; pictures: StickPicturesState; assetBase: string };
+type StickData = { draft: StickDraft; render: StickRender | null; duration: number; audioUrl: string; customMusic: boolean; facePacks: string[]; themes: StickTheme[]; planned?: boolean; plan: StickPlanState; pictures: StickPicturesState; assetBase: string };
 
 const FLOW_KEY = 'practireel:stickFlow';
 const PROJECT_KEY = 'video-cleaner:stickProject';
@@ -406,7 +406,7 @@ function ReelView({ projectId, info, onNew, onSettings, onLost, onHome }: { proj
       const timer = window.setTimeout(() => void refresh((rendering || picturing) && editing).catch((err) => setError(message(err))), 2000);
       return () => clearTimeout(timer);
     }
-    if (localStorage.getItem(AUTO_KEY) === projectId && !data.plan && !data.render) {
+    if (localStorage.getItem(AUTO_KEY) === projectId && !data.plan && data.render?.state !== 'ready') {
       // Cinematic reels get their set + photo sheet first (once); if pictures fail the render still runs on a plain set.
       if (cinematic && !data.draft.set && !data.pictures && info?.settings.picturesEngine !== 'none') {
         void api.makeStickPictures(projectId).then(() => refresh()).catch((err) => setError(message(err)));
@@ -423,6 +423,15 @@ function ReelView({ projectId, info, onNew, onSettings, onLost, onHome }: { proj
     setError(''); setNotice(''); setBusy(label);
     try { await action(); } catch (err) { setError(message(err)); } finally { setBusy(''); }
   }
+  /** Carry on from the step that was stopped: what is already done (plan, set, photos) is kept. */
+  const resume = () => act('Continuing…', async () => {
+    if (!data || !draft) return;
+    localStorage.setItem(AUTO_KEY, projectId);
+    if (data.planned === false) await api.planStick(projectId, { themeId: draft.themeId });
+    else if (cinematic && !draft.set && info?.settings.picturesEngine !== 'none') { await api.saveStick(projectId, draft); await api.makeStickPictures(projectId); }
+    else { localStorage.removeItem(AUTO_KEY); await api.renderStick(projectId, draft); }
+    await refresh(); window.scrollTo(0, 0);
+  });
   const renderAgain = () => act('Starting render…', async () => { if (!draft) return; await api.renderStick(projectId, draft); setEditing(false); await refresh(); window.scrollTo(0, 0); });
   const replan = () => act('Starting…', async () => { if (!draft) return; await api.saveStick(projectId, draft); await api.planStick(projectId, { brief: brief.trim() || undefined, themeId: draft.themeId }); localStorage.setItem(AUTO_KEY, projectId); await refresh(); window.scrollTo(0, 0); });
   const pickMusic = async () => {
@@ -455,7 +464,9 @@ function ReelView({ projectId, info, onNew, onSettings, onLost, onHome }: { proj
   const ready = data.render?.state === 'ready' && data.render.url;
   const making = planning || rendering || picturing;
   const stepClass = (state: 'done' | 'running' | 'todo' | 'failed') => `pr-step ${state === 'todo' ? '' : state}`;
-  const planState = planning ? 'running' : data.plan?.state === 'failed' ? 'failed' : 'done';
+  const planState = planning ? 'running' : data.plan?.state === 'failed' ? 'failed' : data.planned === false ? 'todo' : 'done';
+  const stopped = !making && !ready && (data.render?.error === 'Stopped.' || data.planned === false || (cinematic && !data.draft.set && !data.pictures && info?.settings.picturesEngine !== 'none'));
+  const lastVideo = !ready ? data.render?.last : undefined;
   const renderState = rendering ? 'running' : data.render?.state === 'failed' ? 'failed' : ready ? 'done' : 'todo';
   const picturesState = picturing ? 'running' : data.pictures?.state === 'failed' ? 'failed' : data.draft.set || data.pictures?.state === 'ready' ? 'done' : 'todo';
 
@@ -468,15 +479,23 @@ function ReelView({ projectId, info, onNew, onSettings, onLost, onHome }: { proj
         <section className="pr-card">
           <ol className="pr-steps">
             <li className={stepClass('done')}><span className="ic">✓</span><span className="txt"><strong>Voice</strong><small>{data.duration.toFixed(0)} s</small></span></li>
-            <li className={stepClass(planState)}><span className="ic">{planState === 'done' ? '✓' : planState === 'failed' ? '!' : ''}</span><span className="txt"><strong>Captions &amp; scene plan</strong><small>{planning ? 'The AI director is planning scenes, poses and sounds (1-3 min)…' : data.plan?.error ?? `${draft.scenes.length} scenes`}</small></span></li>
+            <li className={stepClass(planState)}><span className="ic">{planState === 'done' ? '✓' : planState === 'failed' ? '!' : ''}</span><span className="txt"><strong>Captions &amp; scene plan</strong><small>{planning ? 'The AI director is planning scenes, poses and sounds (1-3 min)…' : data.plan?.error ?? (planState === 'todo' ? 'Not done yet' : `${draft.scenes.length} scenes`)}</small></span></li>
             {cinematic && <li className={stepClass(picturesState)}><span className="ic">{picturesState === 'done' ? '✓' : picturesState === 'failed' ? '!' : ''}</span><span className="txt"><strong>Set &amp; real photos</strong><small>{picturing ? `${data.pictures?.stage ?? 'Working…'} (3-10 min)` : data.pictures?.state === 'failed' ? `Could not make pictures: ${data.pictures.error ?? ''}. The video uses a plain set.` : data.draft.set ? `Set + ${data.draft.photos?.length ?? 0} photos` : 'Waiting'}</small></span></li>}
-            <li className={stepClass(renderState)}><span className="ic">{renderState === 'done' ? '✓' : renderState === 'failed' ? '!' : ''}</span><span className="txt"><strong>Drawing the video</strong><small>{rendering ? `${data.render?.stage ?? ''} ${Math.round((data.render?.progress ?? 0) * 100)}%` : data.render?.error ?? (ready ? 'Done' : 'Waiting')}</small></span></li>
+            <li className={stepClass(renderState)}><span className="ic">{renderState === 'done' ? '✓' : renderState === 'failed' ? '!' : ''}</span><span className="txt"><strong>Drawing the video</strong><small>{rendering ? `${data.render?.stage ?? ''} ${Math.round((data.render?.progress ?? 0) * 100)}%` : (data.render?.error === 'Stopped.' ? 'Stopped. Press Continue to start it again.' : data.render?.error) ?? (ready ? 'Done' : 'Waiting')}</small></span></li>
           </ol>
           {rendering && <div className="pr-bar"><i style={{ width: `${Math.round((data.render?.progress ?? 0) * 100)}%` }} /></div>}
-          {making && <div className="pr-row" style={{ justifyContent: 'space-between' }}><small className="muted">You can close this page. It keeps going and will be here when you come back.</small>
+          {making && <div className="pr-row" style={{ justifyContent: 'space-between' }}><small className="muted">You can close this page. It keeps going. Stop keeps what is done so far; press Continue later.</small>
             <button type="button" className="pr-btn small danger" disabled={Boolean(busy)} onClick={() => void act('Stopping…', async () => { localStorage.removeItem(AUTO_KEY); await api.cancelStick(projectId); await refresh(); })}>Stop</button></div>}
           {data.plan?.state === 'failed' && <button type="button" className="pr-btn small" disabled={Boolean(busy)} onClick={() => void replan()}>Plan scenes again</button>}
-          {!making && !ready && data.plan?.state !== 'failed' && <button type="button" className="pr-btn primary" disabled={Boolean(busy)} onClick={() => void renderAgain()}>Make the video</button>}
+          {!making && !ready && data.plan?.state !== 'failed' && <button type="button" className="pr-btn primary" disabled={Boolean(busy)} onClick={() => void resume()}>{busy || (stopped ? 'Continue' : 'Make the video')}</button>}
+        </section>
+      )}
+
+      {lastVideo && !making && (
+        <section className="pr-card">
+          <small className="muted">Your last finished video (the newer render was stopped):</small>
+          <video className="pr-video" src={`${lastVideo.url}?inline=1`} controls playsInline preload="metadata" />
+          <div className="pr-actions"><a className="pr-btn" href={lastVideo.url}>Download MP4</a></div>
         </section>
       )}
 
