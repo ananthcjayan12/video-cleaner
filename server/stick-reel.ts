@@ -16,6 +16,11 @@ export const stickPoses = [
   'arms_crossed',
   'lean_in',
   'wave',
+  'phone_call',
+  'typing',
+  'facepalm',
+  'thumbs_up',
+  'hands_on_hips',
 ] as const;
 export type StickPose = typeof stickPoses[number];
 

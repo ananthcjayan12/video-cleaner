@@ -8,6 +8,7 @@ const TEMPLATES: Array<{ id: StickTemplateId; label: string }> = [
 const POSES: Array<{ id: StickPose; label: string }> = [
   { id: 'point_stage', label: 'Point' }, { id: 'present_both', label: 'Present' }, { id: 'think_chin', label: 'Think' }, { id: 'shrug', label: 'Shrug' },
   { id: 'celebrate', label: 'Celebrate' }, { id: 'arms_crossed', label: 'Arms crossed' }, { id: 'lean_in', label: 'Lean in' }, { id: 'wave', label: 'Wave' },
+  { id: 'phone_call', label: 'On the phone' }, { id: 'typing', label: 'Typing' }, { id: 'facepalm', label: 'Facepalm' }, { id: 'thumbs_up', label: 'Thumbs up' }, { id: 'hands_on_hips', label: 'Hands on hips' },
 ];
 const FACES: StickFace[] = ['neutral', 'happy', 'surprised', 'thinking', 'smirk'];
 const SIDES: StickSide[] = ['left', 'right', 'center'];

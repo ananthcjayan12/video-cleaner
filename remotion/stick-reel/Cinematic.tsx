@@ -34,6 +34,43 @@ export type CinematicProps = {
 
 const ease = Easing.bezier(0.65, 0, 0.35, 1);
 const defaultCamera = (i: number) => [0.18, 0.82, 0.5, 0.05, 0.95, 0.35, 0.65][i % 7];
+const EDGE_L = -190; const EDGE_R = 1270;
+
+type Spot = { castId: string; x: number; pose: StickPose; bubble?: StickTimedText; label: string };
+type Blocking = { mainX: number; mainLeft: boolean; actors: Spot[]; camera: number };
+
+/** Where everyone stands in each scene. People stay in the room between scenes and walk when their spot changes. */
+function blockScenes(scenes: StickSceneV2[], cast: StickCastMember[]): Blocking[] {
+  const out: Blocking[] = [];
+  scenes.forEach((scene, i) => {
+    const actors = (scene.actors ?? []).map((a) => ({ ...a, member: cast.find((c) => c.id === a.castId) })).filter((a) => a.member).slice(0, 3);
+    const prevB = out[i - 1];
+    // People in a running conversation don't swap places: if someone from the last scene is still here, keep sides.
+    const stays = prevB && actors.some((a) => prevB.actors.some((b) => b.castId === a.castId));
+    const mainLeft = stays ? prevB.mainLeft : actors.length ? scene.side !== 'right' : scene.side === 'left' || (scene.side === 'center' ? false : true);
+    const mainX = actors.length ? (mainLeft ? 250 : 830) : scene.side === 'center' ? 540 : mainLeft ? 270 : 810;
+    const xs = actors.length === 1 ? [mainLeft ? 760 : 320] : actors.length === 2 ? (mainLeft ? [640, 880] : [200, 440]) : mainLeft ? [560, 740, 920] : [160, 340, 520];
+    // Keep the camera steady inside a chapter (small drifts); big moves only when the chapter changes.
+    const want = scene.camera ?? defaultCamera(i);
+    const prev = out[i - 1];
+    const camera = !prev || scenes[i - 1].chapter !== scene.chapter ? want : prev.camera + Math.max(-0.1, Math.min(0.1, want - prev.camera));
+    out.push({ mainX, mainLeft, camera, actors: actors.map((a, k) => ({ castId: a.castId, x: xs[k], pose: a.pose, bubble: a.bubble, label: a.member!.label })) });
+  });
+  return out;
+}
+
+/** A walk from one spot to another starting at frame `t0` of the scene: position, how much it is walking, stride phase. */
+function walkTo(from: number, to: number, t: number) {
+  const dist = Math.abs(to - from);
+  if (dist < 8) return { x: to, walk: 0, phase: 0, dir: 0, done: t >= 0, arrive: 0 };
+  const dur = Math.max(14, Math.min(34, dist / 20));
+  const p = Math.max(0, Math.min(1, t / dur));
+  const e = p < 0.5 ? 2 * p * p : 1 - (-2 * p + 2) ** 2 / 2;
+  const x = from + (to - from) * e;
+  const walk = p <= 0 || p >= 1 ? 0 : Math.min(1, p * 6, (1 - p) * 6);
+  return { x, walk, phase: (Math.abs(x - from) / 62) * Math.PI, dir: Math.sign(to - from), done: p >= 1, arrive: dur };
+}
+const lastPose = (scene: StickSceneV2) => [...(scene.beats ?? [])].reverse().find((b) => b.pose)?.pose ?? scene.pose;
 
 export function Cinematic({ scenes, words, duration, faces, badge, theme, tracker, cast, setUrl, photoUrls }: CinematicProps) {
   const frame = useCurrentFrame();
@@ -44,9 +81,11 @@ export function Cinematic({ scenes, words, duration, faces, badge, theme, tracke
   const local = Math.max(0, frame - scene.at * FPS);
   const sceneLen = Math.max(1, ((scenes[index + 1]?.at ?? duration) - scene.at) * FPS);
 
+  const blocking = React.useMemo(() => blockScenes(scenes, cast), [scenes, cast]);
+  const here = blocking[index]; const before = blocking[index - 1];
   // Camera: glide from the previous scene's spot to this one, then a slow push-in and drift.
-  const camTo = scene.camera ?? defaultCamera(index);
-  const camFrom = prev ? prev.camera ?? defaultCamera(index - 1) : camTo;
+  const camTo = here.camera;
+  const camFrom = before ? before.camera : camTo;
   const glide = interpolate(local, [0, 22], [0, 1], { extrapolateRight: 'clamp', easing: ease });
   const cam = camFrom + (camTo - camFrom) * glide + Math.sin(frame / 70) * 0.015;
   // Punch boxes lose their punch if every scene has one: never two scenes in a row.
@@ -56,13 +95,12 @@ export function Cinematic({ scenes, words, duration, faces, badge, theme, tracke
   const punchKick = frame >= punchAt ? Math.max(0, 1 - (frame - punchAt) / 14) : 0;
   const zoom = 1.02 + 0.05 * (local / sceneLen) + 0.035 * punchKick;
   const moveDir = Math.sign(camTo - camFrom) || (index % 2 ? 1 : -1);
-  // Characters ride the camera move in from the side, so the cut reads as one continuous pan.
-  const castShift = (1 - glide) * moveDir * 420;
 
   // Beats (pose / face changes on exact words), as in the classic look.
   const beats = scene.beats ?? [];
   let activeBeat = -1; for (let i = 0; i < beats.length; i++) if (time >= beats[i].at) activeBeat = i;
-  const fromPose: StickPose = activeBeat > 0 ? beats[activeBeat - 1].pose ?? scene.pose : scene.pose;
+  // The figure carries on from where it was: its pose blends from the end of the previous scene.
+  const fromPose: StickPose = activeBeat > 0 ? beats[activeBeat - 1].pose ?? scene.pose : activeBeat === 0 ? scene.pose : prev ? lastPose(prev) : scene.pose;
   const toPose: StickPose = activeBeat >= 0 ? beats[activeBeat].pose ?? scene.pose : scene.pose;
   const poseFrame = activeBeat >= 0 ? frame - beats[activeBeat].at * FPS : local;
   const face: StickFace = activeBeat >= 0 ? beats[activeBeat].face ?? scene.face : scene.face;
@@ -80,10 +118,21 @@ export function Cinematic({ scenes, words, duration, faces, badge, theme, tracke
   const group = words.slice(gStart, gEnd);
 
   // Layout: the owner stands on one side, the cast on the other; the visual (panel or photo) floats above.
-  const actors = (scene.actors ?? []).map((a) => ({ ...a, member: cast.find((c) => c.id === a.castId) })).filter((a) => a.member);
-  const mainLeft = actors.length ? scene.side !== 'right' : scene.side === 'left' || (scene.side === 'center' ? false : true);
-  const mainX = actors.length ? (mainLeft ? 250 : 830) : scene.side === 'center' ? 540 : mainLeft ? 270 : 810;
-  const castXs = actors.length === 1 ? [mainLeft ? 760 : 320] : actors.length === 2 ? (mainLeft ? [640, 880] : [200, 440]) : mainLeft ? [560, 740, 920] : [160, 340, 520];
+  // Nobody re-enters on a cut: whoever was already there walks to the new spot, newcomers walk in, leavers walk out.
+  const me = walkTo(before ? before.mainX : here.mainX, here.mainX, local);
+  const mainX = me.x;
+  const castCenter = here.actors.length ? here.actors.reduce((sum, a) => sum + a.x, 0) / here.actors.length : 540;
+  const mainFacing: 'left' | 'right' = me.walk > 0.3 ? (me.dir < 0 ? 'left' : 'right') : (here.actors.length ? castCenter : 540) < mainX - 4 ? 'left' : 'right';
+  const people = here.actors.map((spot, i) => {
+    const was = before?.actors.find((a) => a.castId === spot.castId);
+    const delay = was ? 0 : 3 + i * 6;
+    const move = walkTo(was ? was.x : spot.x > 540 ? EDGE_R : EDGE_L, spot.x, local - delay);
+    return { spot, move, was, delay, leaving: false };
+  });
+  const leavers = (before?.actors ?? []).filter((a) => !here.actors.some((b) => b.castId === a.castId)).map((spot) => {
+    const move = walkTo(spot.x, spot.x > 540 ? EDGE_R : EDGE_L, local);
+    return { spot, move, was: spot, delay: 0, leaving: true };
+  }).filter((p) => !p.move.done);
   const photo = scene.photo !== undefined ? photoUrls[scene.photo] : undefined;
   const glassTheme: StickTheme = { ...theme, ink: INK, paper: '#0e1113', surface: 'rgba(14,17,19,0.84)', accent: YELLOW, highlight: YELLOW };
   const visualIn = index === 0 && local < 1 ? 0.6 : 0.6 + 0.4 * spring({ frame: local, fps: FPS, config: { damping: 18, stiffness: 170 } });
@@ -110,7 +159,7 @@ export function Cinematic({ scenes, words, duration, faces, badge, theme, tracke
       </div>
 
       {/* VISUAL: a real photo when the Director picked one, otherwise a building info panel. */}
-      <div style={{ position: 'absolute', top: 330, left: 90, right: 90, transform: `translate(${((1 - visualIn) * moveDir * 160 + castShift * 0.35).toFixed(1)}px, ${((1 - visualIn) * 40).toFixed(1)}px) scale(${(0.9 + visualIn * 0.1) * (1 + punch * 0.02)})`, opacity: visualIn }}>
+      <div style={{ position: 'absolute', top: 330, left: 90, right: 90, transform: `translate(${((1 - visualIn) * moveDir * 160).toFixed(1)}px, ${((1 - visualIn) * 40).toFixed(1)}px) scale(${(0.9 + visualIn * 0.1) * (1 + punch * 0.02)})`, opacity: visualIn }}>
         {photo ? <PhotoFrame src={photo} local={local} tilt={index % 2 ? 2.2 : -2.2} /> : (
           <div style={{ transform: 'scale(0.86)', transformOrigin: '50% 0%' }}>
             <Stage template={scene.template} data={{ ...scene.data, title: scene.data.title || scene.note || undefined }} note={scene.note} beat={local} theme={glassTheme} glass />
@@ -119,22 +168,26 @@ export function Cinematic({ scenes, words, duration, faces, badge, theme, tracke
       </div>
 
       {/* CAST + OWNER on the floor of the set. */}
-      <div style={{ position: 'absolute', inset: 0, transform: `translateX(${castShift.toFixed(1)}px)` }}>
-        {actors.map((actor, i) => {
-          const enterFrame = local + 9 - i * 3; // already past the invisible start of the pop
+      <div style={{ position: 'absolute', inset: 0 }}>
+        {[...leavers, ...people].map(({ spot, move, was, delay, leaving }, i) => {
+          const talking = Boolean(!leaving && spot.bubble && time >= spot.bubble.at && time < spot.bubble.at + 2.2);
+          const facing: 'left' | 'right' = move.walk > 0.3 ? (move.dir < 0 ? 'left' : 'right') : mainX < move.x ? 'left' : 'right';
+          const arrived = local - delay - move.arrive * 0.7;
+          const tagIn = was ? 60 : arrived;
           return (
-            <React.Fragment key={`${actor.castId}-${i}`}>
-              <StickRig frame={frame + i * 17} localFrame={enterFrame} side={castXs[i] > 540 ? 'right' : 'left'} enter="pop" energy="normal"
-                fromPose={actor.pose} toPose={actor.pose} poseTransitionFrame={enterFrame} face="neutral" facesPack="" ink={INK} shadowColor="rgba(0,0,0,0.55)"
-                isSpeaking={Boolean(actor.bubble && time >= actor.bubble.at && time < actor.bubble.at + 2.2)} punch={0} x={castXs[i]} top={FLOOR_TOP + 40} scale={0.82} plain outline={OUTLINE} />
-              <NameTag x={castXs[i]} y={FLOOR_TOP - 50} text={actor.member!.label} local={enterFrame} />
-              {actor.bubble && <Bubble text={actor.bubble.text} at={actor.bubble.at} time={time} x={castXs[i]} y={FLOOR_TOP - 120} />}
+            <React.Fragment key={`${spot.castId}-${leaving ? 'out' : 'in'}`}>
+              <StickRig frame={frame + i * 17} localFrame={local} side={move.x > 540 ? 'right' : 'left'} enter="slide" energy="normal" settled
+                fromPose={was ? was.pose : spot.pose} toPose={spot.pose} poseTransitionFrame={local - delay} face="neutral" facesPack="" ink={INK} shadowColor="rgba(0,0,0,0.55)"
+                isSpeaking={talking} punch={move.walk ? 0 : punchKick * 0.45} x={move.x} top={FLOOR_TOP + 40} scale={0.82} plain outline={OUTLINE}
+                walk={move.walk} walkPhase={move.phase} facing={facing} />
+              {!leaving && tagIn > 0 && <NameTag x={move.x} y={FLOOR_TOP - 50} text={spot.label} local={tagIn} />}
+              {!leaving && spot.bubble && <Bubble text={spot.bubble.text} at={spot.bubble.at} time={time} x={move.x} y={FLOOR_TOP - 120} />}
             </React.Fragment>
           );
         })}
-        <StickRig frame={frame} localFrame={local + 6} side={mainLeft ? 'left' : 'right'} enter="slide" energy={scene.energy} fromPose={fromPose} toPose={toPose}
-          poseTransitionFrame={poseFrame} face={face} facesPack={faces} ink={INK} shadowColor="rgba(0,0,0,0.55)" isSpeaking={activeWord >= 0} punch={punch}
-          x={mainX} top={FLOOR_TOP} outline={OUTLINE} />
+        <StickRig frame={frame} localFrame={local + 6} side={here.mainLeft ? 'left' : 'right'} enter="pop" energy={scene.energy} fromPose={fromPose} toPose={toPose}
+          poseTransitionFrame={poseFrame} face={face} facesPack={faces} ink={INK} shadowColor="rgba(0,0,0,0.55)" isSpeaking={activeWord >= 0} punch={me.walk ? 0 : punch}
+          x={mainX} top={FLOOR_TOP} outline={OUTLINE} settled={index > 0} walk={me.walk} walkPhase={me.phase} facing={mainFacing} />
         {scene.myBubble && <Bubble text={scene.myBubble.text} at={scene.myBubble.at} time={time} x={mainX} y={FLOOR_TOP - 250} />}
       </div>
 
