@@ -110,6 +110,10 @@ body:has(.pr) { background: #F5F7F6; }
 .pr-sentence.partial .x { color: var(--faint); text-decoration: line-through; }
 .pr-sentence.flagged { background: var(--amber-soft); }
 .pr-sentence mark { background: #FFD9A8; color: inherit; border-radius: 4px; padding: 0 2px; }
+.pr-sentence.words { text-decoration: none; }
+.pr-word { font: inherit; color: var(--ink); background: none; border: 0; padding: 2px 3px; margin: 0 -1px; border-radius: 6px; min-height: 32px; }
+.pr-word.x { color: var(--faint); text-decoration: line-through; text-decoration-color: rgba(217, 45, 32, .55); background: rgba(217, 45, 32, .06); }
+.pr-word:active { background: var(--line); }
 .pr-flag { border: 1.5px solid #F2C08F; background: var(--amber-soft); border-radius: 14px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
 .pr-flag strong { color: var(--amber); }
 

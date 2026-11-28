@@ -568,7 +568,7 @@ async function stickBundle(facePack: string) {
   return bundled.promise;
 }
 
-type ResolvedSfxCue = {
+export type ResolvedSfxCue = {
   at: number;
   filePath: string;
   lead: number;
@@ -581,7 +581,7 @@ type ResolvedSfxCue = {
 const LEGACY_LOCAL_SFX = new Set(['sweep', 'pop', 'chime']);
 const MOTION_SFX_MAP = new Map(MOTION_SOUNDS.map(entry => [entry.id, entry]));
 
-async function resolveSingleSfx(
+export async function resolveSingleSfx(
   cue: { at: number; sfx?: string; sfxQuery?: string; gainScale: number },
   options: { useOpenverse: boolean; runFfmpeg: (args: string[]) => Promise<{ stdout: string; stderr: string }> },
 ): Promise<ResolvedSfxCue | null> {

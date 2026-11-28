@@ -24,7 +24,8 @@ export function displayWord(text: string) {
 }
 
 export function buildCaptionPhrases(words: CaptionWordIn[], duration: number, options: { maxWords?: number; maxChars?: number; pause?: number } = {}): CaptionPhrase[] {
-  const maxWords = options.maxWords ?? 6; const maxChars = options.maxChars ?? 34; const pause = options.pause ?? 0.35;
+  // Short phrases (one line most of the time): long Malayalam words make 6-word captions crowded.
+  const maxWords = options.maxWords ?? 4; const maxChars = options.maxChars ?? 26; const pause = options.pause ?? 0.35;
   const groups: CaptionWordIn[][] = [];
   let current: CaptionWordIn[] = [];
   words.forEach((word, i) => {

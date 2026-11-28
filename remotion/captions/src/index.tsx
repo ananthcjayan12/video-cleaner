@@ -7,6 +7,8 @@ import { CleanPop } from './CleanPop';
 import { MinimalLower } from './MinimalLower';
 import { GlassCard } from './GlassCard';
 import { Thumbnail } from './Thumbnail';
+import { MotionLayer } from './MotionLayer';
+import { GraphicStill, ReelGraphics } from './Graphics';
 
 const common = { width: 1080, height: 1920, fps: 30 } as const;
 
@@ -23,6 +25,16 @@ const Root: React.FC = () => (
     <Composition id="GlassCardStates" component={GlassCard as React.ComponentType<any>} durationInFrames={1} fps={30} width={1080} height={300}
       calculateMetadata={({ props }) => ({ durationInFrames: Math.max(1, ((props as any).frameTimes ?? []).length) })}
       defaultProps={{ phrases: [], size: 46, frameTimes: [-1] }} />
+    {/* Talking-head motion layer (hook title, punch boxes, CTA sticker), drawn once per distinct look like GlassCardStates. */}
+    <Composition id="MotionStates" component={MotionLayer as React.ComponentType<any>} durationInFrames={1} {...common}
+      calculateMetadata={({ props }) => ({ durationInFrames: Math.max(1, ((props as any).frameTimes ?? []).length) })}
+      defaultProps={{ elements: [], frameTimes: [-1] }} />
+    {/* Creator-style motion graphics (Graphics.tsx); one frame drawn at props.t, optionally over a background frame. */}
+    <Composition id="GraphicStill" component={GraphicStill as React.ComponentType<any>} durationInFrames={1} {...common}
+      defaultProps={{ kind: 'bigword', t: 1, lines: [] }} />
+    <Composition id="ReelGraphicsStates" component={ReelGraphics as React.ComponentType<any>} durationInFrames={1} {...common}
+      calculateMetadata={({ props }) => ({ durationInFrames: Math.max(1, ((props as any).frameTimes ?? []).length) })}
+      defaultProps={{ graphics: [], frameTimes: [-1] }} />
     <Composition id="Thumbnail" component={Thumbnail as React.ComponentType<any>} durationInFrames={1} fps={30} width={1080} height={1920}
       defaultProps={{ image: '', lines: ['', '', ''], label: '', badges: [] }} />
     <Composition id="CleanPop" component={CleanPop as React.ComponentType<any>} durationInFrames={90} {...common}

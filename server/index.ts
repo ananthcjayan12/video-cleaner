@@ -69,6 +69,11 @@ import { buildEditorRender } from './editor-render.js';
 import { formatMetaFinding, metaTextGuidelinesPrompt, scanMetaText } from './meta-guidelines.js';
 import { availableAgyModels, availableCodexModels, DEFAULT_ANTHROPIC_MODEL, generateStructuredText, listProviderModels, type ModelKind, TEXT_PROVIDERS, type TextModelChoice, type TextProvider } from './text-models.js';
 import { findClaims } from './claims.js';
+import { addReelSound, type ReelSoundCue } from './reel-sound.js';
+import { loadReelMotion, planReelMotion, timeTheMotion } from './reel-motion.js';
+import { loadBrandTheme } from './brand-theme.js';
+/** Where the speaker sits in a split screen; must match SPLIT_BOX in remotion/captions/src/Graphics.tsx. */
+const SPLIT_BOX = { x: 40, y: 942, w: 1000, h: 828 };
 import { NICHE_PACKS, nichePack, packLook, packPreview, packWriterNotes } from './niche-packs.js';
 import { nicheValue, weeklyIdeas, IDEAS, NICHES } from './ideas.js';
 import { addSubscriber, notify, removeSubscriber, vapidKeys } from './push.js';
@@ -78,7 +83,7 @@ import { verifyAccessJwt } from './access.js';
 import { DEFAULT_PICTURES_ENGINE } from './chatgpt-images.js';
 import { checkCredentials, issueSession, loadAuth, LOGIN_PAGE, LoginLimiter, readCookie, SESSION_COOKIE, SESSION_DAYS, verifySession } from './auth.js';
 import { appendChunk, completedUploadPath, createUpload, readUpload, type UploadKind } from './uploads.js';
-import { AUTO_COMPOSITE_SCRIPT, AUTO_EDIT_SCRIPT, keepIndexRanges, makePreviewVideo, warmCaptionRenderer, newAutoJob, placeBroll, renderCaptionLayer, renderThumbnail, runPython, WHOOSH, type AutoJob, type AutoOptions, type AutoStageId, type EditRange, type ReelPackage } from './auto-reel.js';
+import { AUTO_COMPOSITE_SCRIPT, AUTO_EDIT_SCRIPT, keepIndexRanges, makePreviewVideo, warmCaptionRenderer, newAutoJob, placeBroll, renderCaptionLayer, renderMotionLayer, AUTO_STAGES, renderThumbnail, runPython, type AutoJob, type AutoOptions, type AutoStageId, type EditRange, type ReelPackage } from './auto-reel.js';
 import { buildPackagePrompt, cleanPackage, extractCandidateFrames, FRAME_COUNT, framePaths, PACKAGE_SCHEMA } from './reel-package.js';
 import { buildCaptionPhrases, type CaptionWordIn } from './captions.js';
 import { buildCleanPrompt, cleanIntensityValue, keptDuration, targetDurationValue, targetFeedback, type CleanNotes } from './clean.js';
@@ -355,9 +360,17 @@ function picturesEngine(settings: Awaited<ReturnType<typeof resolvedSettings>>) 
 async function hydrateProjects(clear = false) {
   const settings = await resolvedSettings();
   const loaded = await scanProjects(settings.projectsDir);
-  if (clear) { projects.clear(); brollPlans.clear(); motionPlans.clear(); }
-  for (const project of loaded) projects.set(project.id, project);
-  return loaded;
+  const forget = (id: string) => { projects.delete(id); brollPlans.delete(id); motionPlans.delete(id); };
+  if (clear) { const onDisk = new Set(loaded.map((project) => project.id)); for (const id of [...projects.keys()]) if (!onDisk.has(id)) forget(id); }
+  // Keep the copy already in memory: a running reel holds that object, and a fresh read from disk can be missing
+  // what the run has not written yet (a reel listed mid-transcription lost its transcript and could not be approved).
+  for (const project of loaded) {
+    const live = projects.get(project.id);
+    if (live && live.workDir === project.workDir) continue;
+    if (live) forget(project.id);
+    projects.set(project.id, project);
+  }
+  return [...projects.values()];
 }
 
 async function canRun(binary: string, args: string[]) { if (!binary) return false; try { await run(binary, args, undefined, 5000); return true; } catch { return false; } }
@@ -1684,18 +1697,85 @@ async function resumeAutoJobs() {
 }
 
 const RENDER_STAGES = new Set<AutoStageId>(['edit', 'captions', 'compose']);
+/** Music bed + sound effects on a finished auto reel and its phone preview (sound only; the picture is copied). */
+async function soundForReel(project: Project, ffmpegBin: string, duration: number, output: string, cues?: ReelSoundCue[]) {
+  const dir = path.join(project.workDir, 'auto');
+  const editedWords = JSON.parse(await fs.readFile(path.join(dir, 'edited-words.json'), 'utf8')).words as CaptionWordIn[];
+  return addReelSound({ ffmpegBin, autoDir: dir, phrases: buildCaptionPhrases(editedWords, duration), duration, videos: [output, previewPathFor(output)], cues });
+}
+const reelSize = (project: Project) => ((project.media.height || 1920) >= (project.media.width || 1080) ? [1080, 1920] : [1920, 1080]) as [number, number];
+type BrollSceneIn = { id: string; startWordId: string; sourceStart: number; sourceEnd: number; image?: string; title?: string };
+const brollScenesIn = (plan: BrollPlan | null | undefined): BrollSceneIn[] => (plan?.scenes ?? []).map((scene) => ({ id: scene.id, startWordId: scene.startWordId, sourceStart: scene.sourceStart, sourceEnd: scene.sourceEnd, image: scene.imageStatus === 'ready' ? scene.imageFile : undefined, title: scene.title }));
+async function editedRanges(project: Project) { return JSON.parse(await fs.readFile(path.join(project.workDir, 'auto', 'edit.json'), 'utf8')) as { ranges: EditRange[]; shots: Array<{ start: number; end: number; tail?: number }> }; }
+
+/** AI motion & sound plan for an edited reel (hook, punch boxes, camera kicks, CTA, B-roll transitions, sounds). */
+async function planMotionForReel(project: Project, job: AutoJob, scenes: BrollSceneIn[], duration: number) {
+  const settings = await resolvedSettings(); const { ranges } = await editedRanges(project); const words = project.transcript!.words;
+  const broll = (job.options.broll ? placeBroll(words, ranges, scenes, duration) : []).map((placed) => ({ ...placed, title: scenes.find((scene) => scene.id === placed.id)?.title }));
+  const pack = await projectPack(project); const theme = await loadBrandTheme(projectWorkspaceId(project), pack);
+  const clinic = theme.logo ? [theme.logo.above, theme.logo.name, theme.logo.below].filter(Boolean).join(' ') : undefined;
+  return planReelMotion({ textConfig: settings, choice: textEngines(settings).planning, workDir: project.workDir, words, ranges, broll, duration, field: pack.label, clinic });
+}
+
+/**
+ * The final step of an auto reel: B-roll (with its planned transitions), captions, the motion layer and camera moves,
+ * then music and sound effects. Used by the pipeline and by "redo the effects" on a finished reel.
+ */
+async function composeReel(project: Project, job: AutoJob, options: { python: string; ffmpegBin: string; scenes: BrollSceneIn[]; duration: number; captioned: boolean; note: (detail: string) => void }) {
+  const { python, ffmpegBin, duration, note } = options;
+  const dir = path.join(project.workDir, 'auto'); const [W, H] = reelSize(project); const words = project.transcript!.words;
+  const { ranges, shots } = await editedRanges(project);
+  const broll = job.options.broll ? placeBroll(words, ranges, options.scenes, duration) : [];
+  const motionPlan = await loadReelMotion(project.workDir);
+  const theme = await loadBrandTheme(projectWorkspaceId(project), await projectPack(project));
+  const timed = motionPlan ? timeTheMotion(motionPlan, words, ranges, broll, duration, { watermark: Boolean(theme.avatar || theme.logo) }) : undefined;
+  let overlay: string | null = null;
+  const shown = timed?.graphics.filter((g) => g.kind !== 'watermark').length ?? 0;
+  if (timed?.graphics.length) {
+    note(`Drawing ${shown} graphics…`);
+    overlay = await renderMotionLayer({ theme, graphics: timed.graphics, duration, outputPath: path.join(dir, 'motion-layer.txt'), chromeBin: await detectChromeBin(), workDir: dir, ffmpegBin, onProgress: (f) => note(`Drawing graphics ${Math.round(f * 100)}%`) })
+      .catch((error) => { console.error(`Motion layer for ${project.id} failed (reel made without it):`, error); return null; });
+  }
+  // Shots on the edited timeline (for the slow push-in); a dissolve joins two shots into one camera move.
+  const shotTimes: Array<[number, number]> = []; let at = 0;
+  for (const shot of shots ?? []) { const end = at + (shot.end - shot.start); const last = shotTimes.at(-1); if (shot.tail !== undefined && last) last[1] = end; else shotTimes.push([at, end]); at = end; }
+  const motionFile = path.join(dir, 'motion.json');
+  // Split screens need the motion layer (it draws the frame around the speaker); without it they stay plain cutaways.
+  const splits = overlay ? (timed?.graphics ?? []).filter((g) => g.kind === 'split').map((g) => [g.start, g.end]) : [];
+  if (!overlay) for (const scene of broll) if (timed?.transitions[scene.id] === 'split') timed.transitions[scene.id] = 'slide';
+  await fs.writeFile(path.join(dir, 'broll-placed.json'), JSON.stringify({ scenes: broll.map((scene) => ({ ...scene, transition: timed?.transitions[scene.id] ?? 'dissolve' })) }));
+  await fs.writeFile(motionFile, JSON.stringify({ overlay, kicks: timed?.kicks ?? [], shots: shotTimes, splits, splitBox: SPLIT_BOX }));
+  await fs.mkdir(exportsDir(project), { recursive: true });
+  const output = path.join(exportsDir(project), `${new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15)}-auto-reel.mp4`);
+  note(`${broll.length} B-roll cutaways, camera moves${timed ? `, ${timed.kicks.length} punch-ins` : ''}…`);
+  await runPython(python, AUTO_COMPOSITE_SCRIPT, [path.join(dir, 'base.mp4'), path.join(dir, 'broll-placed.json'), path.join(dir, 'broll-clips'), options.captioned ? path.join(dir, 'captions-glass.txt') : '-', String(Math.round(H * 0.651)), '-', output, String(W), String(H), previewPathFor(output), motionFile]) // phone preview made in the same pass
+    .catch(async (error) => { await Promise.all([output, previewPathFor(output)].map((file) => fs.rm(file, { force: true }))); throw error; }); // no half-written files left behind
+  note('Adding music and sound effects…');
+  await withTask('compose', () => soundForReel(project, ffmpegBin, duration, output, timed?.sounds))
+    .catch((error) => console.error(`Music and effects for ${project.id} failed (the reel keeps its voice only):`, error));
+  job.outputPath = output; job.downloadUrl = downloadUrlFor(project, output); job.previewUrl = job.downloadUrl ? `${job.downloadUrl}?inline=1` : undefined;
+  note('Making a phone preview…');
+  await addPhonePreview(project, job, ffmpegBin).catch((error) => console.error(`Preview for ${project.id} failed:`, error));
+  note(`${broll.length} B-roll · captions ${options.captioned ? 'on' : 'off'}${timed ? ` · ${shown} graphics · ${timed.sounds.length} sounds` : ''}`);
+  return output;
+}
 async function reelCost(project: Project) { return summarizeUsage(await readUsage(usageFile(project.workDir))); }
 async function runAutoReel(project: Project, job: AutoJob) {
   const settings = await resolvedSettings();
   if (!settings.ffmpegBin) throw new Error('FFmpeg was not found');
   const python = await resolvePythonBin(); if (!python) throw new Error('Python 3 was not found');
   const dir = path.join(project.workDir, 'auto'); await fs.mkdir(dir, { recursive: true });
-  const portrait = (project.media.height || 1920) >= (project.media.width || 1080);
-  const [W, H] = portrait ? [1080, 1920] : [1920, 1080];
+  const [W, H] = reelSize(project); const portrait = H >= W;
   const pack = await projectPack(project);
   // restore: how to get a finished stage's result back when a reel resumes after a restart.
   const stage = async <T>(id: AutoStageId, work: (note: (detail: string) => void) => Promise<T>, restore?: () => Promise<T>): Promise<T | undefined> => {
-    const item = job.stages.find((s) => s.id === id)!; if (item.state === 'skipped') return undefined;
+    let item = job.stages.find((s) => s.id === id);
+    if (!item) { // a reel saved before this step existed: add it before the next step
+      item = { id, label: AUTO_STAGES.find(([stageId]) => stageId === id)?.[1] ?? id, state: 'pending' };
+      const order = AUTO_STAGES.map(([stageId]) => stageId); const after = job.stages.findIndex((s) => order.indexOf(s.id) > order.indexOf(id));
+      job.stages.splice(after < 0 ? job.stages.length : after, 0, item);
+    }
+    if (item.state === 'skipped') return undefined;
     if (item.state === 'done') return restore ? restore() : undefined;
     if (job.stopRequested) throw new Error('Stopped');
     // This machine renders one reel at a time; others wait in line.
@@ -1780,6 +1860,11 @@ async function runAutoReel(project: Project, job: AutoJob) {
   }, async () => ({ duration: job.finalSeconds! }));
   const duration = edited!.duration;
   await run(settings.ffmpegBin, ['-hide_banner', '-v', 'error', '-y', '-i', path.join(dir, 'video.mp4'), '-i', path.join(dir, 'speech-master.wav'), '-map', '0:v', '-map', '1:a', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-shortest', path.join(dir, 'base.mp4')]);
+  await stage('motion', async (note) => {
+    note('Planning titles, punch boxes, camera moves and sounds…');
+    const motion = await planMotionForReel(project, job, brollScenesIn(plan), duration);
+    note(`${motion.punches.length} punch boxes · ${motion.kicks.length} camera kicks${motion.cta ? ' · call to action' : ''}`);
+  }).catch((error) => { if (job.stopRequested) throw error; console.error(`Motion plan for ${project.id} failed (reel made without it):`, error); });
   const captionFile = path.join(dir, 'captions-glass.txt'); // timed list of caption images (see renderCaptionLayer)
   const captioned = await stage('captions', async (note) => {
     const editedWords = JSON.parse(await fs.readFile(path.join(dir, 'edited-words.json'), 'utf8')).words as CaptionWordIn[];
@@ -1788,18 +1873,7 @@ async function runAutoReel(project: Project, job: AutoJob) {
     note(`${phrases.length} phrases`); return true;
   }, async () => fs.stat(captionFile).then(() => true, () => undefined));
   await stage('compose', async (note) => {
-    const editRanges = JSON.parse(await fs.readFile(path.join(dir, 'edit.json'), 'utf8')).ranges as EditRange[];
-    const scenes = (plan?.scenes ?? []).map((scene) => ({ id: scene.id, startWordId: scene.startWordId, sourceStart: scene.sourceStart, sourceEnd: scene.sourceEnd, image: scene.imageStatus === 'ready' ? scene.imageFile : undefined }));
-    const broll = job.options.broll ? placeBroll(words, editRanges, scenes, duration) : [];
-    await fs.writeFile(path.join(dir, 'broll-placed.json'), JSON.stringify({ scenes: broll }));
-    await fs.mkdir(exportsDir(project), { recursive: true });
-    const output = path.join(exportsDir(project), `${new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15)}-auto-reel.mp4`);
-    note(`${broll.length} B-roll cutaways…`);
-    await runPython(python, AUTO_COMPOSITE_SCRIPT, [path.join(dir, 'base.mp4'), path.join(dir, 'broll-placed.json'), path.join(dir, 'broll-clips'), captioned ? captionFile : '-', String(Math.round(H * 0.651)), WHOOSH, output, String(W), String(H), previewPathFor(output)]); // phone preview made in the same pass
-    job.outputPath = output; job.downloadUrl = downloadUrlFor(project, output); job.previewUrl = job.downloadUrl ? `${job.downloadUrl}?inline=1` : undefined;
-    note('Making a phone preview…');
-    await addPhonePreview(project, job, settings.ffmpegBin!).catch((error) => console.error(`Preview for ${project.id} failed:`, error));
-    note(`${broll.length} B-roll · captions ${captioned ? 'on' : 'off'}`);
+    await composeReel(project, job, { python, ffmpegBin: settings.ffmpegBin!, scenes: brollScenesIn(plan), duration, captioned: Boolean(captioned), note });
   });
   // The reel is done; a failed thumbnail/caption must not throw it away (it can be remade from the reel screen).
   await stage('package', async (note) => {
@@ -2287,6 +2361,47 @@ app.post('/api/projects/:id/auto/review', route(async (req, res) => {
   const keepRanges = Array.isArray(req.body?.keepRanges) ? req.body.keepRanges : undefined;
   if (keepRanges) validateEdl(project.transcript!.words, { keepRanges }); // throws a clear error before resuming
   resolve({ action, notes, keepRanges }); res.json({ ok: true });
+}));
+// Owner: plan the motion & sound again and redo only the final step of a finished reel (cut, captions, pictures and
+// cover are kept). Runs in the background (a few minutes); the reel switches to the new video when it is done.
+const effectsRuns = new Set<string>();
+app.post('/api/projects/:id/auto/effects', route(async (req, res) => {
+  requireAdmin(res); const project = getProject(routeParam(req.params.id)); const job = autoJobs.get(project.id) ?? await loadAutoJob(project);
+  if (!job || job.state !== 'completed' || !job.outputPath || !job.finalSeconds) return void res.status(409).json({ error: 'The reel is not finished yet.' });
+  if (effectsRuns.has(project.id)) return void res.status(409).json({ error: 'Already redoing the effects for this reel.' });
+  const settings = await resolvedSettings(); const python = await resolvePythonBin();
+  if (!settings.ffmpegBin || !python) throw new Error('FFmpeg or Python was not found');
+  effectsRuns.add(project.id); res.status(202).json({ ok: true });
+  const previous = [job.outputPath, previewPathFor(job.outputPath)];
+  const duration = job.finalSeconds; const replan = req.body?.replan !== false; const recaption = req.body?.captions === true;
+  void runWithUsage(await projectUsageContext(project), async () => {
+    const started = Date.now(); const log = (detail: string) => console.log(`[effects ${project.id}] ${detail}`);
+    try {
+      const scenes = brollScenesIn(await loadBrollPlan(project.workDir));
+      if (replan || !(await loadReelMotion(project.workDir))) await withTask('motion', () => planMotionForReel(project, job, scenes, duration));
+      const release = await renderQueue.acquire(() => undefined, () => false);
+      const captionFile = path.join(project.workDir, 'auto', 'captions-glass.txt');
+      if (recaption) { // draw the captions again (after a change to the caption look or phrasing)
+        const editedWords = JSON.parse(await fs.readFile(path.join(project.workDir, 'auto', 'edited-words.json'), 'utf8')).words as CaptionWordIn[];
+        await renderCaptionLayer({ look: packLook(await projectPack(project)), phrases: buildCaptionPhrases(editedWords, duration), duration, outputPath: captionFile, chromeBin: await detectChromeBin(), workDir: path.join(project.workDir, 'auto') });
+        log('captions drawn again');
+      }
+      const captioned = await fs.stat(captionFile).then(() => true, () => false);
+      try { await withTask('compose', () => composeReel(project, job, { python, ffmpegBin: settings.ffmpegBin!, scenes, duration, captioned, note: log })); }
+      finally { release(); }
+      await persistAutoJob(project, job);
+      for (const file of previous) if (file !== job.outputPath && file !== previewPathFor(job.outputPath!)) await fs.rm(file, { force: true });
+      log(`done in ${Math.round((Date.now() - started) / 1000)} s → ${job.outputPath}`);
+    } catch (error) { console.error(`[effects ${project.id}] failed:`, error); }
+    finally { effectsRuns.delete(project.id); }
+  });
+}));
+// Owner: add music and sound effects to a reel that was finished without them (sound only, no re-render).
+app.post('/api/projects/:id/auto/sound', route(async (req, res) => {
+  requireAdmin(res); const project = getProject(routeParam(req.params.id)); const job = await loadAutoJob(project);
+  if (!job || job.state !== 'completed' || !job.outputPath || !job.finalSeconds) return void res.status(409).json({ error: 'The reel is not finished yet.' });
+  const settings = await resolvedSettings(); if (!settings.ffmpegBin) throw new Error('FFmpeg was not found');
+  res.json(await soundForReel(project, settings.ffmpegBin, job.finalSeconds, job.outputPath));
 }));
 app.get('/api/projects/:id/auto/frames/:n', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id)); const n = Number(routeParam(req.params.n));

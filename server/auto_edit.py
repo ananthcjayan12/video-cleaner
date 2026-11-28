@@ -4,7 +4,8 @@ Works on one clip or several clips recorded for the same reel. Word times are on
 clips sit one after another (clips.json gives each clip's start/end on that timeline).
 
 Steps: snap each cut to a quiet point in the audio (RMS), split keep ranges where one clip ends and the next
-begins, cut video into short sub-segments with alternating punch-in zoom, build the speech track from the keep
+begins, cut video into short sub-segments with alternating punch-in zoom, hide small cuts (a few words removed
+mid-flow) with a 0.2 s dissolve at the same zoom instead of a punch-in jump, build the speech track from the keep
 ranges with 20 ms seam fades, master it (highpass, denoise, EQ, compressor, two-pass loudnorm to -15 LUFS), and
 write the caption word timings on the edited timeline.
 
@@ -24,6 +25,8 @@ ZOOM = float(sys.argv[8]) if len(sys.argv) > 8 else 1.07  # punch-in for every o
 FOCUS = (0.5, 0.36)         # face sits a little above centre in this framing
 MIN_SHOT = 2.2              # do not punch in/out more often than this
 SEAM_FADE = 0.02
+SOFT_GAP = 1.5              # a cut that removes less than this much talk is "small": dissolve, keep the zoom
+XF_HALF = 3 / FPS           # half the dissolve: 3 frames either side of the cut (picture only; the audio cut stays put)
 
 # ---- Encoder: Intel Quick Sync (VAAPI) when its driver works, else x264. Probed with one tiny frame per run.
 # (Duplicated in auto_edit.py / auto_composite.py: they run with python -I, so they cannot import each other.)
@@ -103,15 +106,40 @@ for a, b in keep:
         s = frame(c['end'])
 
 # ---- Shots: split long ranges at sentence ends so the zoom changes at least every few seconds.
+# A cut between two ranges is "small" when only a little talk was removed from the same clip (single words cut
+# mid-sentence). A punch-in on every such cut makes the picture jump back and forth, so small cuts keep the zoom
+# and dissolve instead: the outgoing shot runs XF_HALF past the cut and the incoming one starts XF_HALF early,
+# blended over 2 * XF_HALF. The picture stays in sync with the audio and the reel's length does not change.
 shots = []
-for r in ranges:
+for k, r in enumerate(ranges):
+    prev = ranges[k - 1] if k else None
+    c = CLIPS[r['clip']]
+    soft = (prev is not None and prev['clip'] == r['clip'] and 0 <= r['start'] - prev['end'] < SOFT_GAP
+            and prev['end'] + XF_HALF <= c['end'] and r['start'] - XF_HALF >= c['start'])
     cuts = [r['start']]
     for i in range(r['words'][0], r['words'][1]):
         if words[i]['text'].rstrip().endswith(('.', ',', '?')):
             t = frame((words[i]['end'] + words[i + 1]['start']) / 2)
             if t - cuts[-1] >= MIN_SHOT and r['end'] - t >= MIN_SHOT: cuts.append(t)
     cuts.append(r['end'])
-    for s, e in zip(cuts, cuts[1:]): shots.append({'start': s, 'end': e, 'clip': r['clip']})
+    for n, (s, e) in enumerate(zip(cuts, cuts[1:])):
+        shots.append({'start': s, 'end': e, 'clip': r['clip'], 'soft': soft and n == 0})
+
+# Zoom: change at every hard cut and sentence split, keep it across small cuts.
+zoom = 1.0
+for n, shot in enumerate(shots):
+    if n and not shot['soft']: zoom = 1.0 if zoom != 1.0 else ZOOM
+    shot['zoom'] = zoom
+
+# Dissolves need room on both sides; a sliver of a shot stays a plain cut (same zoom, so it barely shows).
+for n, shot in enumerate(shots):
+    if not shot['soft']: continue
+    before = shots[n - 1]
+    if before['end'] - before['start'] < 2 * XF_HALF + 0.15 or shot['end'] - shot['start'] < 2 * XF_HALF + 0.15:
+        shot['soft'] = False; continue
+    shot['tail'] = before['end'] - XF_HALF   # outgoing picture, 2 * XF_HALF long, blended into this shot's start
+    before['end'] -= XF_HALF
+    shot['start'] -= XF_HALF
 
 # ---- Video: one short encode per shot (fast seek into its own clip), alternating 1.00x / ZOOM punch-in.
 seg_dir = OUT / 'shots'; seg_dir.mkdir(exist_ok=True)
@@ -122,15 +150,27 @@ def encode_shots(hw):
     for n, shot in enumerate(shots):
         c = CLIPS[shot['clip']]
         color = (c.get('color') or '') + (',' if c.get('color') else '')
-        z = ZOOM if n % 2 else 1.0
+        z = shot['zoom']
         cw, ch = W / z, H / z
         x = min(max(FOCUS[0] * W - cw / 2, 0), W - cw); y = min(max(FOCUS[1] * H - ch / 2, 0), H - ch)
         vf = (f'{color}scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,crop={W}:{H},crop={cw:.0f}:{ch:.0f}:{x:.0f}:{y:.0f},scale={W}:{H}:flags=lanczos,'
               'eq=contrast=1.04:saturation=1.06,unsharp=5:5:0.35,setsar=1,fps=30,format=yuv420p')
         path = seg_dir / f'shot-{n:03d}.mp4'
-        enc = (['-vaapi_device', hw, '-hwaccel', 'vaapi', '-hwaccel_device', hw], ['-vf', vf + ',format=nv12,hwupload', '-c:v', 'h264_vaapi', '-qp', '17']) if hw else ([], ['-vf', vf, '-c:v', 'libx264', '-preset', 'superfast', '-crf', '17'])
-        run(['ffmpeg', '-v', 'error', '-y', *enc[0], '-ss', f"{shot['start'] - c['start']:.3f}", '-t', f"{shot['end'] - shot['start']:.3f}", '-i', c['path'],
-             '-an', *enc[1], '-r', '30', str(path)])
+        dec = ['-hwaccel', 'vaapi', '-hwaccel_device', hw] if hw else []
+        out = ['-c:v', 'h264_vaapi', '-qp', '17'] if hw else ['-c:v', 'libx264', '-preset', 'superfast', '-crf', '17']
+        up = ',format=nv12,hwupload' if hw else ''
+        duration = shot['end'] - shot['start']
+        # Exact frame count: '-t' alone can round up a frame per shot, and over many cuts the picture drifts behind the voice.
+        frames = ['-frames:v', str(round(duration * FPS))]
+        main = [*dec, '-ss', f"{shot['start'] - c['start']:.3f}", '-t', f'{duration + 0.1:.3f}', '-i', c['path']]
+        if 'tail' in shot:
+            # Input 1: the outgoing shot carried on past the cut; dissolve from it into this shot.
+            tail = [*dec, '-ss', f"{shot['tail'] - c['start']:.3f}", '-t', f'{2 * XF_HALF + 0.1:.3f}', '-i', c['path']]
+            graph = f'[0:v]{vf}[cur];[1:v]{vf}[out];[out][cur]xfade=transition=fade:duration={2 * XF_HALF:.3f}:offset=0{up}[v]'
+            run(['ffmpeg', '-v', 'error', '-y', *(['-vaapi_device', hw] if hw else []), *main, *tail, '-filter_complex', graph, '-map', '[v]',
+                 *frames, '-an', *out, '-r', '30', str(path)])
+        else:
+            run(['ffmpeg', '-v', 'error', '-y', *(['-vaapi_device', hw] if hw else []), *main, *frames, '-an', '-vf', vf + up, *out, '-r', '30', str(path)])
         listing.append(f"file '{path}'")
     return listing
 
@@ -172,4 +212,4 @@ for r in ranges:
     offset += r['end'] - r['start']
 (OUT / 'edited-words.json').write_text(json.dumps({'words': edited, 'duration': round(offset, 3)}, ensure_ascii=False, indent=0))
 (OUT / 'edit.json').write_text(json.dumps({'ranges': ranges, 'shots': shots}, indent=1))
-print(json.dumps({'cuts': len(ranges), 'shots': len(shots), 'clips': len(CLIPS), 'duration': round(offset, 3), 'sourceLoudness': m['input_i']}))
+print(json.dumps({'cuts': len(ranges), 'shots': len(shots), 'dissolves': sum(1 for shot in shots if 'tail' in shot), 'clips': len(CLIPS), 'duration': round(offset, 3), 'sourceLoudness': m['input_i']}))

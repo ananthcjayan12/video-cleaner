@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { api, type AutoJob, type AutoReview, type Me, type Project, type ReelLook } from '../api';
 import { flagsToRanges, keepFlags, keptSeconds, sentences } from '../review';
 import { CostLine } from '../Accounts';
@@ -7,7 +7,7 @@ import { go } from './PhoneApp';
 /** One reel from start to finish: progress you can leave, the review of the cut and the claims, then save and post. */
 const STEP_LABEL: Record<string, string> = {
   audio: 'Preparing the audio', transcribe: 'Writing down what you said', clean: 'Cleaning the talk', review: 'Your check',
-  'broll-plan': 'Planning the pictures', 'broll-images': 'Making the pictures', edit: 'Cutting and zooming', captions: 'Adding captions',
+  'broll-plan': 'Planning the pictures', 'broll-images': 'Making the pictures', edit: 'Cutting and zooming', motion: 'Planning effects and sounds', captions: 'Adding captions',
   compose: 'Putting it together', package: 'Cover and post caption',
 };
 const clock = (seconds: number) => `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, '0')}`;
@@ -108,6 +108,7 @@ function ReviewPanel({ id, review, onSent }: { id: string; review: AutoReview; o
   const [notes, setNotes] = useState('');
   const [sending, setSending] = useState<'' | 'continue' | 'redo'>('');
   const [error, setError] = useState('');
+  const [byWord, setByWord] = useState(false);
   const groups = useMemo(() => sentences(review.words), [review.words]);
   const claims = review.flags ?? [];
   const changed = flags.some((flag, i) => flag !== original[i]);
@@ -144,21 +145,29 @@ function ReviewPanel({ id, review, onSent }: { id: string; review: AutoReview; o
         </div>
       ))}
       <div className="pr-card">
-        <small>Grey, crossed-out words will be cut. Tap a sentence to keep or remove it.</small>
+        <div className="pr-chips" role="group" aria-label="Tap removes">
+          <button type="button" className={`pr-chip${byWord ? '' : ' on'}`} aria-pressed={!byWord} onClick={() => setByWord(false)}>Sentences</button>
+          <button type="button" className={`pr-chip${byWord ? ' on' : ''}`} aria-pressed={byWord} onClick={() => setByWord(true)}>Single words</button>
+        </div>
+        <small>Grey, crossed-out words will be cut. {byWord ? 'Tap a word to keep or remove it.' : 'Tap a sentence to keep or remove it.'}</small>
         <div className="pr-transcript">
           {groups.map(({ from, to }) => {
             const count = flags.slice(from, to + 1).filter(Boolean).length;
             const state = count === 0 ? 'cut' : count === to - from + 1 ? 'kept' : 'partial';
             const claim = claims.find((c) => c.from === from);
             const flagged = claim && state !== 'cut' && !dismissed.includes(from);
-            return (
-              <button key={from} type="button" className={`pr-sentence ${state}${flagged ? ' flagged' : ''}`} disabled={!!sending} onClick={() => toggle(from, to)}>
-                {review.words.slice(from, to + 1).map((word, i) => {
-                  const hit = flagged && claim!.match.toLowerCase().includes(word.text.toLowerCase().replace(/[^\p{L}\p{N}%-]/gu, '')) && word.text.replace(/[^\p{L}\p{N}%]/gu, '').length > 2;
-                  return <span key={word.id} className={flags[from + i] ? 'k' : 'x'}>{hit ? <mark>{word.text}</mark> : word.text} </span>;
-                })}
-              </button>
-            );
+            const words = review.words.slice(from, to + 1).map((word, i) => {
+              const hit = flagged && claim!.match.toLowerCase().includes(word.text.toLowerCase().replace(/[^\p{L}\p{N}%-]/gu, '')) && word.text.replace(/[^\p{L}\p{N}%]/gu, '').length > 2;
+              const text = hit ? <mark>{word.text}</mark> : word.text;
+              const index = from + i;
+              return byWord
+                ? <Fragment key={word.id}><button type="button" className={`pr-word ${flags[index] ? 'k' : 'x'}`} aria-pressed={!flags[index]} disabled={!!sending} onClick={() => setRange(index, index, !flags[index])}>{text}</button> </Fragment>
+                : <span key={word.id} className={flags[index] ? 'k' : 'x'}>{text} </span>;
+            });
+            const className = `pr-sentence ${state}${flagged ? ' flagged' : ''}${byWord ? ' words' : ''}`;
+            return byWord
+              ? <div key={from} className={className}>{words}</div>
+              : <button key={from} type="button" className={className} disabled={!!sending} onClick={() => toggle(from, to)}>{words}</button>;
           })}
         </div>
         {changed && <button type="button" className="pr-btn text" onClick={() => setFlags(original)} disabled={!!sending}>Undo my changes</button>}

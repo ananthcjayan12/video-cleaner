@@ -16,12 +16,15 @@ export type GlassCardProps = { phrases: GlassPhrase[]; size: number; font?: stri
 const MINT = '#7fe3d6';
 const TINT = 'rgba(14, 16, 22, 0.46)';
 const BORDER = 'rgba(255, 255, 255, 0.22)';
-const MAX_TEXT_WIDTH = 820;
+const MAX_TEXT_WIDTH = 800;
+/** Extra gap between words (in em) and line height: Malayalam letters are tall, so lines need room to breathe. */
+const WORD_GAP = 0.16;
+const LINE_HEIGHT = 1.5;
 const WEIGHT = 700;
 
 function packLines(words: GlassWord[], size: number, stack: string) {
   const font = `${WEIGHT} ${size}px ${stack}`;
-  const space = measure(' ', font);
+  const space = measure(' ', font) + WORD_GAP * size;
   const lines: GlassWord[][] = []; let line: GlassWord[] = []; let used = 0;
   // Consecutive English words stay together on one line.
   const units: GlassWord[][] = [];
@@ -50,9 +53,9 @@ export const GlassCard: React.FC<GlassCardProps> = ({ phrases, size, font, keyCo
   return (
     <AbsoluteFill style={{ fontFamily: stack, alignItems: 'center', justifyContent: 'center' }}>
       <div style={{
-        background: TINT, border: `1.5px solid ${BORDER}`, borderRadius: 30, padding: `${size * 0.42}px ${size * 0.78}px`,
+        background: TINT, border: `1.5px solid ${BORDER}`, borderRadius: 30, padding: `${size * 0.52}px ${size * 0.9}px ${size * 0.46}px`,
         opacity: Math.min(enter, exit), transform: `scale(${0.96 + 0.04 * enter})`, textAlign: 'center',
-        fontSize: size, fontWeight: WEIGHT, lineHeight: 1.3, color: 'white', letterSpacing: 0.2,
+        fontSize: size, fontWeight: WEIGHT, lineHeight: LINE_HEIGHT, color: 'white', letterSpacing: 0.3, wordSpacing: `${WORD_GAP}em`,
       }}>
         {lines.map((line, i) => (
           <div key={i} style={{ whiteSpace: 'nowrap' }}>

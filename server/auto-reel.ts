@@ -1,5 +1,7 @@
 import type { PackLook } from './niche-packs.js';
 import { captionStates } from './captions.js';
+import { motionStates, type ReelGraphic } from './reel-motion.js';
+import type { BrandTheme } from './brand-theme.js';
 import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
@@ -13,7 +15,7 @@ import type { KeepRange, Word } from './project-store.js';
  * to quiet points, alternating zoom, mastered voice) -> Glass Card captions -> composite with B-roll and whooshes.
  * This module holds the pieces that do not need the web server; server/index.ts runs the job.
  */
-export type AutoStageId = 'audio' | 'transcribe' | 'clean' | 'review' | 'broll-plan' | 'broll-images' | 'edit' | 'captions' | 'compose' | 'package';
+export type AutoStageId = 'audio' | 'transcribe' | 'clean' | 'review' | 'broll-plan' | 'broll-images' | 'edit' | 'motion' | 'captions' | 'compose' | 'package';
 export type AutoStage = { id: AutoStageId; label: string; state: 'pending' | 'running' | 'done' | 'skipped' | 'failed'; detail?: string; seconds?: number };
 export type AutoJob = {
   state: 'running' | 'review' | 'completed' | 'failed' | 'stopped'; stages: AutoStage[]; startedAt: number; finishedAt?: number;
@@ -40,7 +42,7 @@ export type ReelPackage = {
 
 export const AUTO_STAGES: Array<[AutoStageId, string]> = [
   ['audio', 'Preparing audio'], ['transcribe', 'Transcribing'], ['clean', 'Cleaning the talk'], ['review', 'Your review'], ['broll-plan', 'Planning B-roll'],
-  ['broll-images', 'Making B-roll images'], ['edit', 'Cutting, zoom and voice'], ['captions', 'Rendering captions'], ['compose', 'Putting it together'], ['package', 'Thumbnail & post caption'],
+  ['broll-images', 'Making B-roll images'], ['edit', 'Cutting, zoom and voice'], ['motion', 'Planning motion & sound'], ['captions', 'Rendering captions'], ['compose', 'Putting it together'], ['package', 'Thumbnail & post caption'],
 ];
 export const newAutoJob = (options: AutoOptions): AutoJob => ({
   state: 'running', startedAt: Date.now(), options,
@@ -155,6 +157,46 @@ export async function renderCaptionLayer(options: { look?: PackLook; phrases: Ca
   const files = (await fs.readdir(framesDir)).filter((name) => name.endsWith('.png')).sort();
   if (files.length !== times.length) throw new Error(`Caption render made ${files.length} of ${times.length} images`);
   // Concat list: each run of identical frames is one image with its duration; the last entry is repeated (FFmpeg rule).
+  const lines = ['ffconcat version 1.0'];
+  for (const run of runs) lines.push(`file '${path.join(framesDir, files[run.state]).replace(/'/g, "'\\''")}'`, `duration ${(run.frames / fps).toFixed(6)}`);
+  lines.push(`file '${path.join(framesDir, files[runs.at(-1)!.state]).replace(/'/g, "'\\''")}'`);
+  await fs.writeFile(options.outputPath, lines.join('\n') + '\n');
+  return options.outputPath;
+}
+
+/**
+ * The motion layer (brand graphics, punch boxes, comment sticker, split-screen frames, watermark) as a timed list of
+ * full-frame transparent PNGs, drawn once per distinct look (see motionStates in reel-motion.ts). Returns null when
+ * there is nothing to show. Split-screen pictures are shrunk to small JPEGs first: every frame render gets the props.
+ */
+export async function renderMotionLayer(options: { theme: BrandTheme; graphics: ReelGraphic[]; duration: number; outputPath: string; chromeBin?: string | null; workDir: string; ffmpegBin: string; onProgress?: (fraction: number) => void }) {
+  if (!options.graphics.length) return null;
+  const graphics = await Promise.all(options.graphics.map(async (graphic) => {
+    if (graphic.kind !== 'split' || typeof graphic.pictureFile !== 'string') return graphic;
+    const small = path.join(options.workDir, `split-${path.basename(graphic.pictureFile).replace(/\.[^.]+$/, '')}.jpg`);
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(options.ffmpegBin, ['-hide_banner', '-v', 'error', '-y', '-i', graphic.pictureFile as string, '-vf', 'scale=1080:-2', '-q:v', '4', '-frames:v', '1', small], { stdio: 'ignore' });
+      child.on('error', reject); child.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`Could not shrink ${graphic.pictureFile}`))));
+    });
+    const { pictureFile: _file, ...rest } = graphic;
+    return { ...rest, picture: `data:image/jpeg;base64,${(await fs.readFile(small)).toString('base64')}` };
+  }));
+  const serveUrl = await captionServeUrl(options.workDir);
+  const { renderFrames, selectComposition } = await import('@remotion/renderer');
+  const fps = 30;
+  const { times, runs } = motionStates(options.graphics, options.duration, fps);
+  const inputProps = { graphics, frameTimes: times, theme: options.theme };
+  const browserExecutable = options.chromeBin || null;
+  const composition = await selectComposition({ serveUrl, id: 'ReelGraphicsStates', inputProps, browserExecutable });
+  const framesDir = options.outputPath.replace(/\.txt$/, '') + '-frames';
+  await fs.rm(framesDir, { recursive: true, force: true }); await fs.mkdir(framesDir, { recursive: true });
+  await renderFrames({
+    composition, serveUrl, inputProps, imageFormat: 'png', outputDir: framesDir, imageSequencePattern: 'state-[frame].[ext]',
+    concurrency: Math.max(2, Math.min(4, os.cpus().length)), browserExecutable, muted: true,
+    onStart: () => undefined, onFrameUpdate: (done) => options.onProgress?.(done / times.length),
+  });
+  const files = (await fs.readdir(framesDir)).filter((name) => name.endsWith('.png')).sort();
+  if (files.length !== times.length) throw new Error(`Motion layer render made ${files.length} of ${times.length} images`);
   const lines = ['ffconcat version 1.0'];
   for (const run of runs) lines.push(`file '${path.join(framesDir, files[run.state]).replace(/'/g, "'\\''")}'`, `duration ${(run.frames / fps).toFixed(6)}`);
   lines.push(`file '${path.join(framesDir, files[runs.at(-1)!.state]).replace(/'/g, "'\\''")}'`);

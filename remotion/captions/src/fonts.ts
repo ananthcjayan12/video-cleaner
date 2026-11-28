@@ -14,6 +14,9 @@ const FONTS: Array<{ family: string; file: string; weight: string }> = [
   { family: 'VC Poppins', file: 'fonts/Poppins-Bold.ttf', weight: '700' },
   { family: 'VC Poppins', file: 'fonts/Poppins-ExtraBold.ttf', weight: '800' },
   { family: 'VC Sora', file: 'fonts/Sora-VF.ttf', weight: '100 800' },
+  // Clinic brand themes (Graphics.tsx): rounded heavy Malayalam + Latin, and a script face for taglines.
+  { family: 'VC Baloo Chettan', file: 'fonts/BalooChettan2.ttf', weight: '400 800' },
+  { family: 'VC Dancing Script', file: 'fonts/DancingScript.ttf', weight: '400 700' },
 ];
 
 export const HEAVY_STACK = "'VC Montserrat', 'VC Malayalam Black', sans-serif";
