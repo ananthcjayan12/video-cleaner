@@ -31,8 +31,12 @@ FADE = 0.12
 # ---- Encoder: Intel Quick Sync (VAAPI) when its driver works, else x264. Probed with one tiny frame per run.
 # (Duplicated in auto_edit.py / auto_composite.py: they run with python -I, so they cannot import each other.)
 def hw_device():
-    """The VAAPI render node if hardware H.264 encoding works here; None to use x264. VIDEO_CLEANER_NO_HW_ENCODE=1 turns it off."""
+    """The VAAPI render node (Linux) or 'videotoolbox' (Mac) if hardware H.264 encoding works here; None to use x264. VIDEO_CLEANER_NO_HW_ENCODE=1 turns it off."""
     if os.environ.get('VIDEO_CLEANER_NO_HW_ENCODE'): return None
+    if sys.platform == 'darwin':  # Mac: VideoToolbox (Apple's hardware encoder)
+        probe = subprocess.run(['ffmpeg', '-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=black:s=256x256:d=0.1',
+                                '-c:v', 'h264_videotoolbox', '-b:v', '2M', '-frames:v', '1', '-f', 'null', '-'], capture_output=True)
+        return 'videotoolbox' if probe.returncode == 0 else None
     dev = os.environ.get('VIDEO_CLEANER_VAAPI_DEVICE', '/dev/dri/renderD128')
     if not os.path.exists(dev): return None
     probe = subprocess.run(['ffmpeg', '-v', 'error', '-y', '-vaapi_device', dev, '-f', 'lavfi', '-i', 'color=black:s=256x256:d=0.1',
@@ -139,18 +143,20 @@ filters.append('[voice]' + ''.join(f'[wd{i}]' for i in range(count)) + f'amix=in
 def encode(dev):
     """One pass: the full-quality reel, plus the phone preview when asked. dev = VAAPI node or None (x264)."""
     graph = list(filters)
-    up = ',format=nv12,hwupload' if dev else ''
+    vt = dev == 'videotoolbox'; va = bool(dev) and not vt
+    up = ',format=nv12,hwupload' if va else ''
     pv_scale = 'scale=1280:-2' if W > H else 'scale=720:-2'
     if preview:
         graph.append(f'[vout]split[vf0][vp0]'); graph.append(f'[vf0]null{up}[vfull]'); graph.append(f'[vp0]{pv_scale}:flags=bicubic,format=yuv420p{up}[vprev]')
         graph.append('[aout]asplit[afull][aprev]')
     else:
         graph.append(f'[vout]null{up}[vfull]'); graph.append('[aout]anull[afull]')
-    full = ['-c:v', 'h264_vaapi', '-qp', '20'] if dev else ['-c:v', 'libx264', '-preset', 'superfast', '-crf', '20', '-pix_fmt', 'yuv420p']
-    prev = (['-c:v', 'h264_vaapi', '-rc_mode', 'VBR', '-b:v', '1100k', '-maxrate', '2000k'] if dev
+    full = ['-c:v', 'h264_videotoolbox', '-b:v', '14M', '-allow_sw', '1', '-pix_fmt', 'yuv420p'] if vt else ['-c:v', 'h264_vaapi', '-qp', '20'] if va else ['-c:v', 'libx264', '-preset', 'superfast', '-crf', '20', '-pix_fmt', 'yuv420p']
+    prev = (['-c:v', 'h264_videotoolbox', '-b:v', '1400k', '-maxrate', '2000k', '-allow_sw', '1', '-pix_fmt', 'yuv420p'] if vt
+            else ['-c:v', 'h264_vaapi', '-rc_mode', 'VBR', '-b:v', '1100k', '-maxrate', '2000k'] if va
             else ['-c:v', 'libx264', '-preset', 'superfast', '-crf', '27', '-maxrate', '2500k', '-bufsize', '5000k', '-pix_fmt', 'yuv420p'])
     # args = ['ffmpeg', '-v', 'error', '-y', '-i', base, ...]: with Quick Sync, the chip also decodes the base video (frames come back to memory for the filters).
-    cmd = (args[:4] + (['-vaapi_device', dev, '-hwaccel', 'vaapi', '-hwaccel_device', dev] if dev else []) + args[4:] + ['-filter_complex', ';'.join(graph),
+    cmd = (args[:4] + (['-hwaccel', 'videotoolbox'] if vt else ['-vaapi_device', dev, '-hwaccel', 'vaapi', '-hwaccel_device', dev] if va else []) + args[4:] + ['-filter_complex', ';'.join(graph),
            '-map', '[vfull]', '-map', '[afull]', *full, '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', out])
     if preview: cmd += ['-map', '[vprev]', '-map', '[aprev]', *prev, '-c:a', 'aac', '-b:a', '96k', '-movflags', '+faststart', preview]
     subprocess.run(cmd, check=True)
@@ -160,6 +166,6 @@ try:
     encode(dev)
 except subprocess.CalledProcessError:
     if not dev: raise
-    print('Quick Sync encode failed; using x264', file=sys.stderr)
+    print('Hardware encode failed; using x264', file=sys.stderr)
     encode(None)
-print('done', out, 'encoder', 'quicksync' if dev else 'x264')
+print('done', out, 'encoder', 'videotoolbox' if dev == 'videotoolbox' else 'quicksync' if dev else 'x264')

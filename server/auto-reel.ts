@@ -29,8 +29,14 @@ export type AutoJob = {
   package?: ReelPackage;
   /** Engines the reel ran on, and what it cost (shown to the owner only). */
   profile?: import('./usage.js').EngineProfile; cost?: import('./usage.js').UsageSummary;
+  /** The computer the last render step ran on ('hub' or a node id), so the next one goes where the files already are. */
+  renderNode?: string;
+  /** Only on a render computer: the one step the hub asked it to run. */
+  only?: AutoStageId;
 };
-export type AutoOptions = { targetDurationSec?: number; imageProvider: 'gemini' | 'chatgpt'; broll: boolean; captions: boolean; review: boolean; thumbnail?: boolean; postCaption?: boolean };
+export type AutoOptions = { targetDurationSec?: number; imageProvider: 'gemini' | 'chatgpt'; broll: boolean; captions: boolean; review: boolean; thumbnail?: boolean; postCaption?: boolean;
+  /** Where the render steps run: 'auto' (any free computer), 'hub' or a render computer's id; unset = the owner's default. */
+  renderOn?: string };
 export type ThumbnailBadge = { icon: string; label?: string };
 export type ReelPackage = {
   state: 'running' | 'ready' | 'failed'; error?: string;

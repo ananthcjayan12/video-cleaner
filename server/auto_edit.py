@@ -31,8 +31,12 @@ XF_HALF = 3 / FPS           # half the dissolve: 3 frames either side of the cut
 # ---- Encoder: Intel Quick Sync (VAAPI) when its driver works, else x264. Probed with one tiny frame per run.
 # (Duplicated in auto_edit.py / auto_composite.py: they run with python -I, so they cannot import each other.)
 def hw_device():
-    """The VAAPI render node if hardware H.264 encoding works here; None to use x264. VIDEO_CLEANER_NO_HW_ENCODE=1 turns it off."""
+    """The VAAPI render node (Linux) or 'videotoolbox' (Mac) if hardware H.264 encoding works here; None to use x264. VIDEO_CLEANER_NO_HW_ENCODE=1 turns it off."""
     if os.environ.get('VIDEO_CLEANER_NO_HW_ENCODE'): return None
+    if sys.platform == 'darwin':  # Mac: VideoToolbox (Apple's hardware encoder)
+        probe = subprocess.run(['ffmpeg', '-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=black:s=256x256:d=0.1',
+                                '-c:v', 'h264_videotoolbox', '-b:v', '2M', '-frames:v', '1', '-f', 'null', '-'], capture_output=True)
+        return 'videotoolbox' if probe.returncode == 0 else None
     dev = os.environ.get('VIDEO_CLEANER_VAAPI_DEVICE', '/dev/dri/renderD128')
     if not os.path.exists(dev): return None
     probe = subprocess.run(['ffmpeg', '-v', 'error', '-y', '-vaapi_device', dev, '-f', 'lavfi', '-i', 'color=black:s=256x256:d=0.1',
@@ -156,9 +160,11 @@ def encode_shots(hw):
         vf = (f'{color}scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,crop={W}:{H},crop={cw:.0f}:{ch:.0f}:{x:.0f}:{y:.0f},scale={W}:{H}:flags=lanczos,'
               'eq=contrast=1.04:saturation=1.06,unsharp=5:5:0.35,setsar=1,fps=30,format=yuv420p')
         path = seg_dir / f'shot-{n:03d}.mp4'
-        dec = ['-hwaccel', 'vaapi', '-hwaccel_device', hw] if hw else []
-        out = ['-c:v', 'h264_vaapi', '-qp', '17'] if hw else ['-c:v', 'libx264', '-preset', 'superfast', '-crf', '17']
-        up = ',format=nv12,hwupload' if hw else ''
+        vt = hw == 'videotoolbox'; va = bool(hw) and not vt
+        dec = ['-hwaccel', 'videotoolbox'] if vt else ['-hwaccel', 'vaapi', '-hwaccel_device', hw] if va else []
+        out = (['-c:v', 'h264_videotoolbox', '-b:v', '24M', '-allow_sw', '1'] if vt else ['-c:v', 'h264_vaapi', '-qp', '17'] if va
+               else ['-c:v', 'libx264', '-preset', 'superfast', '-crf', '17'])
+        up = ',format=nv12,hwupload' if va else ''
         duration = shot['end'] - shot['start']
         # Exact frame count: '-t' alone can round up a frame per shot, and over many cuts the picture drifts behind the voice.
         frames = ['-frames:v', str(round(duration * FPS))]
@@ -167,10 +173,10 @@ def encode_shots(hw):
             # Input 1: the outgoing shot carried on past the cut; dissolve from it into this shot.
             tail = [*dec, '-ss', f"{shot['tail'] - c['start']:.3f}", '-t', f'{2 * XF_HALF + 0.1:.3f}', '-i', c['path']]
             graph = f'[0:v]{vf}[cur];[1:v]{vf}[out];[out][cur]xfade=transition=fade:duration={2 * XF_HALF:.3f}:offset=0{up}[v]'
-            run(['ffmpeg', '-v', 'error', '-y', *(['-vaapi_device', hw] if hw else []), *main, *tail, '-filter_complex', graph, '-map', '[v]',
+            run(['ffmpeg', '-v', 'error', '-y', *(['-vaapi_device', hw] if va else []), *main, *tail, '-filter_complex', graph, '-map', '[v]',
                  *frames, '-an', *out, '-r', '30', str(path)])
         else:
-            run(['ffmpeg', '-v', 'error', '-y', *(['-vaapi_device', hw] if hw else []), *main, *frames, '-an', '-vf', vf + up, *out, '-r', '30', str(path)])
+            run(['ffmpeg', '-v', 'error', '-y', *(['-vaapi_device', hw] if va else []), *main, *frames, '-an', '-vf', vf + up, *out, '-r', '30', str(path)])
         listing.append(f"file '{path}'")
     return listing
 

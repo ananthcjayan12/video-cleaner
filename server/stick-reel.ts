@@ -177,10 +177,16 @@ export type StickRender = {
 const root = path.resolve('remotion/stick-reel');
 const assets = path.resolve('assets/stick-reel');
 let vaapiWorks: boolean | undefined;
-/** Upscale the 3/4-size drawing to 1080x1920: Intel Quick Sync (VAAPI) when it works here, else x264. */
+/** Upscale the 3/4-size drawing to 1080x1920: Intel Quick Sync (VAAPI) on Linux or VideoToolbox on a Mac when it works, else x264. */
 async function upscaleTo1080(ffmpeg: (args: string[]) => Promise<unknown>, input: string, output: string) {
   const device = process.env.VIDEO_CLEANER_VAAPI_DEVICE || '/dev/dri/renderD128';
-  if (vaapiWorks !== false && process.env.VIDEO_CLEANER_NO_HW_ENCODE !== '1') {
+  if (process.platform === 'darwin' && vaapiWorks !== false && process.env.VIDEO_CLEANER_NO_HW_ENCODE !== '1') { // Mac: VideoToolbox
+    try {
+      await ffmpeg(['-hide_banner', '-loglevel', 'error', '-y', '-i', input, '-vf', 'scale=1080:1920:flags=lanczos', '-c:v', 'h264_videotoolbox', '-b:v', '16M', '-allow_sw', '1', '-pix_fmt', 'yuv420p', '-an', output]);
+      vaapiWorks = true; return;
+    } catch { vaapiWorks = false; }
+  }
+  if (process.platform !== 'darwin' && vaapiWorks !== false && process.env.VIDEO_CLEANER_NO_HW_ENCODE !== '1') {
     try {
       await ffmpeg(['-hide_banner', '-loglevel', 'error', '-y', '-vaapi_device', device, '-i', input, '-vf', 'format=nv12,hwupload,scale_vaapi=w=1080:h=1920:mode=hq', '-c:v', 'h264_vaapi', '-qp', '18', '-an', output]);
       vaapiWorks = true; return;
