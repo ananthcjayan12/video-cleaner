@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ModelSelect } from '../ModelSelect';
-import { api, type AdminWorkspace, type ConsoleData, type ConsoleReel, type EngineProfile, type KeyCheck, type Me, type Niche, type SystemStatus } from '../api';
+import { api, type ComputersData, type AdminWorkspace, type ConsoleData, type ConsoleReel, type EngineProfile, type KeyCheck, type Me, type Niche, type SystemStatus } from '../api';
 import { LookPreview } from '../phone/LookPreview';
 import './console.css';
 
 /**
  * Desktop owner console: customers, reels, field looks and AI engines in one place.
- * Hash routes: #overview, #customers, #customer-<id>, #reels, #packs, #engines.
+ * Hash routes: #overview, #customers, #customer-<id>, #reels, #packs, #engines, #computers.
  */
 const USD_TO_INR = 88; // rough, for reading costs at a glance
 const inr = (usd: number) => `₹${Math.round(usd * USD_TO_INR).toLocaleString('en-IN')}`;
@@ -17,11 +17,11 @@ const PROFILE_LABEL: Record<EngineProfile, string> = { 'in-house': 'In-house', a
 const PROVIDER_LABEL: Record<string, string> = { 'claude-cli': 'Claude CLI', 'codex-cli': 'Codex CLI', 'agy-cli': 'Antigravity CLI', anthropic: 'Claude API', gemini: 'Gemini', openai: 'OpenAI' };
 const DAY = 86_400_000;
 
-type Route = { page: 'overview' | 'customers' | 'customer' | 'reels' | 'packs' | 'engines'; id?: string };
+type Route = { page: 'overview' | 'customers' | 'customer' | 'reels' | 'packs' | 'engines' | 'computers'; id?: string };
 function parseRoute(): Route {
   const hash = window.location.hash.replace(/^#/, '');
   if (hash.startsWith('customer-')) return { page: 'customer', id: decodeURIComponent(hash.slice(9)) };
-  return { page: (['customers', 'reels', 'packs', 'engines'].includes(hash) ? hash : 'overview') as Route['page'] };
+  return { page: (['customers', 'reels', 'packs', 'engines', 'computers'].includes(hash) ? hash : 'overview') as Route['page'] };
 }
 const go = (hash: string) => { window.location.hash = hash; };
 const phoneLink = (hash = '') => `/?phone=1${hash ? `#${hash}` : ''}`;
@@ -68,7 +68,7 @@ export function Console({ me }: { me: Me | null }) {
     try { setToast(await work()); await load(); } catch (err) { setToast(err instanceof Error ? err.message : String(err)); }
   }, [load]);
 
-  const nav: Array<[Route['page'], string, string, string]> = [['overview', 'Overview', 'Overview', '⌂'], ['customers', 'Customers', 'Customers', '👥'], ['reels', 'Reels', 'Reels', '▶'], ['packs', 'Niche packs', 'Looks', '◈'], ['engines', 'AI engines', 'Engines', '✦']];
+  const nav: Array<[Route['page'], string, string, string]> = [['overview', 'Overview', 'Overview', '⌂'], ['customers', 'Customers', 'Customers', '👥'], ['reels', 'Reels', 'Reels', '▶'], ['packs', 'Niche packs', 'Looks', '◈'], ['engines', 'AI engines', 'Engines', '✦'], ['computers', 'Computers', 'PCs', '🖥']];
   const active = route.page === 'customer' ? 'customers' : route.page;
   let page: React.ReactNode = <p className="oc-muted">Loading…</p>;
   if (data) {
@@ -77,6 +77,7 @@ export function Console({ me }: { me: Me | null }) {
     else if (route.page === 'customer') page = <CustomerPage data={data} id={route.id!} act={act} />;
     else if (route.page === 'reels') page = <ReelsPage data={data} />;
     else if (route.page === 'packs') page = <PacksPage data={data} />;
+    else if (route.page === 'computers') page = <ComputersPage act={act} />;
     else page = <EnginesPage data={data} status={status} onStatus={setStatus} act={act} />;
   }
   return (
@@ -511,5 +512,72 @@ function KeyField({ configured, value, onChange, onSave, check }: { configured: 
       <input type="password" value={value} onChange={(e) => onChange(e.target.value)} placeholder={configured ? 'Replace key…' : 'Paste key'} autoComplete="off" aria-label="New key" />
       <button type="button" className="oc-btn small" disabled={!value.trim()} onClick={onSave}>Save</button>
     </div>
+  );
+}
+
+/* ---------- Computers (render computers: this laptop + any number of nodes) ---------- */
+const ENCODER_LABEL: Record<string, string> = { quicksync: 'Intel Quick Sync', videotoolbox: 'Apple VideoToolbox', x264: 'CPU (x264)' };
+const OS_LABEL: Record<string, string> = { darwin: 'Mac', linux: 'Linux', win32: 'Windows' };
+function ComputersPage({ act }: { act: (work: () => Promise<string>) => Promise<void> }) {
+  const [data, setData] = useState<ComputersData | null>(null); const [error, setError] = useState('');
+  const [name, setName] = useState(''); const [added, setAdded] = useState<{ name: string; token: string } | null>(null);
+  const load = useCallback(async () => { try { setData(await api.computers()); setError(''); } catch (err) { setError(err instanceof Error ? err.message : String(err)); } }, []);
+  useEffect(() => { void load(); const timer = setInterval(() => void load(), 5000); return () => clearInterval(timer); }, [load]);
+  const run = (work: () => Promise<string>) => act(async () => { const message = await work(); await load(); return message; });
+  if (!data) return <><header className="oc-head"><h1>Computers</h1></header><p className="oc-muted">{error || 'Loading…'}</p></>;
+  const hubVersion = data.computers.find((c) => c.hub)?.info?.version;
+  const now = Date.now();
+  return (
+    <>
+      <header className="oc-head"><h1>Computers</h1></header>
+      <p className="oc-muted">Reels are rendered one at a time per computer. This laptop keeps all reels, accounts and settings; other computers only render (cutting, captions, the final video and stick-figure videos) and send the result back.</p>
+      <section className="oc-card">
+        <div className="oc-card-head"><h2>Where new reels render</h2>{data.waiting > 0 && <span className="oc-pill">{data.waiting} waiting</span>}</div>
+        <select value={data.defaultRenderOn} aria-label="Default render computer" onChange={(e) => void run(async () => { await api.setRenderDefault(e.target.value); return 'Saved.'; })}>
+          <option value="auto">Any free computer (recommended)</option>
+          <option value="hub">Only this laptop</option>
+          {data.computers.filter((c) => !c.hub).map((c) => <option key={c.id} value={c.id}>Only {c.name}</option>)}
+        </select>
+        <small className="oc-muted"> "Any free computer" uses the next free one, and keeps a reel's steps on the computer that already has its files.</small>
+      </section>
+      <section className="oc-card">
+        <div className="oc-card-head"><h2>Render computers</h2></div>
+        <table className="oc-table">
+          <thead><tr><th>Computer</th><th>Status</th><th>Hardware</th><th>Now</th><th></th></tr></thead>
+          <tbody>{data.computers.map((c) => {
+            const state = !c.enabled ? { label: 'Off', tone: 'muted' } : !c.online ? { label: c.lastSeen ? `Offline · seen ${ago(c.lastSeen, now)}` : 'Not connected yet', tone: 'warn' } : c.busy ? { label: 'Rendering', tone: 'info' } : { label: 'Ready', tone: 'good' };
+            const outdated = !c.hub && c.info?.version && hubVersion && c.info.version !== hubVersion;
+            return (
+              <tr key={c.id}>
+                <td><b>{c.name}</b>{c.info && <><br /><small className="oc-muted">{OS_LABEL[c.info.platform] ?? c.info.platform} · {c.info.hostname}</small></>}</td>
+                <td><span className={`oc-status ${state.tone}`}>{state.label}</span>{outdated && <><br /><small className="oc-muted">⚠ app version {c.info!.version}, hub {hubVersion}: update it</small></>}</td>
+                <td>{c.info ? <small>{ENCODER_LABEL[c.info.encoder] ?? c.info.encoder} · {c.info.cpus} cores · {c.info.memoryGb} GB<br /><span className="oc-muted">{c.info.cpuModel}</span></small> : <small className="oc-muted">—</small>}</td>
+                <td><small>{c.tasks.map((t, i) => <span key={i}>{t.detail || t.kind}{typeof t.progress === 'number' && t.progress > 0 && t.progress < 1 ? ` · ${Math.round(t.progress * 100)}%` : ''}<br /></span>)}</small></td>
+                <td style={{ whiteSpace: 'nowrap' }}>
+                  <button type="button" className="oc-btn small" onClick={() => void run(async () => { await api.updateComputer(c.id, { enabled: !c.enabled }); return c.enabled ? `${c.name} will not get new renders.` : `${c.name} is on.`; })}>{c.enabled ? 'Turn off' : 'Turn on'}</button>
+                  {!c.hub && <button type="button" className="oc-btn small" onClick={() => { if (window.confirm(`Remove ${c.name}? It stops getting renders and its key stops working.`)) void run(async () => { await api.updateComputer(c.id, { remove: true }); return `${c.name} removed.`; }); }}>Remove</button>}
+                </td>
+              </tr>
+            );
+          })}</tbody>
+        </table>
+      </section>
+      <section className="oc-card">
+        <div className="oc-card-head"><h2>Add a computer</h2></div>
+        {added ? (
+          <div>
+            <p><b>{added.name}</b> is added. On that computer, set up the app with <code>docs/SETUP-render-computer.md</code> and use these two values. The key is shown only once.</p>
+            <pre className="oc-code">{`PRACTIREEL_HUB_URL=${data.publicUrl}\nPRACTIREEL_NODE_TOKEN=${added.token}\nPRACTIREEL_NODE_NAME=${added.name}`}</pre>
+            <button type="button" className="oc-btn small" onClick={() => { void navigator.clipboard?.writeText(`PRACTIREEL_HUB_URL=${data.publicUrl}\nPRACTIREEL_NODE_TOKEN=${added.token}\nPRACTIREEL_NODE_NAME=${added.name}\n`); }}>Copy</button>{' '}
+            <button type="button" className="oc-btn small" onClick={() => setAdded(null)}>Done</button>
+          </div>
+        ) : (
+          <form onSubmit={(e) => { e.preventDefault(); const wanted = name.trim(); if (!wanted) return; void act(async () => { const made = await api.addComputer(wanted); setAdded({ name: made.node.name, token: made.token }); setName(''); await load(); return `${made.node.name} added.`; }); }}>
+            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Name, e.g. MacBook" maxLength={40} aria-label="Computer name" />{' '}
+            <button type="submit" className="oc-btn primary">Add computer</button>
+          </form>
+        )}
+      </section>
+    </>
   );
 }

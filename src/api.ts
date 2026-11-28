@@ -182,6 +182,10 @@ export type MotionScenePatch = {
   headline?: string; subhead?: string; items?: MotionItem[]; designBrief?: string;
 };
 
+export type ComputerInfo = { platform: string; arch: string; cpus: number; cpuModel: string; memoryGb: number; hostname: string; encoder: string; version: string; busy?: boolean };
+export type Computer = { id: string; name: string; hub: boolean; enabled: boolean; online: boolean; busy: boolean; info: ComputerInfo | null; lastSeen: number | null; createdAt?: string; tasks: Array<{ kind: string; projectId?: string; detail?: string; progress?: number }> };
+export type ComputersData = { defaultRenderOn: string; waiting: number; computers: Computer[]; publicUrl: string };
+export type RenderChoices = { defaultRenderOn: string; options: Array<{ id: string; name: string; online?: boolean }> };
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, { ...init, headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) } });
   const body = await response.json().catch(() => ({}));
@@ -245,7 +249,7 @@ export async function uploadFile(file: File, onProgress?: (progress: UploadProgr
 
 export type AutoStageId = 'audio' | 'transcribe' | 'clean' | 'review' | 'broll-plan' | 'broll-images' | 'edit' | 'captions' | 'compose';
 export type AutoStage = { id: AutoStageId; label: string; state: 'pending' | 'running' | 'done' | 'skipped' | 'failed'; detail?: string; seconds?: number };
-export type AutoOptions = { targetDurationSec?: number; imageProvider: 'gemini' | 'chatgpt'; broll?: boolean; captions?: boolean; review?: boolean; thumbnail?: boolean; postCaption?: boolean };
+export type AutoOptions = { targetDurationSec?: number; imageProvider: 'gemini' | 'chatgpt'; broll?: boolean; captions?: boolean; review?: boolean; thumbnail?: boolean; postCaption?: boolean; renderOn?: string };
 export type ThumbnailBadge = { icon: string; label?: string };
 export type ReelPackage = { state: 'running' | 'ready' | 'failed'; error?: string; frames: string[]; frame: number; lines: string[]; label: string; badges: ThumbnailBadge[]; caption: string; hashtags: string[]; thumbnailUrl?: string; thumbnailDownloadUrl?: string };
 export type PackageEdit = Partial<Pick<ReelPackage, 'frame' | 'lines' | 'label' | 'badges' | 'caption' | 'hashtags'>>;
@@ -275,6 +279,11 @@ export const api = {
   pushSubscribe: (subscription: PushSubscriptionJSON) => request<{ ok: true }>('/api/push/subscribe', { method: 'POST', body: JSON.stringify({ subscription }) }),
   pushUnsubscribe: (endpoint: string) => request<{ ok: true }>('/api/push/unsubscribe', { method: 'POST', body: JSON.stringify({ endpoint }) }),
   console: () => request<ConsoleData>('/api/admin/console'),
+  computers: () => request<ComputersData>('/api/admin/computers'),
+  addComputer: (name: string) => request<{ node: { id: string; name: string }; token: string }>('/api/admin/computers', { method: 'POST', body: JSON.stringify({ name }) }),
+  updateComputer: (id: string, change: { enabled?: boolean; name?: string; remove?: boolean }) => request<{ ok: true }>(`/api/admin/computers/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(change) }),
+  setRenderDefault: (renderOn: string) => request<{ ok: true }>('/api/admin/render-default', { method: 'PUT', body: JSON.stringify({ renderOn }) }),
+  renderChoices: () => request<RenderChoices>('/api/render-choices'),
   addExtraReels: (id: string, reels = 5) => request<Workspace>(`/api/admin/workspaces/${encodeURIComponent(id)}/extra-reels`, { method: 'POST', body: JSON.stringify({ reels }) }),
   nudge: (id: string) => request<{ sent: number }>(`/api/admin/workspaces/${encodeURIComponent(id)}/nudge`, { method: 'POST' }),
   testEngines: () => request<{ anthropic: KeyCheck; gemini: KeyCheck }>('/api/admin/engines/test', { method: 'POST' }),

@@ -1,5 +1,5 @@
-import { useRef, useState } from 'react';
-import { api, uploadFile, type Me } from '../api';
+import { useEffect, useRef, useState } from 'react';
+import { api, uploadFile, type Me, type RenderChoices } from '../api';
 import { go, picturesPreference, type PendingReel } from './PhoneApp';
 
 /** Last step before a reel is made: length (and, for the owner, which account), then the upload with time left. */
@@ -13,6 +13,9 @@ export function NewReel({ me, pending, onStarted, onCancel }: { me: Me | null; p
   const [phase, setPhase] = useState<'idle' | 'uploading' | 'starting'>('idle');
   const [error, setError] = useState('');
   const startedAt = useRef(0);
+  // Owner with more than one render computer: pick where this reel renders (default: the Computers page choice).
+  const [choices, setChoices] = useState<RenderChoices | null>(null); const [renderOn, setRenderOn] = useState('default');
+  useEffect(() => { if (me?.role === 'admin') void api.renderChoices().then(setChoices).catch(() => undefined); }, [me?.role]);
 
   if (!pending?.files.length) {
     return <main className="pr-page"><div className="pr-empty"><strong>No video chosen</strong><span>Record a reel or upload a video from Home.</span>
@@ -37,7 +40,7 @@ export function NewReel({ me, pending, onStarted, onCancel }: { me: Me | null; p
       setPhase('starting');
       const project = await api.selectProject(ids, true, me?.role === 'admin' ? workspaceId : undefined);
       if (pending?.idea) await api.renameProject(project.id, pending.idea.title).catch(() => undefined);
-      await api.startAuto(project.id, { targetDurationSec: length, imageProvider: apiOnly ? 'gemini' : picturesPreference(), review: true, thumbnail: true, postCaption: true });
+      await api.startAuto(project.id, { targetDurationSec: length, imageProvider: apiOnly ? 'gemini' : picturesPreference(), review: true, thumbnail: true, postCaption: true, renderOn: renderOn === 'default' ? undefined : renderOn });
       onStarted(project.id);
     } catch (err) { setError(err instanceof Error ? err.message : String(err)); setPhase('idle'); }
   }
@@ -73,6 +76,12 @@ export function NewReel({ me, pending, onStarted, onCancel }: { me: Me | null; p
         {me?.role === 'admin' && (me.workspaces?.length ?? 0) > 1 && (
           <label className="pr-field">For account<select value={workspaceId} onChange={(e) => setWorkspaceId(e.target.value)}>
             {me.workspaces!.map((w) => <option key={w.id} value={w.id}>{w.name}{w.effectiveProfile === 'api' ? ' (API)' : ''}</option>)}
+          </select></label>
+        )}
+        {choices && choices.options.length > 2 && (
+          <label className="pr-field">Render on<select value={renderOn} onChange={(e) => setRenderOn(e.target.value)}>
+            <option value="default">Default ({choices.options.find((o) => o.id === choices.defaultRenderOn)?.name ?? 'any free computer'})</option>
+            {choices.options.map((o) => <option key={o.id} value={o.id}>{o.name}{o.online === false ? ' (offline)' : ''}</option>)}
           </select></label>
         )}
       </div>

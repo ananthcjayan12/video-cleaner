@@ -6,6 +6,9 @@ import { DEFAULT_SCRIPT_ENGINE, loadStudioSettings, MALE_VOICES, narrateScript, 
 import { EMOTIONS } from './emotion-sfx.js';
 import { MOTION_SOUNDS, motionSoundPath } from './motion-sfx.js';
 import { colorVideoFilter } from './color.js';
+import { addNode, computersView, configureHub, machineInfo, NodeLostError, nodeName, nodeRoutes, pool as renderPool, renderChoices, runOnNode, updateRegistry, type Roots } from './nodes.js';
+import { startNodeAgent, type TaskHandler } from './node-agent.js';
+import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
@@ -140,6 +143,12 @@ type ExportJob = {
 
 const CONFIG_DIR = path.join(os.homedir(), '.video-cleaner');
 const CONFIG_PATH = path.join(CONFIG_DIR, 'config.json');
+const REPO_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+/** Node mode: this computer renders for a PractiReel hub (server/node-agent.ts) instead of being one. */
+const HUB_URL = process.env.PRACTIREEL_HUB_URL || ''; const NODE_TOKEN = process.env.PRACTIREEL_NODE_TOKEN || '';
+const IS_NODE = Boolean(HUB_URL && NODE_TOKEN);
+/** This computer's folders, as render computers map paths between each other (server/nodes.ts). */
+const localRoots = (): Roots => ({ data: path.dirname(localSettings.projectsDir || process.env.PROJECTS_DIR || path.join(os.homedir(), 'VideoCleaner', 'projects')), config: CONFIG_DIR, repo: REPO_DIR, home: os.homedir() });
 const app = express();
 const projects = new Map<string, Project>();
 const brollPlans = new Map<string, BrollPlan>();
@@ -173,12 +182,16 @@ async function sessionUser(req: express.Request): Promise<SessionUser | null> {
   }
   return null;
 }
+// Render computers (server/nodes.ts): they authenticate with their own token, not a login.
+configureHub({ roots: localRoots });
+app.use('/api/node', express.json({ limit: '32mb' })); // batches of small files (server/nodes.ts)
+nodeRoutes(app, express);
 /** Home-screen app files (icon, manifest, service worker) must load before login. */
 const PUBLIC_FILES = /^\/(manifest\.webmanifest|sw\.js|icons\/[a-z0-9._-]+\.png|apple-touch-icon\.png)$/;
 const userOf = (res: express.Response) => res.locals.user as SessionUser;
 const isAdmin = (res: express.Response) => userOf(res)?.role === 'admin';
 app.use((req, res, next) => {
-  if (req.path === '/login' || req.path === '/api/login' || PUBLIC_FILES.test(req.path)) return next();
+  if (req.path === '/login' || req.path === '/api/login' || PUBLIC_FILES.test(req.path) || req.path.startsWith('/api/node/')) return next();
   void (async () => {
     const user = await sessionUser(req);
     if (!user) {
@@ -199,7 +212,10 @@ app.use((req, res, next) => {
   })().catch((error) => res.status(500).json({ error: String(error) }));
 });
 const projectWorkspaceId = (project: Project) => project.workspaceId || PERSONAL_WORKSPACE.id;
+/** On a render computer: the accounts of the reels it is rendering, as the hub sent them (it has no accounts file). */
+const nodeWorkspaces = new Map<string, Workspace>();
 async function workspaceFor(id: string | undefined): Promise<Workspace> {
+  const sent = nodeWorkspaces.get(id || PERSONAL_WORKSPACE.id); if (sent) return sent;
   const data = await loadWorkspaces(); return data.workspaces.find((w) => w.id === (id || PERSONAL_WORKSPACE.id)) ?? { ...PERSONAL_WORKSPACE };
 }
 /** Usage file + engine profile for everything that runs for this project (AI calls check the profile themselves). */
@@ -1637,24 +1653,6 @@ app.get('/api/projects/:id/usage', route(async (req, res) => {
   res.json({ summary: summarizeUsage(entries), entries });
 }));
 
-/** One render at a time on this machine (4 cores); the rest wait in order and see their place in line. */
-class RenderQueue {
-  private busy = false; private waiting: Array<{ go: () => void; onPosition: (ahead: number) => void }> = [];
-  async acquire(onPosition: (ahead: number) => void, stopped: () => boolean): Promise<() => void> {
-    if (this.busy) {
-      await new Promise<void>((resolve, reject) => {
-        const entry = { go: resolve, onPosition }; this.waiting.push(entry); this.update();
-        const timer = setInterval(() => { if (stopped()) { clearInterval(timer); this.waiting = this.waiting.filter((w) => w !== entry); this.update(); reject(new Error('Stopped')); } }, 1000);
-        entry.go = () => { clearInterval(timer); resolve(); };
-      });
-    }
-    this.busy = true; onPosition(0);
-    let released = false;
-    return () => { if (released) return; released = true; this.busy = false; const next = this.waiting.shift(); this.update(); next?.go(); };
-  }
-  private update() { this.waiting.forEach((entry, index) => entry.onPosition(index + 1)); }
-}
-const renderQueue = new RenderQueue();
 
 /** Run (or resume) a reel in its account's context, and tell the phone how it ended. */
 function startAutoRun(project: Project, job: AutoJob, context: Awaited<ReturnType<typeof projectUsageContext>>) {
@@ -1776,6 +1774,28 @@ async function composeReel(project: Project, job: AutoJob, options: { python: st
   note(`${broll.length} B-roll · captions ${options.captioned ? 'on' : 'off'}${timed ? ` · ${shown} graphics · ${timed.sounds.length} sounds` : ''}`);
   return output;
 }
+/** The edited picture with the mastered voice (auto/base.mp4); skipped when it is newer than both inputs. */
+async function muxBase(ffmpegBin: string, dir: string, force = false) {
+  const [video, voice, base] = await Promise.all(['video.mp4', 'speech-master.wav', 'base.mp4'].map((name) => fs.stat(path.join(dir, name)).catch(() => null)));
+  if (!force && base && video && voice && base.mtimeMs >= video.mtimeMs && base.mtimeMs >= voice.mtimeMs) return;
+  await run(ffmpegBin, ['-hide_banner', '-v', 'error', '-y', '-i', path.join(dir, 'video.mp4'), '-i', path.join(dir, 'speech-master.wav'), '-map', '0:v', '-map', '1:a', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-shortest', path.join(dir, 'base.mp4')]);
+}
+/** Thrown on a render computer after the one step the hub asked for (carries that step's result back). */
+class StageHandoff { constructor(public result: unknown, public detail?: string) {} }
+const projectVirtual = (project: Project) => `data/projects/${project.id}`;
+/** What a render computer needs for a reel: its folder, its source clips, the account's brand files, stick faces/fonts. */
+async function nodeFilesFor(project: Project) {
+  const roots = localRoots(); const files = new Set<string>([projectVirtual(project)]);
+  for (const source of [project.sourcePath, ...(project.clips ?? []).map((clip) => clip.sourcePath)]) {
+    if (!source || path.dirname(source) === project.workDir) continue;
+    const rel = path.relative(roots.data, source);
+    if (!rel.startsWith('..') && !path.isAbsolute(rel)) files.add(`data/${rel.split(path.sep).join('/')}`);
+    else { const home = path.relative(roots.home, source); if (!home.startsWith('..') && !path.isAbsolute(home)) files.add(`home/${home.split(path.sep).join('/')}`); }
+  }
+  files.add(`config/brands/${projectWorkspaceId(project)}`);
+  if (await fs.stat(path.join(project.workDir, 'stick-draft.json')).then(() => true, () => false)) files.add('repo/remotion/stick-reel/local');
+  return [...files];
+}
 async function reelCost(project: Project) { return summarizeUsage(await readUsage(usageFile(project.workDir))); }
 async function runAutoReel(project: Project, job: AutoJob) {
   const settings = await resolvedSettings();
@@ -1795,16 +1815,48 @@ async function runAutoReel(project: Project, job: AutoJob) {
     if (item.state === 'skipped') return undefined;
     if (item.state === 'done') return restore ? restore() : undefined;
     if (job.stopRequested) throw new Error('Stopped');
-    // This machine renders one reel at a time; others wait in line.
-    const release = RENDER_STAGES.has(id) ? await renderQueue.acquire((ahead) => { job.queuePosition = ahead || undefined; item.detail = ahead ? `Waiting for ${ahead} reel${ahead === 1 ? '' : 's'} ahead to finish…` : undefined; void persistAutoJob(project, job); }, () => Boolean(job.stopRequested)) : () => undefined;
-    item.state = 'running'; const started = Date.now(); void persistAutoJob(project, job);
+    const runHere = async (release: () => void): Promise<T> => {
+      item.state = 'running'; const started = Date.now(); void persistAutoJob(project, job);
+      try {
+        const result = await withTask(id, () => work((detail) => { item.detail = detail; })).finally(release);
+        item.state = 'done'; item.seconds = Math.round((Date.now() - started) / 1000);
+        if (RENDER_STAGES.has(id)) await withTask(id, () => recordUsage({ kind: 'render', provider: IS_NODE ? (process.env.PRACTIREEL_NODE_NAME || os.hostname()) : 'this computer', renderSeconds: (Date.now() - started) / 1000 }));
+        void persistAutoJob(project, job); return result;
+      }
+      catch (error) { item.state = 'failed'; item.detail = error instanceof Error ? error.message : String(error); void persistAutoJob(project, job); throw error; }
+    };
+    // On a render computer: run only the step the hub sent, then hand the result back (StageHandoff).
+    if (IS_NODE && job.only) { if (id !== job.only) return undefined; throw new StageHandoff(await runHere(() => undefined), item.detail); }
+    if (!RENDER_STAGES.has(id)) return runHere(() => undefined);
+    // Render steps: one at a time per computer, on this laptop or a render computer (owner console → Computers).
+    const want = job.options.renderOn || (await renderChoices()).defaultRenderOn;
+    const waitingFor = want === 'auto' || want === 'hub' ? '' : await nodeName(want);
+    const lease = await renderPool.acquire(want, { prefer: job.renderNode, label: `${project.name} · ${item.label}`, stopped: () => Boolean(job.stopRequested), onPosition: (ahead) => {
+      job.queuePosition = ahead || undefined;
+      item.detail = !ahead ? undefined : waitingFor ? `Waiting for ${waitingFor} (online and free)…` : `Waiting for ${ahead} reel${ahead === 1 ? '' : 's'} ahead to finish…`;
+      void persistAutoJob(project, job);
+    } });
+    job.queuePosition = undefined;
+    if (lease.slot === 'hub') { job.renderNode = 'hub'; return runHere(lease.release); }
+    const name = await nodeName(lease.slot); job.renderNode = lease.slot;
+    item.state = 'running'; item.detail = `On ${name}…`; const started = Date.now(); void persistAutoJob(project, job);
+    const abort = new AbortController(); const stopWatch = setInterval(() => { if (job.stopRequested) abort.abort(); }, 1000);
     try {
-      const result = await withTask(id, () => work((detail) => { item.detail = detail; })).finally(release);
-      item.state = 'done'; item.seconds = Math.round((Date.now() - started) / 1000);
-      if (RENDER_STAGES.has(id)) await withTask(id, () => recordUsage({ kind: 'render', provider: 'this computer', renderSeconds: (Date.now() - started) / 1000 }));
-      void persistAutoJob(project, job); return result;
+      const sent = { ...job, review: undefined, cost: undefined, only: id };
+      const { result } = await runOnNode(lease.slot, { kind: 'auto-stage', projectId: project.id, payload: { job: sent, workspace: await workspaceFor(projectWorkspaceId(project)) }, include: await nodeFilesFor(project), writable: [projectVirtual(project)] },
+        { signal: abort.signal, onUpdate: (detail) => { if (detail) item.detail = `${name}: ${detail}`; } }).finally(() => { clearInterval(stopWatch); lease.release(); });
+      const back = result as { result: T; patch: Partial<AutoJob>; detail?: string };
+      Object.assign(job, back.patch ?? {});
+      item.state = 'done'; item.seconds = Math.round((Date.now() - started) / 1000); item.detail = back.detail ? `${back.detail} · on ${name}` : `Made on ${name}`;
+      void persistAutoJob(project, job); return back.result;
+    } catch (error) {
+      if (error instanceof NodeLostError && !job.stopRequested && (want === 'auto')) { // the render computer went away: do it here instead
+        console.error(`Reel ${project.id}: ${error.message} Rendering ${id} on this laptop.`); job.renderNode = 'hub';
+        const local = await renderPool.acquire('hub', { label: `${project.name} · ${item.label}`, stopped: () => Boolean(job.stopRequested) });
+        return runHere(local.release);
+      }
+      item.state = 'failed'; item.detail = job.stopRequested ? 'Stopped' : error instanceof Error ? error.message : String(error); void persistAutoJob(project, job); throw error;
     }
-    catch (error) { item.state = 'failed'; item.detail = error instanceof Error ? error.message : String(error); void persistAutoJob(project, job); throw error; }
   };
   await stage('audio', async (note) => { await ensureAnalysisAudio(project); note(`${Math.round(project.media.duration)} s of audio`); });
   await stage('transcribe', async (note) => { const t = await transcribeProject(project); note(`${t.words.length} words`); });
@@ -1878,11 +1930,12 @@ async function runAutoReel(project: Project, job: AutoJob) {
     await fs.writeFile(path.join(dir, 'clips.json'), JSON.stringify(clips));
     note(clips.length > 1 ? `Cutting and grading shots from ${clips.length} clips…` : 'Cutting and grading shots…');
     const result = await runPython(python, AUTO_EDIT_SCRIPT, [path.join(dir, 'clips.json'), path.join(dir, 'words.json'), path.join(dir, 'keep.json'), dir, String(W), String(H), '-', '1.07']);
+    await muxBase(settings.ffmpegBin!, dir, true); // picture + mastered voice, the input of the later steps (made here so a render computer sends it back)
     job.finalSeconds = result.duration; note(`${result.clips > 1 ? `${result.clips} clips · ` : ''}${result.cuts} cuts · ${result.shots} shots · ${Math.round(result.duration)} s`);
     return result as { duration: number };
   }, async () => ({ duration: job.finalSeconds! }));
   const duration = edited!.duration;
-  await run(settings.ffmpegBin, ['-hide_banner', '-v', 'error', '-y', '-i', path.join(dir, 'video.mp4'), '-i', path.join(dir, 'speech-master.wav'), '-map', '0:v', '-map', '1:a', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-shortest', path.join(dir, 'base.mp4')]);
+  await muxBase(settings.ffmpegBin, dir); // made in the edit step; again only for reels cut before that
   await stage('motion', async (note) => {
     note('Planning titles, punch boxes, camera moves and sounds…');
     const motion = await planMotionForReel(project, job, brollScenesIn(plan), duration);
@@ -2293,13 +2346,12 @@ async function planStickInBackground(req: express.Request, project: Project, sig
   await saveStickDraft(project, planned);
 }
 app.post('/api/projects/:id/stick/render', stickRoute(async (req, res, project) => {
-  if ([...stickJobs.values()].some(job => job.state === 'running')) {
-    return void res.status(409).json({ error: 'A stick-figure reel is already rendering.' });
-  }
-  const { job } = await startStickRender(project, req.body?.scenes ? req.body : undefined);
+  if (stickJobs.get(project.id)?.state === 'running') return void res.status(409).json({ error: 'This stick-figure reel is already rendering.' });
+  // Other reels wait for a free computer (one render per computer; owner console → Computers).
+  const { job } = await startStickRender(project, req.body?.scenes ? req.body : undefined, { renderOn: typeof req.body?.renderOn === 'string' ? req.body.renderOn : undefined });
   res.status(202).json({ render: job });
 }));
-async function startStickRender(project: Project, input?: unknown): Promise<{ job: StickRender; done: Promise<void> }> {
+async function startStickRender(project: Project, input?: unknown, options: { here?: boolean; renderOn?: string } = {}): Promise<{ job: StickRender; done: Promise<void> }> {
   const before = stickJobs.get(project.id) ?? await fs.readFile(path.join(project.workDir, 'stick-render.json'), 'utf8').then((text) => JSON.parse(text) as StickRender).catch(() => null);
   const last = before?.state === 'ready' && before.url ? { url: before.url, ...(before.creditsUrl ? { creditsUrl: before.creditsUrl } : {}) } : before?.last;
   const job: StickRender = { state: 'running', progress: 0, stage: 'Preparing render…', ...(last ? { last } : {}) };
@@ -2317,7 +2369,23 @@ async function startStickRender(project: Project, input?: unknown): Promise<{ jo
     const creditsPath = path.join(exportsDir(project), `stick-reel-${renderId}-credits.txt`);
     await fs.mkdir(exportsDir(project), { recursive: true });
     const done = (async () => {
+      let release = () => undefined as void;
       try {
+        // One render per computer: this laptop or a render computer (owner console → Computers).
+        if (!IS_NODE && !options.here) {
+          const want = options.renderOn || (await renderChoices()).defaultRenderOn;
+          const lease = await renderPool.acquire(want, { label: `${project.name} · stick reel`, stopped: () => abort.signal.aborted, onPosition: (ahead) => { if (ahead) job.stage = `Waiting for a free computer (${ahead} in line)…`; } });
+          release = lease.release;
+          if (lease.slot !== 'hub') {
+            const name = await nodeName(lease.slot); job.stage = `On ${name}…`;
+            const { result } = await runOnNode(lease.slot, { kind: 'stick-render', projectId: project.id, payload: { workspace: await workspaceFor(projectWorkspaceId(project)) }, include: await nodeFilesFor(project), writable: [projectVirtual(project)] },
+              { signal: abort.signal, onUpdate: (detail, progress) => { if (detail) job.stage = `${name}: ${detail}`; if (typeof progress === 'number') job.progress = progress; } });
+            const finished = result as StickRender;
+            if (finished?.state !== 'ready') throw new Error(finished?.error || `The render on ${name} failed.`);
+            if (abort.signal.aborted) throw new Error('Stopped.');
+            await atomicWriteJson(path.join(project.workDir, 'stick-render.json'), finished); Object.assign(job, finished); return;
+          }
+        }
         const result = await renderStickReel({
           project, draft, visual: temporary, output, creditsPath, chromeBin: await detectChromeBin(), signal: abort.signal, assetBase: stickAssetBase(project.id),
           ffmpeg: args => run(ffmpegBin, args, undefined, 600_000),
@@ -2338,6 +2406,7 @@ async function startStickRender(project: Project, input?: unknown): Promise<{ jo
         Object.assign(job, failed);
         await fs.rm(output, { force: true }).catch(() => undefined);
       } finally {
+        release();
         await fs.rm(temporary, { force: true }).catch(() => undefined);
         if (stickRenderAborts.get(project.id) === abort) stickRenderAborts.delete(project.id);
       }
@@ -2363,6 +2432,8 @@ app.post('/api/projects/:id/auto', route(async (req, res) => {
     targetDurationSec: targetDurationValue(req.body?.targetDurationSec), imageProvider: req.body?.imageProvider === 'chatgpt' && context.profile === 'in-house' ? 'chatgpt' : 'gemini',
     broll: req.body?.broll !== false, captions: req.body?.captions !== false, review: req.body?.review !== false,
     thumbnail: req.body?.thumbnail !== false, postCaption: req.body?.postCaption !== false,
+    // Owner only: which computer renders it (owner console → Computers); customers' reels use the owner's default.
+    renderOn: isAdmin(res) && typeof req.body?.renderOn === 'string' && req.body.renderOn !== 'default' ? req.body.renderOn.slice(0, 40) : undefined,
   };
   const job = newAutoJob(options); job.profile = context.profile;
   startAutoRun(project, job, context);
@@ -2415,7 +2486,7 @@ app.post('/api/projects/:id/auto/effects', route(async (req, res) => {
         job.options.thumbnail = true;
       }
       if (replan || !(await loadReelMotion(project.workDir))) await withTask('motion', () => planMotionForReel(project, job, scenes, duration));
-      const release = await renderQueue.acquire(() => undefined, () => false);
+      const { release } = await renderPool.acquire('hub', { label: `${project.name} · effects` });
       const captionFile = path.join(project.workDir, 'auto', 'captions-glass.txt');
       if (recaption) { // draw the captions again (after a change to the caption look or phrasing)
         const editedWords = JSON.parse(await fs.readFile(path.join(project.workDir, 'auto', 'edited-words.json'), 'utf8')).words as CaptionWordIn[];
@@ -2477,6 +2548,52 @@ app.post('/api/projects/:id/auto/stop', route(async (req, res) => {
 app.get('/api/projects/:id/export-status', route(async (req, res) => { const id = routeParam(req.params.id); const job = exportJobs.get(id); if (!job) return void res.json({ state: 'idle', progress: 0, outTime: '00:00:00.000000', speed: '', frame: 0 }); const project = projects.get(id); res.json({ ...job, downloadUrl: job.state === 'completed' && project ? downloadUrlFor(project, job.outputPath) : undefined }); }));
 app.post('/api/projects/:id/export-stop', route(async (req, res) => { const projectId = routeParam(req.params.id); const job = exportJobs.get(projectId); if (!job || job.state !== 'running') return void res.status(409).json({ error: 'No export is currently running' }); job.stopRequested = true; job.speed = job.resumable ? 'Stopping after preserving checkpoints…' : 'Stopping…'; const child = exportProcesses.get(projectId); if (child) child.kill('SIGTERM'); res.status(202).json({ stopping: true, resumable: Boolean(job.resumable) }); }));
 
+// ---- Render computers (owner console → Computers)
+app.get('/api/admin/computers', route(async (_req, res) => {
+  requireAdmin(res); const settings = await resolvedSettings();
+  res.json({ ...await computersView(await machineInfo(settings.ffmpegBin, REPO_DIR)), publicUrl: process.env.PRACTIREEL_PUBLIC_URL || 'https://editor.srshti.co.in' });
+}));
+app.post('/api/admin/computers', route(async (req, res) => { requireAdmin(res); const { node, token } = await addNode(String(req.body?.name ?? '')); res.status(201).json({ node: { id: node.id, name: node.name }, token }); }));
+app.put('/api/admin/computers/:nodeId', route(async (req, res) => {
+  requireAdmin(res); const body = req.body ?? {};
+  if (routeParam(req.params.nodeId) === 'hub') { await updateRegistry({ hubRenders: body.enabled !== false }); return void res.json({ ok: true }); }
+  await updateRegistry({ nodeId: routeParam(req.params.nodeId), enabled: typeof body.enabled === 'boolean' ? body.enabled : undefined, name: typeof body.name === 'string' ? body.name : undefined, remove: body.remove === true }); res.json({ ok: true });
+}));
+app.put('/api/admin/render-default', route(async (req, res) => { requireAdmin(res); await updateRegistry({ defaultRenderOn: String(req.body?.renderOn ?? 'auto') }); res.json({ ok: true }); }));
+app.get('/api/render-choices', route(async (_req, res) => { requireAdmin(res); res.json(await renderChoices()); }));
+
+/** On a render computer: read a reel's files again after they were copied from the hub. */
+async function reloadProject(id: string) { projects.delete(id); brollPlans.delete(id); motionPlans.delete(id); await hydrateProjects(); return getProject(id); }
+const NODE_JOB_FIELDS = ['finalSeconds', 'sourceSeconds', 'outputPath', 'downloadUrl', 'previewUrl', 'coverSeconds'] as const;
+/** What a render computer can do for the hub (server/node-agent.ts calls these after copying the files). */
+const nodeHandlers: Record<string, TaskHandler> = {
+  'auto-stage': async (task, ctx) => {
+    const { job, workspace } = task.payload as { job: AutoJob; workspace?: Workspace };
+    if (workspace?.id) nodeWorkspaces.set(workspace.id, workspace);
+    const project = await reloadProject(task.projectId);
+    const onAbort = () => { job.stopRequested = true; }; ctx.signal.addEventListener('abort', onAbort);
+    const progress = setInterval(() => { const item = job.stages.find((stage) => stage.id === job.only); if (item?.detail) ctx.update(item.detail); }, 1000);
+    try {
+      await runWithUsage(await projectUsageContext(project), () => runAutoReel(project, job));
+      throw new Error(`The step "${job.only}" did not run here.`);
+    } catch (error) {
+      if (!(error instanceof StageHandoff)) throw error;
+      const patch: Record<string, unknown> = {}; for (const key of NODE_JOB_FIELDS) if ((job as Record<string, unknown>)[key] !== undefined) patch[key] = (job as Record<string, unknown>)[key];
+      return { result: error.result, detail: error.detail, patch };
+    } finally { clearInterval(progress); ctx.signal.removeEventListener('abort', onAbort); }
+  },
+  'stick-render': async (task, ctx) => {
+    const { workspace } = task.payload as { workspace?: Workspace };
+    if (workspace?.id) nodeWorkspaces.set(workspace.id, workspace);
+    const project = await reloadProject(task.projectId);
+    const { job, done } = await startStickRender(project, undefined, { here: true });
+    const onAbort = () => stickRenderAborts.get(project.id)?.abort(); ctx.signal.addEventListener('abort', onAbort);
+    const progress = setInterval(() => ctx.update(job.stage, job.progress), 1000);
+    try { await done; } finally { clearInterval(progress); ctx.signal.removeEventListener('abort', onAbort); }
+    return { ...job };
+  },
+};
+
 const PORT = Number(process.env.PORT || 3001); await loadSettings(); await hydrateProjects(true);
 // Generation runs inside this process, so anything still marked "generating" at startup was orphaned by a restart (e.g. the dev server reloading) and would spin forever.
 for (const project of projects.values()) {
@@ -2490,7 +2607,8 @@ for (const project of projects.values()) {
   } catch { /* leave the project as-is */ }
 }
 // A second copy of the app (a test on another port) shares the projects folder and must not pick up the live app's reels.
-if (!process.env.VIDEO_CLEANER_NO_RESUME) { await resumeAutoJobs(); void backfillPhonePreviews(); }
+if (!process.env.VIDEO_CLEANER_NO_RESUME && !IS_NODE) { await resumeAutoJobs(); void backfillPhonePreviews(); }
+if (IS_NODE) startNodeAgent({ hubUrl: HUB_URL, token: NODE_TOKEN, roots: localRoots(), handlers: nodeHandlers, info: async () => machineInfo((await resolvedSettings()).ffmpegBin, REPO_DIR) });
 warmCaptionRenderer(os.tmpdir());
 if (process.env.NODE_ENV === 'production') { const distDir = path.resolve('dist'); app.use(express.static(distDir)); app.use((_req, res) => res.sendFile(path.join(distDir, 'index.html'))); }
 app.listen(PORT, '127.0.0.1', () => { console.log(`Video Cleaner local server: http://127.0.0.1:${PORT} · ${projects.size} local project${projects.size === 1 ? '' : 's'} restored`); });
