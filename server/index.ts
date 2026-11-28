@@ -35,6 +35,7 @@ import {
   saveBrollPlan,
   planNeedsPresenterMatte,
   resolveMagnificVideoConfig,
+  normalizeImage,
   setStillEffect,
   updateBrollScene,
   updateBrollSettings,
@@ -72,6 +73,7 @@ import { findClaims } from './claims.js';
 import { addReelSound, type ReelSoundCue } from './reel-sound.js';
 import { loadReelMotion, planReelMotion, timeTheMotion } from './reel-motion.js';
 import { loadBrandTheme } from './brand-theme.js';
+import { COVER_SECONDS, coverFile, coverRequest, planCoverText } from './reel-cover.js';
 /** Where the speaker sits in a split screen; must match SPLIT_BOX in remotion/captions/src/Graphics.tsx. */
 const SPLIT_BOX = { x: 40, y: 942, w: 1000, h: 828 };
 import { NICHE_PACKS, nichePack, packLook, packPreview, packWriterNotes } from './niche-packs.js';
@@ -80,7 +82,7 @@ import { addSubscriber, notify, removeSubscriber, vapidKeys } from './push.js';
 import { currentProfile, readUsage, recordUsage, runWithUsage, summarizeUsage, usageContext, usageFile, withTask, type EngineProfile } from './usage.js';
 import { addExtraReels, limitThisMonth, addMember, allowedProfiles, createWorkspace, effectiveProfile, loadWorkspaces, memberAuth, memberRoute, normalizeUsername, PERSONAL_WORKSPACE, reelsThisMonth, removeMember, saveWorkspaces, sessionUsername, updateWorkspace, type SessionUser, type Workspace } from './workspaces.js';
 import { verifyAccessJwt } from './access.js';
-import { DEFAULT_PICTURES_ENGINE } from './chatgpt-images.js';
+import { DEFAULT_PICTURES_ENGINE, generateChatGptImages, type BrowserEngine } from './chatgpt-images.js';
 import { checkCredentials, issueSession, loadAuth, LOGIN_PAGE, LoginLimiter, readCookie, SESSION_COOKIE, SESSION_DAYS, verifySession } from './auth.js';
 import { appendChunk, completedUploadPath, createUpload, readUpload, type UploadKind } from './uploads.js';
 import { AUTO_COMPOSITE_SCRIPT, AUTO_EDIT_SCRIPT, keepIndexRanges, makePreviewVideo, warmCaptionRenderer, newAutoJob, placeBroll, renderCaptionLayer, renderMotionLayer, AUTO_STAGES, renderThumbnail, runPython, type AutoJob, type AutoOptions, type AutoStageId, type EditRange, type ReelPackage } from './auto-reel.js';
@@ -1717,6 +1719,17 @@ async function planMotionForReel(project: Project, job: AutoJob, scenes: BrollSc
   return planReelMotion({ textConfig: settings, choice: textEngines(settings).planning, workDir: project.workDir, words, ranges, broll, duration, field: pack.label, clinic });
 }
 
+/** Claude writes the cover headline from the narration; the request ChatGPT draws the cover from (null: no brand references). */
+async function coverRequestForReel(project: Project) {
+  const settings = await resolvedSettings(); const pack = await projectPack(project); const workspaceId = projectWorkspaceId(project);
+  const theme = await loadBrandTheme(workspaceId, pack);
+  const clinic = theme.logo ? [theme.logo.above, theme.logo.name, theme.logo.below].filter(Boolean).join(' ') : undefined;
+  const words = project.transcript?.words ?? [];
+  const text = await planCoverText({ textConfig: settings, choice: textEngines(settings).planning, workDir: project.workDir, transcript: words.map((word) => word.text).join(' '), field: pack.label });
+  await fs.writeFile(path.join(project.workDir, 'auto', 'cover-text.json'), JSON.stringify(text, null, 2));
+  return coverRequest({ workDir: project.workDir, workspaceId, text, clinic });
+}
+
 /**
  * The final step of an auto reel: B-roll (with its planned transitions), captions, the motion layer and camera moves,
  * then music and sound effects. Used by the pipeline and by "redo the effects" on a finished reel.
@@ -1747,12 +1760,16 @@ async function composeReel(project: Project, job: AutoJob, options: { python: st
   await fs.writeFile(motionFile, JSON.stringify({ overlay, kicks: timed?.kicks ?? [], shots: shotTimes, splits, splitBox: SPLIT_BOX }));
   await fs.mkdir(exportsDir(project), { recursive: true });
   const output = path.join(exportsDir(project), `${new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15)}-auto-reel.mp4`);
-  note(`${broll.length} B-roll cutaways, camera moves${timed ? `, ${timed.kicks.length} punch-ins` : ''}…`);
-  await runPython(python, AUTO_COMPOSITE_SCRIPT, [path.join(dir, 'base.mp4'), path.join(dir, 'broll-placed.json'), path.join(dir, 'broll-clips'), options.captioned ? path.join(dir, 'captions-glass.txt') : '-', String(Math.round(H * 0.651)), '-', output, String(W), String(H), previewPathFor(output), motionFile]) // phone preview made in the same pass
+  // The cover (made by ChatGPT in the B-roll step) is the reel's last second, to pick as the cover frame when posting.
+  const cover = (job.options.thumbnail !== false && await fs.stat(coverFile(project.workDir)).then((stat) => stat.size > 0, () => false)) ? coverFile(project.workDir) : null;
+  const total = duration + (cover ? COVER_SECONDS : 0);
+  note(`${broll.length} B-roll cutaways, camera moves${timed ? `, ${timed.kicks.length} punch-ins` : ''}${cover ? ', cover at the end' : ''}…`);
+  await runPython(python, AUTO_COMPOSITE_SCRIPT, [path.join(dir, 'base.mp4'), path.join(dir, 'broll-placed.json'), path.join(dir, 'broll-clips'), options.captioned ? path.join(dir, 'captions-glass.txt') : '-', String(Math.round(H * 0.651)), '-', output, String(W), String(H), previewPathFor(output), motionFile, cover ?? '-', String(COVER_SECONDS)]) // phone preview made in the same pass
     .catch(async (error) => { await Promise.all([output, previewPathFor(output)].map((file) => fs.rm(file, { force: true }))); throw error; }); // no half-written files left behind
   note('Adding music and sound effects…');
-  await withTask('compose', () => soundForReel(project, ffmpegBin, duration, output, timed?.sounds))
+  await withTask('compose', () => soundForReel(project, ffmpegBin, total, output, timed?.sounds)) // music runs on under the cover
     .catch((error) => console.error(`Music and effects for ${project.id} failed (the reel keeps its voice only):`, error));
+  job.coverSeconds = cover ? COVER_SECONDS : 0;
   job.outputPath = output; job.downloadUrl = downloadUrlFor(project, output); job.previewUrl = job.downloadUrl ? `${job.downloadUrl}?inline=1` : undefined;
   note('Making a phone preview…');
   await addPhonePreview(project, job, ffmpegBin).catch((error) => console.error(`Preview for ${project.id} failed:`, error));
@@ -1825,12 +1842,18 @@ async function runAutoReel(project: Project, job: AutoJob) {
   }, async () => { plan = await loadBrollPlan(project.workDir) ?? undefined; if (plan) brollPlans.set(project.id, plan); });
   await stage('broll-images', async (note) => {
     if (!plan) return;
+    let coverMade: Promise<unknown> = Promise.resolve();
     const config = { openAiApiKey: settings.openAiApiKey, openAiModel: settings.openAiImageModel, geminiApiKey: settings.geminiApiKey, geminiModel: settings.geminiImageModel, grokBin: settings.grokBin, grokModel: settings.grokModel, grokVideoModel: settings.grokVideoModel, codexBin: settings.codexBin, codexModel: settings.codexModel, claudeBin: settings.claudeBin, ffmpegBin: settings.ffmpegBin, picturesEngine: picturesEngine(settings) };
     if (job.options.imageProvider === 'chatgpt') {
-      note(`ChatGPT in Chrome · ${plan.scenes.length} pictures in one chat…`);
+      // The reel cover is designed in the same ChatGPT chat, from the clinic's example posts and logo (reel-cover.ts).
+      const cover = job.options.thumbnail === false || await fs.stat(coverFile(project.workDir)).then(() => true, () => false) ? null
+        : await coverRequestForReel(project).catch((error) => { console.error(`Cover headline for ${project.id} failed:`, error); return null; });
+      note(`ChatGPT in Chrome · ${plan.scenes.length} pictures${cover ? ' and the cover' : ''} in one chat…`);
       // A failed picture step should not throw away the whole reel: keep going without B-roll and say why.
-      const made = await generateBrollImagesWithChatGpt({ config, workDir: project.workDir, plan, sceneIds: plan.scenes.filter((scene) => scene.imageStatus !== 'ready').map((scene) => scene.id), onLine: (text) => note(text) })
+      const made = await generateBrollImagesWithChatGpt({ config, workDir: project.workDir, plan, sceneIds: plan.scenes.filter((scene) => scene.imageStatus !== 'ready').map((scene) => scene.id), onLine: (text) => note(text),
+        extra: cover ? [cover] : [], onExtra: (done) => { if (done.length) coverMade = normalizeImage(done[0].outputPath, coverFile(project.workDir), '9:16', settings.ffmpegBin, true).catch((error) => console.error('Cover image failed:', error)); } })
         .catch((error) => { note(`ChatGPT pictures failed: ${error instanceof Error ? error.message : String(error)}`.slice(0, 400)); return null; });
+      await coverMade;
       if (!made) { brollPlans.set(project.id, plan); return; }
       brollPlans.set(project.id, plan); note(`${made.length} / ${plan.scenes.length} from ChatGPT`); return;
     }
@@ -1898,17 +1921,21 @@ async function makeReelPackage(project: Project, job: AutoJob, notes?: string) {
     const choice = textEngines(settings).planning;
     const raw = await generateStructuredText({ choice, config: settings, workDir: project.workDir, prompt: buildPackagePrompt(edited.words.map((word) => word.text).join(' '), smalls, notes, packWriterNotes(await projectPack(project))), schema: PACKAGE_SCHEMA as unknown as Record<string, unknown>, outputName: 'reel-package', images: smalls });
     Object.assign(job.package, cleanPackage(raw), { frames: smalls.map((_, n) => frameUrl(project, n)) });
-    if (job.options.thumbnail !== false) await renderPackageThumbnail(project, job.package);
+    if (job.options.thumbnail !== false) await renderPackageThumbnail(project, job.package, { preferCover: true });
     job.package.state = 'ready';
   } catch (error) {
     job.package.state = 'failed'; job.package.error = error instanceof Error ? error.message : String(error);
     throw error;
   } finally { void persistAutoJob(project, job); }
 }
-async function renderPackageThumbnail(project: Project, pkg: ReelPackage) {
+/** preferCover: use the ChatGPT-designed cover (reel-cover.ts) when the reel has one, instead of drawing the template cover. */
+async function renderPackageThumbnail(project: Project, pkg: ReelPackage, options: { preferCover?: boolean } = {}) {
   await fs.mkdir(exportsDir(project), { recursive: true });
   const output = path.join(exportsDir(project), `${new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15)}-thumbnail.jpg`);
-  await renderThumbnail({ look: packLook(await projectPack(project)), framePath: framePaths(thumbDir(project), pkg.frame).full, faceX: pkg.faces?.[pkg.frame], lines: pkg.lines, label: pkg.label, badges: pkg.badges, outputPath: output, chromeBin: await detectChromeBin(), workDir: project.workDir });
+  const settings = await resolvedSettings();
+  const cover = options.preferCover && settings.ffmpegBin && await fs.stat(coverFile(project.workDir)).then((stat) => stat.size > 0, () => false);
+  if (cover) await run(settings.ffmpegBin!, ['-hide_banner', '-loglevel', 'error', '-y', '-i', coverFile(project.workDir), '-q:v', '2', output], undefined, 60_000);
+  else await renderThumbnail({ look: packLook(await projectPack(project)), framePath: framePaths(thumbDir(project), pkg.frame).full, faceX: pkg.faces?.[pkg.frame], lines: pkg.lines, label: pkg.label, badges: pkg.badges, outputPath: output, chromeBin: await detectChromeBin(), workDir: project.workDir });
   if (pkg.thumbnailPath && pkg.thumbnailPath !== output) await fs.rm(pkg.thumbnailPath, { force: true }).catch(() => undefined);
   pkg.thumbnailPath = output; pkg.thumbnailDownloadUrl = downloadUrlFor(project, output);
   pkg.thumbnailUrl = pkg.thumbnailDownloadUrl ? `${pkg.thumbnailDownloadUrl}?inline=1` : undefined;
@@ -2373,11 +2400,20 @@ app.post('/api/projects/:id/auto/effects', route(async (req, res) => {
   if (!settings.ffmpegBin || !python) throw new Error('FFmpeg or Python was not found');
   effectsRuns.add(project.id); res.status(202).json({ ok: true });
   const previous = [job.outputPath, previewPathFor(job.outputPath)];
-  const duration = job.finalSeconds; const replan = req.body?.replan !== false; const recaption = req.body?.captions === true;
+  const duration = job.finalSeconds; const replan = req.body?.replan !== false; const recaption = req.body?.captions === true; const makeCover = req.body?.cover === true;
   void runWithUsage(await projectUsageContext(project), async () => {
     const started = Date.now(); const log = (detail: string) => console.log(`[effects ${project.id}] ${detail}`);
     try {
       const scenes = brollScenesIn(await loadBrollPlan(project.workDir));
+      if (makeCover) { // design the cover in ChatGPT (from the clinic's example posts and logo), then add it to the end
+        const request = await coverRequestForReel(project);
+        if (!request) throw new Error('This clinic has no cover references yet (brands/<account>/cover-refs).');
+        log(`cover headline: ${request.prompt.split('\n').filter((line) => line.startsWith('  Line')).join(' / ')}`);
+        const made = await generateChatGptImages({ engine: picturesEngine(settings) as BrowserEngine, workDir: project.workDir, requests: [request], onLine: log });
+        if (!made.length) throw new Error(`ChatGPT made no cover: ${made.lastMessage.slice(0, 300)} (log: ${made.logPath})`);
+        await normalizeImage(request.outputPath, coverFile(project.workDir), '9:16', settings.ffmpegBin, true);
+        job.options.thumbnail = true;
+      }
       if (replan || !(await loadReelMotion(project.workDir))) await withTask('motion', () => planMotionForReel(project, job, scenes, duration));
       const release = await renderQueue.acquire(() => undefined, () => false);
       const captionFile = path.join(project.workDir, 'auto', 'captions-glass.txt');
@@ -2389,6 +2425,7 @@ app.post('/api/projects/:id/auto/effects', route(async (req, res) => {
       const captioned = await fs.stat(captionFile).then(() => true, () => false);
       try { await withTask('compose', () => composeReel(project, job, { python, ffmpegBin: settings.ffmpegBin!, scenes, duration, captioned, note: log })); }
       finally { release(); }
+      if (makeCover && job.package) await renderPackageThumbnail(project, job.package, { preferCover: true }).catch((error) => console.error(`[effects ${project.id}] thumbnail:`, error));
       await persistAutoJob(project, job);
       for (const file of previous) if (file !== job.outputPath && file !== previewPathFor(job.outputPath!)) await fs.rm(file, { force: true });
       log(`done in ${Math.round((Date.now() - started) / 1000)} s → ${job.outputPath}`);
@@ -2401,7 +2438,7 @@ app.post('/api/projects/:id/auto/sound', route(async (req, res) => {
   requireAdmin(res); const project = getProject(routeParam(req.params.id)); const job = await loadAutoJob(project);
   if (!job || job.state !== 'completed' || !job.outputPath || !job.finalSeconds) return void res.status(409).json({ error: 'The reel is not finished yet.' });
   const settings = await resolvedSettings(); if (!settings.ffmpegBin) throw new Error('FFmpeg was not found');
-  res.json(await soundForReel(project, settings.ffmpegBin, job.finalSeconds, job.outputPath));
+  res.json(await soundForReel(project, settings.ffmpegBin, job.finalSeconds + (job.coverSeconds ?? 0), job.outputPath));
 }));
 app.get('/api/projects/:id/auto/frames/:n', route(async (req, res) => {
   const project = getProject(routeParam(req.params.id)); const n = Number(routeParam(req.params.n));

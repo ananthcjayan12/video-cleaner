@@ -1,4 +1,4 @@
-import { DEFAULT_PICTURES_ENGINE, generateChatGptImages } from './chatgpt-images.js';
+import { DEFAULT_PICTURES_ENGINE, generateChatGptImages, type ChatGptImageRequest } from './chatgpt-images.js';
 import { colorVideoFilter, type ColorProfile } from './color.js';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -537,7 +537,7 @@ async function failSceneImageGeneration(workDir: string, plan: BrollPlan, scene:
   await saveBrollPlan(workDir, plan);
 }
 
-async function normalizeImage(rawPath: string, outputPath: string, aspect: '9:16' | '16:9', ffmpegBin?: string, removeSource = true) {
+export async function normalizeImage(rawPath: string, outputPath: string, aspect: '9:16' | '16:9', ffmpegBin?: string, removeSource = true) {
   if (!ffmpegBin) { await fs.copyFile(rawPath, outputPath); if (removeSource && rawPath !== outputPath) await fs.rm(rawPath, { force: true }); return; }
   const filter = aspect === '9:16' ? 'scale=1080:1920:force_original_aspect_ratio=increase:flags=lanczos,crop=1080:1920' : 'scale=1920:1080:force_original_aspect_ratio=increase:flags=lanczos,crop=1920:1080';
   await run(ffmpegBin, ['-hide_banner', '-loglevel', 'error', '-y', '-i', rawPath, '-vf', filter, '-frames:v', '1', outputPath], undefined, 120000); if (removeSource && rawPath !== outputPath) await fs.rm(rawPath, { force: true });
@@ -1070,13 +1070,14 @@ ${metaVisualGuidelinesPrompt()}`,
  * ChatGPT-in-Chrome images for several scenes in one Claude session (much faster than one session per picture).
  * Scenes whose file did not appear are marked failed; the others are normalised and marked ready.
  */
-export async function generateBrollImagesWithChatGpt(options: { config: ImageProviderConfig; workDir: string; plan: BrollPlan; sceneIds: string[]; regenerationComment?: string; onLine?: (text: string) => void; signal?: AbortSignal }) {
+/** `extra` pictures (the reel cover) are made in the same ChatGPT chat; `onExtra` gets the ones whose files exist. */
+export async function generateBrollImagesWithChatGpt(options: { config: ImageProviderConfig; workDir: string; plan: BrollPlan; sceneIds: string[]; regenerationComment?: string; onLine?: (text: string) => void; signal?: AbortSignal; extra?: ChatGptImageRequest[]; onExtra?: (made: ChatGptImageRequest[]) => void }) {
   const { config, workDir, plan } = options;
   assertImageEngineAllowed('chatgpt-browser');
   const engine = config.picturesEngine ?? { ...DEFAULT_PICTURES_ENGINE, claudeBin: config.claudeBin, codexBin: config.codexBin };
   const brollDir = path.join(workDir, 'broll'); await fs.mkdir(brollDir, { recursive: true });
   const scenes = options.sceneIds.map((id) => plan.scenes.find((scene) => scene.id === id)).filter((scene): scene is BrollScene => Boolean(scene));
-  const requests = [];
+  const requests: ChatGptImageRequest[] = [];
   for (const scene of scenes) {
     assertMetaVisualCompliant('image prompt', `${scene.imagePrompt}\n${options.regenerationComment ?? ''}`);
     const aspect = resolveSceneAssetAspect(plan, scene);
@@ -1084,6 +1085,7 @@ export async function generateBrollImagesWithChatGpt(options: { config: ImagePro
     await fs.rm(path.join(brollDir, `${scene.id}.raw.png`), { force: true });
     await beginSceneImageGeneration(workDir, plan, scene);
   }
+  for (const extra of options.extra ?? []) { await fs.rm(extra.outputPath, { force: true }); requests.push(extra); }
   let madeIds = new Set<string>();
   try {
     let made = await generateChatGptImages({ engine, workDir, requests, onLine: options.onLine, signal: options.signal });
@@ -1095,6 +1097,8 @@ export async function generateBrollImagesWithChatGpt(options: { config: ImagePro
       made = Object.assign([...made, ...retry], { lastMessage: retry.lastMessage, logPath: retry.logPath });
     }
     madeIds = new Set(made.map((r) => r.id));
+    const extraIds = new Set((options.extra ?? []).map((r) => r.id));
+    if (extraIds.size) options.onExtra?.(made.filter((r) => extraIds.has(r.id)));
     if (made.length) await recordUsage({ kind: 'image', provider: 'chatgpt-browser', model: 'ChatGPT', images: made.length });
     if (!made.length) throw new Error(`ChatGPT made no pictures. Last message: ${made.lastMessage.slice(0, 300) || '(none)'} (log: ${made.logPath})`);
   } finally {

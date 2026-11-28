@@ -19,6 +19,8 @@ export type AutoStageId = 'audio' | 'transcribe' | 'clean' | 'review' | 'broll-p
 export type AutoStage = { id: AutoStageId; label: string; state: 'pending' | 'running' | 'done' | 'skipped' | 'failed'; detail?: string; seconds?: number };
 export type AutoJob = {
   state: 'running' | 'review' | 'completed' | 'failed' | 'stopped'; stages: AutoStage[]; startedAt: number; finishedAt?: number;
+  /** Seconds of cover still at the end of the finished reel (0 or absent: none). */
+  coverSeconds?: number;
   /** While state is "review": the transcript and the current keep decision for the review screen. */
   review?: { words: Array<{ id: string; text: string; start: number; end: number }>; keepRanges: KeepRange[]; keptSeconds: number; sourceSeconds: number; notes?: string; redoing?: boolean; flags?: import('./claims.js').ClaimFlag[] };
   /** Set while waiting for another reel to finish rendering (this machine renders one at a time). */

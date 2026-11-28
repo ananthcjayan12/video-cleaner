@@ -4,7 +4,7 @@
   dissolve in/out and a quiet whoosh (-18 dB) just before each.
 - Glass card: blur the frame under the caption band and show it only where the caption layer is opaque
   (card shape), then lay the card tint, border and text on top.
-Usage: python3 -I auto_composite.py <base.mp4> <broll-plan.json> <clips_dir> <captions.txt|caption.webm|-> <caption_y> <whoosh.wav|-> <out.mp4> <width> <height> [preview.mp4|-] [motion.json]
+Usage: python3 -I auto_composite.py <base.mp4> <broll-plan.json> <clips_dir> <captions.txt|caption.webm|-> <caption_y> <whoosh.wav|-> <out.mp4> <width> <height> [preview.mp4|-] [motion.json|-] [cover.png|-] [cover_seconds]
 - preview.mp4 (optional): a 720p ~2 Mbps copy for the phone, written in the same pass.
 - motion.json (optional): {"overlay": motion-layer concat .txt or null, "kicks": [t, ...], "shots": [[start, end], ...],
   "splits": [[start, end], ...], "splitBox": {"x", "y", "w", "h"}}
@@ -24,6 +24,9 @@ base, plan_path, clips, caption, cap_y, whoosh, out = sys.argv[1:8]
 W, H = int(sys.argv[8]), int(sys.argv[9])
 preview = sys.argv[10] if len(sys.argv) > 10 and sys.argv[10] != '-' else None
 motion = json.load(open(sys.argv[11])) if len(sys.argv) > 11 and sys.argv[11] != '-' else {}
+# Cover (Instagram thumbnail) shown as a still at the very end, so it can be picked as the cover frame when posting.
+cover = sys.argv[12] if len(sys.argv) > 12 and sys.argv[12] != '-' else None
+cover_s = float(sys.argv[13]) if len(sys.argv) > 13 else 1.0
 cap_y = int(cap_y)
 plan = json.load(open(plan_path))
 FADE = 0.12
@@ -135,6 +138,14 @@ for i, s in enumerate(plan['scenes'][:count]):
     filters.append(f"[w{i}]adelay={max(0, int((s['start'] - 0.1) * 1000))}:all=1[wd{i}]")
 filters.append('[0:a]aresample=48000[voice]')
 filters.append('[voice]' + ''.join(f'[wd{i}]' for i in range(count)) + f'amix=inputs={count + 1}:duration=first:normalize=0,alimiter=limit=0.95[aout]')
+if cover:
+    c_in = w_in + (1 if count else 0)
+    args += ['-loop', '1', '-framerate', '30', '-t', f'{cover_s:.3f}', '-i', cover]
+    filters += [f'[vout]setsar=1,fps=30,format=yuv420p[vbody]',
+                f'[{c_in}:v]scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,crop={W}:{H},setsar=1,fps=30,format=yuv420p[vcover]',
+                '[vbody][vcover]concat=n=2:v=1:a=0[vend]', f'[aout]apad=pad_dur={cover_s:.3f}[aend]']
+else:
+    filters += ['[vout]null[vend]', '[aout]anull[aend]']
 
 def encode(dev):
     """One pass: the full-quality reel, plus the phone preview when asked. dev = VAAPI node or None (x264)."""
@@ -142,10 +153,10 @@ def encode(dev):
     up = ',format=nv12,hwupload' if dev else ''
     pv_scale = 'scale=1280:-2' if W > H else 'scale=720:-2'
     if preview:
-        graph.append(f'[vout]split[vf0][vp0]'); graph.append(f'[vf0]null{up}[vfull]'); graph.append(f'[vp0]{pv_scale}:flags=bicubic,format=yuv420p{up}[vprev]')
-        graph.append('[aout]asplit[afull][aprev]')
+        graph.append(f'[vend]split[vf0][vp0]'); graph.append(f'[vf0]null{up}[vfull]'); graph.append(f'[vp0]{pv_scale}:flags=bicubic,format=yuv420p{up}[vprev]')
+        graph.append('[aend]asplit[afull][aprev]')
     else:
-        graph.append(f'[vout]null{up}[vfull]'); graph.append('[aout]anull[afull]')
+        graph.append(f'[vend]null{up}[vfull]'); graph.append('[aend]anull[afull]')
     full = ['-c:v', 'h264_vaapi', '-qp', '20'] if dev else ['-c:v', 'libx264', '-preset', 'superfast', '-crf', '20', '-pix_fmt', 'yuv420p']
     prev = (['-c:v', 'h264_vaapi', '-rc_mode', 'VBR', '-b:v', '1100k', '-maxrate', '2000k'] if dev
             else ['-c:v', 'libx264', '-preset', 'superfast', '-crf', '27', '-maxrate', '2500k', '-bufsize', '5000k', '-pix_fmt', 'yuv420p'])
